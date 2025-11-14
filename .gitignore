@@ -1,0 +1,13 @@
+samples/
+data/
+figures/
+runs/
+old_runs/
+samples/
+slurm/
+wandb/
+wandb_logs/
+lightning_logs/
+
+# ignore all __pycache__ directories no matter the depth of the directory
+**/__pycache__/
