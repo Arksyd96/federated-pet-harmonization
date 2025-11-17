@@ -103,7 +103,7 @@ def compute_decay_corrected_injected_activity(ds: pydicom.Dataset) -> tuple:
     details['TimeSinceInjection_s'] = delta_seconds
 
     # decay correction
-    decay_factor = math.exp(-math.log(2) * (delta_seconds / half_life))
+    decay_factor = np.exp(-np.log(2) * (delta_seconds / half_life))
     decayed_activity = injected * decay_factor
     details['decayed_activity_Bq'] = decay_factor
     return decayed_activity, details
@@ -134,7 +134,7 @@ def compute_suv_image(sitk_image: sitk.Image, dicom_filenames: list) -> tuple:
     metadata['RescaleIntercept'] = intercept
 
     # patient weight
-    patient_weight_kg = float(getattr(ds, 'PatientWeight', None))
+    patient_weight_kg = getattr(ds, 'PatientWeight', None)
     if patient_weight_kg is None:
         try:
             sfg = ds.SharedFunctionalGroupsSequence[0]
@@ -143,6 +143,7 @@ def compute_suv_image(sitk_image: sitk.Image, dicom_filenames: list) -> tuple:
             logging.warning('Patient weight not found in DICOM tags.')
             return None, metadata
         
+    patient_weight_kg = float(patient_weight_kg)
     metadata['PatientWeight_kg'] = patient_weight_kg
 
     # injected activity and half-life
@@ -257,7 +258,7 @@ def process_subjects_directory(root_path: str, out_root: str):
     if not os.path.exists(out):
         os.makedirs(out)
 
-    subjects_list = sorted(os.listdir(root))[612:] # debugging
+    subjects_list = sorted(os.listdir(root))[:] # debugging
 
     for idx, subject in enumerate(subjects_list):
         subject_path = os.path.join(root, subject)

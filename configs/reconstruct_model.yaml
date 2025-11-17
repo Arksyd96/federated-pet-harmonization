@@ -1,0 +1,58 @@
+# constants
+SEED: 101
+WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
+
+# modules state
+dir_name: runs/patch-reconstruction-model
+name: Reconstruction model (VariationalAutoencoder)
+
+datamodule:
+    data_dir: data/sequence_burdenko_256x256x48.npy
+    norm_sdf: false
+    as_probability_map: false # we train using binary masks
+    mu: 10.0
+    beta: 0.1
+    clip: 5.0e-2
+    batch_size: 8
+    train_ratio: null
+    shuffle: true
+    horizontal_flip: 0.5
+    vertical_flip: 0.5
+    rotation: [0, 360]
+
+
+model:
+    in_channels: 2
+    field_shape: 256
+    hidden_channels: 
+    - 64
+    - 128
+    - 256
+    - 512
+    attention: 
+    - none
+    - none
+    - none
+    - none
+    learning_rate: 1.0e-05
+    lambda_reg: 0.1
+
+# trainer state
+model_checkpoint:
+    monitor: val/loss
+    every_n_epochs: 20
+    save_last: true
+    save_top_k: 1
+    mode: min
+
+trainer:
+    strategy: ddp
+    devices: 1
+    num_nodes: 1
+    precision: 32
+    accelerator: gpu
+    enable_checkpointing: true
+    log_every_n_steps: 1
+    min_epochs: 100
+    max_epochs: 10000
+    check_val_every_n_epoch: 1
