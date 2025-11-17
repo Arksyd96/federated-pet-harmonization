@@ -27,6 +27,22 @@ def set_seed(seed: int, deterministic: bool = False):
 
     print(f"Seed set to {seed} with deterministic={deterministic}")
 
+def parse_dtype(dtype):
+    if dtype == "float16":
+        return torch.float16
+    elif dtype == "float32":
+        return torch.float32
+    elif dtype == "float64":
+        return torch.float64
+    elif dtype == "int16":
+        return torch.int16
+    elif dtype == "int32":
+        return torch.int32
+    elif dtype == "int64":
+        return torch.int64
+    else:
+        raise ValueError("Invalid dtype")
+
 def kl_gaussians(mean1, logvar1, mean2, logvar2):
     """ Compute the KL divergence between two gaussians."""
     return 0.5 * (logvar2-logvar1 + torch.exp(logvar1 - logvar2) + torch.pow(mean1 - mean2, 2) * torch.exp(-logvar2)-1.0)

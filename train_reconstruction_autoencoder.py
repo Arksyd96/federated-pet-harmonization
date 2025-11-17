@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime
 from omegaconf import OmegaConf
 
+import torch
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import wandb as wandb_logger
 from pytorch_lightning.trainer import Trainer
@@ -35,13 +36,13 @@ if __name__ == "__main__":
 
         # --------------- Logger --------------------
         logger = wandb_logger.WandbLogger(
-            project="cancer-outcome-prediction",
+            project=config['project_name'],
             name=config['name'],
             save_dir=config['save_dir'],
         )
 
     # datamodule
-    datamodule = BurdenkoSignedDistanceDataLoader(**config['datamodule'], dtype=torch.float32)
+    datamodule = FederatedPETDataLoader(**config['datamodule'], dtype=torch.float32)
 
     # Initialize model
     model = VariationalAutoencoder(**config['model'])

@@ -3,15 +3,12 @@ SEED: 101
 WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 # modules state
+project_name: federated-pet
 dir_name: runs/patch-reconstruction-model
 name: Reconstruction model (VariationalAutoencoder)
 
 datamodule:
-    data_dir: data/sequence_burdenko_256x256x48.npy
-    norm_sdf: false
-    as_probability_map: false # we train using binary masks
-    mu: 10.0
-    beta: 0.1
+    data_dir: ../datasets/EARL/Ano_Nifti
     clip: 5.0e-2
     batch_size: 8
     train_ratio: null
@@ -23,7 +20,6 @@ datamodule:
 
 model:
     in_channels: 2
-    field_shape: 256
     hidden_channels: 
     - 64
     - 128
