@@ -8,7 +8,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import wandb as wandb_logger
 from pytorch_lightning.trainer import Trainer
 
-from modules.data import FederatedPETDataLoader
+from modules.data import MIPDataModule
 from modules.models.autoencoders import VariationalAutoencoder
 from modules.utils import set_seed
 
@@ -20,6 +20,7 @@ if __name__ == "__main__":
 
     try:
         config = OmegaConf.load(args.config_file)
+        config = OmegaConf.to_container(config, resolve=True)
     except FileNotFoundError:
         raise FileNotFoundError(f"Config file not found at {args.config_file}")
     
@@ -42,7 +43,7 @@ if __name__ == "__main__":
         )
 
     # datamodule
-    datamodule = FederatedPETDataLoader(**config['datamodule'], dtype=torch.float32)
+    datamodule = MIPDataModule(**config['datamodule'])
 
     # Initialize model
     model = VariationalAutoencoder(**config['model'])

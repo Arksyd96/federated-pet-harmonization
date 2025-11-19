@@ -1,5 +1,4 @@
 from typing import Dict, Tuple, Union, Optional
-import math
 
 import numpy as np
 import torch
@@ -10,7 +9,7 @@ import wandb
 
 from .base import DownEncoderBlock2D, UpDecoderBlock2D, UNetMidBlock2D
 from modules.losses import LPIPS
-from .unet_blocks import (
+from .base import (
     BasicModel, UnetResBlock, UnetBasicBlock, DownBlock, BasicBlock, UpBlock
 )
 
@@ -744,41 +743,22 @@ class VariationalAutoencoder(BasicModel):
     
     def rec_loss(self, pred, target):        
         # compute reconstruction loss
-        perceptual_loss = self.perception_loss(pred, target) if self.use_perceptual_loss else 0
-        ssim_loss = self.ssim_loss(pred, target) if self.use_ssim_loss else 0
+        # perceptual_loss = self.perception_loss(pred, target) if self.use_perceptual_loss else 0
+        # ssim_loss = self.ssim_loss(pred, target) if self.use_ssim_loss else 0
         pixel_loss = self.loss_fct(pred, target)
 
-        loss = torch.mean(perceptual_loss + ssim_loss + pixel_loss)
+        # loss = torch.mean(perceptual_loss + ssim_loss + pixel_loss)
+        loss = torch.mean(pixel_loss)
 
         return loss
     
     @torch.no_grad()
     def process_input_batch(self, batch):
-        images, delta_ts, _ = batch
-
-        gtv = images[:, :-1:3] # [SDF1, SDF2, SDF3]
-        flair = images[:, 1:-1:3] # [FLAIR1, FLAIR2, FLAIR3]
-        t1ce = images[:, 2:-1:3] # [T1CE1, T1CE2, T1CE3]
-        
-        rtdose = images[:, -1, None] # RTDOSE
-
-        gtv[gtv == -1] = 0 # turn into 0 the -1 values introduced by the augmentation
-
-        ts_idx = np.random.randint(0, 3, size=(images.shape[0],))
-        ts_idx = torch.from_numpy(ts_idx).to(images.device)
-        
-        B = torch.arange(gtv.shape[0])
-        gtv, flair, t1ce = gtv[B, ts_idx, ...], flair[B, ts_idx, ...], t1ce[B, ts_idx, ...]
-        rtdose = rtdose[B, ts_idx, ...]
-        images = torch.cat([gtv, flair, t1ce, rtdose], dim=1)
-
-        return images
+        return batch['image'], batch['mean'], batch['std']
     
     def _step(self, batch, batch_idx, split, step):
-        # ------------------------- Get Source/Target ---------------------------
-        target = batch[0]
-        position = batch[1] if len(batch) > 1 else None
-        position = position.squeeze(1) if position is not None else None
+        target, mean, std = self.process_input_batch(batch)
+        mean, std = mean.reshape(-1, 1, 1, 1), std.reshape(-1, 1, 1, 1)
         
         if self.positional_embedder is None:
             position = None
@@ -786,44 +766,44 @@ class VariationalAutoencoder(BasicModel):
         # ------------------------- Run Model ---------------------------
         prediction, emb_loss = self.forward(target, position=position, return_kl=True)
 
-        # ------------------------- Compute Loss ---------------------------
+        # ------------------------- Compute Loss --------------------------
         loss = self.rec_loss(prediction, target)
         loss = loss + emb_loss.mean() * self.embedding_loss_weight
-         
-        # --------------------- Compute Metrics  -------------------------------
+
+        # --------------------- Compute Metrics -------------------------------
         with torch.no_grad():
             logging_dict = {'loss': loss, 'emb_loss': emb_loss.mean()}
             logging_dict['L2'] = torch.nn.functional.mse_loss(prediction, target)
             logging_dict['L1'] = torch.nn.functional.l1_loss(prediction, target)    
-            logging_dict['ssim'] = ssim((prediction + 1) / 2, (target.type(prediction.dtype) + 1) / 2, data_range=1)
+            # logging_dict['ssim'] = ssim((prediction + 1) / 2, (target.type(prediction.dtype) + 1) / 2, data_range=1)
 
         # ----------------- Log Scalars ----------------------
         for metric_name, metric_val in logging_dict.items():
-            self.log('{} - {}'.format(split, metric_name), metric_val, prog_bar=True,
-                on_step=True, on_epoch=True, sync_dist=True, logger=True
+            self.log('{}/{}'.format(split, metric_name), metric_val, prog_bar=True,
+                on_step=True, on_epoch=True, sync_dist=True, logger=True, batch_size=target.shape[0]
             )
 
         # -------------------------- Logging ---------------------------
         with torch.no_grad():
             if split == 'val' and (self._step_val + 1) % self.sample_every_n_steps == 0: 
-                self.log_reconstructions(target, prediction)
+                self.log_reconstructions(target, prediction, mean, std)
     
         return loss
 
     @torch.no_grad()    
-    def log_reconstructions(self, targets, predictions):
+    def log_reconstructions(self, targets, predictions, mean, std):
         if self.trainer.global_rank == 0:
             spatial_stack = lambda x: torch.cat([
                 torch.hstack([img for img in x[:, idx, ...]]) for idx in range(x.shape[1])
-            ], dim = 0)
+            ], dim = 0)   
 
-            # take only first sample and swap axes
-            if targets.ndim == 5:
-                targets, predictions = targets[0].permute(3, 0, 1, 2), predictions[0].permute(3, 0, 1, 2)    
-
+            targets, predictions = targets * std + mean, predictions * std + mean
             targets, predictions = spatial_stack(targets), spatial_stack(predictions)
             img = torch.cat([targets, predictions], dim=0)
-            img = img.add(1).div(2).mul(255).clamp(0, 255).to(torch.uint8)
+            
+            # min-max normalize
+            img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+            img = (img * 255).clamp(0, 255).to(torch.uint8)
 
             wandb.log({
                 'Reconstruction examples': wandb.Image(
