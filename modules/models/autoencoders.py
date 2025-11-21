@@ -735,10 +735,9 @@ class VariationalAutoencoder(BasicModel):
             return self.perceiver(prediction, target) * self.perceptual_loss_weight
         return torch.FloatTensor([0.0])
     
-    def ssim_loss(self, pred, target):
+    def ssim_loss(self, pred, target): # must be in [0, 1]
         return 1 - ssim(
-            ((pred + 1) / 2).clamp(0, 1), 
-            (target.type(pred.dtype) + 1) / 2, data_range=1, size_average=False, nonnegative_ssim=True
+            pred, target, data_range=1, size_average=False, nonnegative_ssim=True
         ).reshape(-1, *(1,) * (pred.ndim - 1))
     
     def rec_loss(self, pred, target):        
@@ -746,10 +745,7 @@ class VariationalAutoencoder(BasicModel):
         # perceptual_loss = self.perception_loss(pred, target) if self.use_perceptual_loss else 0
         # ssim_loss = self.ssim_loss(pred, target) if self.use_ssim_loss else 0
         pixel_loss = self.loss_fct(pred, target)
-
-        # loss = torch.mean(perceptual_loss + ssim_loss + pixel_loss)
         loss = torch.mean(pixel_loss)
-
         return loss
     
     @torch.no_grad()
@@ -775,7 +771,7 @@ class VariationalAutoencoder(BasicModel):
             logging_dict = {'loss': loss, 'emb_loss': emb_loss.mean()}
             logging_dict['L2'] = torch.nn.functional.mse_loss(prediction, target)
             logging_dict['L1'] = torch.nn.functional.l1_loss(prediction, target)    
-            # logging_dict['ssim'] = ssim((prediction + 1) / 2, (target.type(prediction.dtype) + 1) / 2, data_range=1)
+            # logging_dict['ssim'] = ssim(npred, ntarget, data_range=1)
 
         # ----------------- Log Scalars ----------------------
         for metric_name, metric_val in logging_dict.items():

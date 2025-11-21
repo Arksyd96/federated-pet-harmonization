@@ -4,18 +4,18 @@ WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 # modules state
 project_name: federated-pet
-dir_name: runs/patch-reconstruction-model
-name: Reconstruction model (VariationalAutoencoder)
+dir_name: runs/patch-reconstruction-model-64x64
+name: Reconstruction model 64x64 (VariationalAutoencoder)
 
 datamodule:
     root: ../datasets/EARL/Ano_Nifti/
     pattern: PT_TEPTAPAC_Ano_MIP
-    train_ratio: 0.9
+    train_ratio: 0.95
     batch_size: 32
-    num_workers: 16
+    num_workers: 32
     shuffle: true
     verbose: true
-    random_crop_size: [128, 128]
+    random_crop_size: [64, 64]
     horizontal_flip: 0.5
     vertical_flip: 0.5
 
@@ -23,7 +23,7 @@ model:
     in_channels: 1
     out_channels: 1
     spatial_dims: 2
-    emb_channels: 4
+    emb_channels: 8
     hid_chs: [64, 128, 256, 512]
     kernel_sizes: [3, 3, 3, 3]
     strides: [1, 2, 2, 2]
@@ -36,13 +36,13 @@ model:
     deep_supervision: false
     learnable_interpolation: true
     use_attention: none
-    embedding_loss_weight: 1e-6
+    embedding_loss_weight: 3e-7
     perceiver_kwargs: {}
     perceptual_loss_weight: 1.0
     optimizer_kwargs: {lr: 1e-5}
     lr_scheduler: null
     lr_scheduler_kwargs: {}
-    use_ssim_loss: false
+    use_ssim_loss: true
     use_perceptual_loss: false
     sample_every_n_steps: 50
 
@@ -60,5 +60,5 @@ trainer:
     enable_checkpointing: true
     log_every_n_steps: 1
     min_epochs: 100
-    max_epochs: 15000
+    max_epochs: 30000
     check_val_every_n_epoch: 1
