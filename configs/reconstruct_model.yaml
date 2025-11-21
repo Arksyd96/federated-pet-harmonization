@@ -8,7 +8,7 @@ dir_name: runs/patch-reconstruction-model
 name: Reconstruction model (VariationalAutoencoder)
 
 datamodule:
-    root: ./data/federated-pet/Ano_Nifti/
+    root: ../datasets/EARL/Ano_Nifti/
     pattern: PT_TEPTAPAC_Ano_MIP
     train_ratio: 0.9
     batch_size: 32
@@ -60,5 +60,5 @@ trainer:
     enable_checkpointing: true
     log_every_n_steps: 1
     min_epochs: 100
-    max_epochs: 1000
+    max_epochs: 15000
     check_val_every_n_epoch: 1
