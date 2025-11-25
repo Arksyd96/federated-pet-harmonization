@@ -1,0 +1,45 @@
+# Configuration PyRadiomics pour PET (18F-FDG)
+# Basé sur les recommandations IBSI
+
+imageType:
+  Original: {}
+  # Décommenter ci-dessous pour inclure les filtres (attention au temps de calcul)
+  # LoG:
+  #   sigma: [1.0, 3.0, 5.0]
+  # Wavelet: {}
+
+featureClass:
+  # Activer toutes les classes standards
+  shape:
+  firstorder:
+  glcm:
+  glrlm:
+  glszm:
+  gldm:
+  ngtdm:
+
+setting:
+  # --- DISCRÉTISATION (CRITIQUE) ---
+  # Pour le PET en SUV, on utilise une largeur de bin fixe.
+  # Valeurs recommandées : 0.25 ou 0.5 (SUV units)
+  binWidth: 0.25
+  
+  # --- GÉOMÉTRIE & MASQUES ---
+  # Tolérance pour les petites différences de grille entre masque et image
+  geometryTolerance: 0.0001
+  
+  # Si le masque a été dessiné sur un CT et que le PET a une résolution différente,
+  # 'correctMask' permet de redimensionner le masque à la volée.
+  correctMask: True
+  
+  # --- RÉÉCHANTILLONNAGE (RESAMPLING) ---
+  # Fortement recommandé pour rendre les textures invariantes à la rotation
+  # et gérer l'anisotropie des voxels (souvent le cas en PET clinique).
+  # On force des voxels cubiques (isotropes).
+  interpolator: 'sitkBSpline'
+  resampledPixelSpacing: [2.0, 2.0, 2.0] # En mm. 2x2x2 est standard pour le PET corps entier.
+  padDistance: 10 # Marge de sécurité lors du crop
+
+  # --- DIVERS ---
+  label: 1
+  distances: [1] # Pour GLCM, regarde les voisins immédiats (standard)
