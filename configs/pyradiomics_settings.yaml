@@ -26,7 +26,7 @@ setting:
   
   # --- GÉOMÉTRIE & MASQUES ---
   # Tolérance pour les petites différences de grille entre masque et image
-  geometryTolerance: 0.0001
+  geometryTolerance: 0.00001
   
   # Si le masque a été dessiné sur un CT et que le PET a une résolution différente,
   # 'correctMask' permet de redimensionner le masque à la volée.
