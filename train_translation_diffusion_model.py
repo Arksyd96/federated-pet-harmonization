@@ -47,6 +47,7 @@ def main(args):
             config=config
         )
     else:
+        save_dir = "./runs/temporary/"
         logger.info("Mode DEBUG activé : Aucune sauvegarde sur disque.")
 
     # 3. DataModule & Modèles
@@ -73,24 +74,19 @@ def main(args):
     # On met toujours ces callbacks utilitaires
     callbacks = [
         # RichProgressBar(),
-        LearningRateMonitor(logging_interval='step')
-    ]
-
-    # On ajoute le Checkpoint UNIQUEMENT si on n'est PAS en debug
-    if not config.get('DEBUG'):
-        checkpoint_callback = ModelCheckpoint(
-            dirpath=os.path.join(save_dir, "checkpoints"),
+        LearningRateMonitor(logging_interval='step'), 
+        ModelCheckpoint(
+            dirpath=os.path.join(save_dir, "./checkpoints"),
             filename="{epoch:02d}",
             **config.get('model_checkpoint', {})
         )
-        callbacks.append(checkpoint_callback)
+    ]
 
     # 5. Trainer
     trainer = Trainer(
-        logger=wb_logger,
+        logger=wb_logger if not config.get('DEBUG') else False,
         default_root_dir=save_dir, # Sera None en debug (utilise /tmp ou courant sans écrire)
         callbacks=callbacks,
-        enable_checkpointing=not config.get('DEBUG'), # Désactive le checkpointing en debug
         **config.get('trainer', {})
     )
 

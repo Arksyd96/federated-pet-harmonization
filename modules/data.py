@@ -401,7 +401,7 @@ class PETTranslationDataModule(LightningDataModule):
             Orientationd(keys=["source", "target"], axcodes="RAS"),
             
             # Resampling isotrope (Source et Target restent alignées)
-            Spacingd(keys=["source", "target"], pixdim=self.spacing, mode=("bilinear", "bilinear")),
+            # Spacingd(keys=["source", "target"], pixdim=self.spacing, mode=("bilinear", "bilinear")),
             
             # NOTRE NORMALISATION CUSTOM (Déterministe -> Sera cachée)
             # JointZScoreNormalize(keys=["source", "target"], source_key="source", ignore_zeros=True),
