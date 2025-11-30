@@ -66,7 +66,6 @@ class MultiLayerPerceptron(nn.Module):
 class UNet(nn.Module):
     def __init__(
         self,
-        sample_size: Union[Tuple[int, int], int] = 128,
         in_ch: int = 1,
         out_ch: int = 1,
         spatial_dims: int = 3,
@@ -105,7 +104,6 @@ class UNet(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.in_channels = in_ch
         self.out_channels = out_ch
-        self.sample_size = sample_size
 
         # ------------- Time-Embedder-----------
         self.time_embedder = None

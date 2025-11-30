@@ -10,6 +10,20 @@ import torchvision.transforms as T
 from pytorch_lightning import LightningDataModule
 import nibabel as nib
 from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader
+from monai.transforms import (
+    Compose,
+    LoadImaged,
+    EnsureChannelFirstd,
+    Orientationd,
+    Spacingd,
+    RandSpatialCropd,
+    RandFlipd,
+    RandRotate90d,
+    ToTensord,
+    MapTransform
+)
+from monai.data import CacheDataset, list_data_collate
 
 
 class IdentityDataset(torch.utils.data.Dataset):
@@ -235,5 +249,232 @@ class MIPDataModule(LightningDataModule):
         )
 
 
+# EFFICIENT DATAMODULE FOR PET/EARL TRANSLATION TASK USING MONAI
 
+# --- 1. TRANSFORMATION CUSTOM POUR LA NORMALISATION CONJOINTE ---
+class JointZScoreNormalize(MapTransform):
+    """
+    Calcule Mean/Std sur l'image 'source_key' uniquement (en ignorant les zéros si demandé).
+    Applique (X - mean) / std sur TOUTES les images (source et target).
+    Sauvegarde mean et std dans le dictionnaire pour la reconstruction.
+    """
+    def __init__(self, keys, source_key="source", ignore_zeros=True, eps=1e-8, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.source_key = source_key
+        self.ignore_zeros = ignore_zeros
+        self.eps = eps
+
+    def __call__(self, data):
+        d = dict(data)
+        
+        # 1. Récupération de l'image source
+        img = d[self.source_key] # Ceci est un Tensor ou un Numpy array
+        
+        # 2. Calcul des stats sur la SOURCE uniquement
+        if self.ignore_zeros:
+            # Masque pour ne pas prendre en compte le fond noir infini dans la moyenne
+            # Cela évite d'avoir une moyenne proche de 0 et un std énorme
+            mask = img > 0
+            if mask.sum() > 0:
+                mean = img[mask].mean().item()
+                std = img[mask].std().item()
+            else:
+                # Fallback si l'image est vide (rare)
+                mean = 0.0
+                std = 1.0
+        else:
+            mean = img.mean().item()
+            std = img.std().item()
+            
+        # Sécurité
+        std = max(std, self.eps)
+
+        # 3. Sauvegarde des métadonnées (Important pour votre reconstruction !)
+        # On les stocke sous forme de float simple pour l'instant
+        d["norm_mean"] = np.array([mean], dtype=np.float32)
+        d["norm_std"] = np.array([std], dtype=np.float32)
+
+        # 4. Application de la normalisation (Même mu/sigma pour tout le monde)
+        for key in self.key_iterator(d):
+            d[key] = (d[key] - mean) / std
+
+        return d
+    
+
+class MinMaxPercentileNormalize(MapTransform):
+    def __init__(self, keys, source_key="source", percentile=99.5, min_max_suv=3.0, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.source_key = source_key
+        self.percentile = percentile
+        self.min_max_suv = min_max_suv # Sécurité pour les patients très faibles
+
+    def __call__(self, data):
+        d = dict(data)
+        img = d[self.source_key] # Image Source (Standard)
+        
+        mask = img > 0
+        if mask.sum() > 0:
+            valid_voxels = img[mask]
+            robust_max = np.percentile(valid_voxels, self.percentile)
+        else:
+            robust_max = 1.0
+
+        final_max = max(robust_max, self.min_max_suv)
+        d["norm_max"] = np.array([final_max], dtype=np.float32)
+
+        for key in self.key_iterator(d):
+            x = d[key]
+            
+            if isinstance(x, np.ndarray):
+                x_clipped = np.clip(x, 0, final_max)
+            else:
+                x_clipped = x.clamp(0, final_max)
+            
+            d[key] = (x_clipped / final_max) * 2.0 - 1.0
+
+        return d
+
+# --- 2. LE LIGHTNING DATA MODULE ---
+class PETTranslationDataModule(LightningDataModule):
+    def __init__(
+        self, 
+        root_dir: str, 
+        batch_size: int = 4, 
+        train_ratio: float = 0.8,
+        patch_size: tuple = (64, 64, 64),
+        spacing: tuple = (2.0, 2.0, 2.0), # Resampling isotrope recommandé
+        num_workers: int = 8,             # Augmentez si vous avez bcp de coeurs
+        cache_rate: float = 1.0           # 1.0 = Charge tout le dataset en RAM
+    ):
+        super().__init__()
+        self.root_dir = root_dir
+        self.batch_size = batch_size
+        self.train_ratio = train_ratio
+        self.patch_size = patch_size
+        self.spacing = spacing
+        self.num_workers = num_workers
+        self.cache_rate = cache_rate
+
+    # à définir selon l'arborescence de vos données
+    def get_pt_earl_file_pairs(self, files: List[str]) -> List[Dict[str, str]]:
+        # Adaptez ces filtres à vos noms de fichiers exacts
+        files = [f for f in files if f.endswith('.nii') or f.endswith('.nii.gz') and 'MIP' not in f]
+        pt_files = [f for f in files if f.startswith('PT') and 'EARL' not in f]
+        earl_files = [f for f in files if f.startswith('PT') and 'EARL' in f]
+        return pt_files[0], earl_files[0]
+
+    def setup(self, stage=None):
+        # --- A. Listing des fichiers ---
+        data_dicts = []
+        subjects = sorted([d for d in os.listdir(self.root_dir) if os.path.isdir(os.path.join(self.root_dir, d))])
+        
+        for subj in subjects:
+            subj_path = os.path.join(self.root_dir, subj)
+            files = os.listdir(subj_path)
+            pt_file, earl_file = self.get_pt_earl_file_pairs(files)
+            
+            if pt_file and earl_file:
+                data_dicts.append({
+                    "source": os.path.join(subj_path, pt_file),
+                    "target": os.path.join(subj_path, earl_file),
+                    "subject_id": subj # Toujours utile pour le debug
+                })
+        
+        # Split Train/Val (80/20)
+        np.random.shuffle(data_dicts) # Mélange avant split
+        split_idx = int(len(data_dicts) * self.train_ratio)
+        train_files, val_files = data_dicts[:split_idx], data_dicts[split_idx:]
+        
+        print(f"[DataModule] Setup complet. Train: {len(train_files)} | Val: {len(val_files)}")
+        print(f"[DataModule] Cache Rate: {self.cache_rate} (RAM usage estimé ~130Go pour 1000 patients)")
+
+        # --- B. Pipelines de Transformation ---
+        
+        # NOTE IMPORTANTE SUR LE CACHING :
+        # CacheDataset va exécuter les transformations JUSQU'À la première transformation aléatoire (Rand*).
+        # C'est pourquoi nous mettons le chargement, le resampling et la normalisation AVANT le crop.
+        # Ainsi, le volume en RAM sera déjà propre et normalisé Z-Score.
+        
+        self.train_transforms = Compose([
+            LoadImaged(keys=["source", "target"]),
+            EnsureChannelFirstd(keys=["source", "target"]),
+            Orientationd(keys=["source", "target"], axcodes="RAS"),
+            
+            # Resampling isotrope (Source et Target restent alignées)
+            Spacingd(keys=["source", "target"], pixdim=self.spacing, mode=("bilinear", "bilinear")),
+            
+            # NOTRE NORMALISATION CUSTOM (Déterministe -> Sera cachée)
+            # JointZScoreNormalize(keys=["source", "target"], source_key="source", ignore_zeros=True),
+            MinMaxPercentileNormalize(keys=["source", "target"], source_key="source", percentile=99.5, min_max_suv=3.0),
+            
+            # --- À partir d'ici, transformations ALÉATOIRES (Calculées à la volée sur le CPU) ---
+            
+            # Crop 3D synchronisé sur source et target
+            RandSpatialCropd(
+                keys=["source", "target"], 
+                roi_size=self.patch_size, 
+                random_center=True, 
+                random_size=False
+            ),
+            
+            # Data Augmentation géométrique
+            RandFlipd(keys=["source", "target"], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=["source", "target"], prob=0.5, spatial_axis=1),
+            RandFlipd(keys=["source", "target"], prob=0.5, spatial_axis=2),
+            RandRotate90d(keys=["source", "target"], prob=0.5, max_k=3),
+            
+            # Conversion finale
+            # Notez qu'on inclut "norm_mean" et "norm_std" pour qu'ils deviennent des Tensors dans le batch
+            ToTensord(keys=["source", "target", "norm_max"]),
+        ])
+
+        self.val_transforms = Compose([
+            LoadImaged(keys=["source", "target"]),
+            EnsureChannelFirstd(keys=["source", "target"]),
+            Orientationd(keys=["source", "target"], axcodes="RAS"),
+            Spacingd(keys=["source", "target"], pixdim=self.spacing, mode=("bilinear", "bilinear")),
+            JointZScoreNormalize(keys=["source", "target"], source_key="source", ignore_zeros=True),
+            
+            # En validation, on crop aussi (ou on utilise SlidingWindowInferer dans le modèle)
+            RandSpatialCropd(keys=["source", "target"], roi_size=self.patch_size, random_center=True, random_size=False),
+            
+            ToTensord(keys=["source", "target", "norm_mean", "norm_std"]),
+        ])
+
+        # --- C. Création des Datasets avec Cache ---
+        self.train_ds = CacheDataset(
+            data=train_files, 
+            transform=self.train_transforms, 
+            cache_rate=self.cache_rate, 
+            num_workers=self.num_workers
+        )
+        
+        self.val_ds = CacheDataset(
+            data=val_files, 
+            transform=self.val_transforms, 
+            cache_rate=self.cache_rate, 
+            num_workers=self.num_workers
+        )
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_ds, 
+            batch_size=self.batch_size, 
+            shuffle=True, 
+            num_workers=self.num_workers,
+            collate_fn=list_data_collate, # Obligatoire pour MONAI (gère les dicts)
+            pin_memory=True,
+            persistent_workers=True if self.num_workers > 0 else False
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_ds, 
+            batch_size=self.batch_size, 
+            shuffle=False, 
+            num_workers=self.num_workers,
+            collate_fn=list_data_collate,
+            pin_memory=True,
+            persistent_workers=True if self.num_workers > 0 else False
+        )  
 

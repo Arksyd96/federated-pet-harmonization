@@ -1,95 +1,111 @@
 import argparse
-import importlib
 import os
+import logging
 from datetime import datetime
 from omegaconf import OmegaConf
 
-import torch
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import wandb as wandb_logger
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, RichProgressBar
+from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer import Trainer
 
-from modules.data import PETToEARLDataLoader
+from modules.data import PETTranslationDataModule
 from modules.diffusion import TranslationDiffusionPipeline
 from modules.models.unet import UNet
 from modules.scheduler import GaussianNoiseScheduler
 from modules.utils import set_seed
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-c", "--config-file", type=str, default=None, required=True)
-    parser.add_argument("-d", "--debug", action="store_true")
-    parser.add_argument("-r", "--resume-checkpoint", type=str, default=None)
-    args = parser.parse_args()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-    try:
-        config = OmegaConf.load(args.config_file)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Config file not found at {args.config_file}")
+def main(args):
+    # 1. Configuration
+    config = OmegaConf.load(args.config_file)
+    config = OmegaConf.to_container(config, resolve=True)
 
     config['DEBUG'] = args.debug
-    set_seed(config['SEED'], deterministic=False)
+    if args.resume_checkpoint:
+        config['ckpt_path'] = args.resume_checkpoint
 
-    os.environ["WANDB_API_KEY"] = config['WANDB_API_KEY']
+    set_seed(config.get('SEED', 42), workers=True)
 
-    if not config['DEBUG']:
-        # --------------- Settings --------------------
+    # 2. Gestion des Dossiers et Logger
+    save_dir = None
+    wb_logger = None
+
+    if not config.get('DEBUG'):
         current_time = datetime.now().strftime("%Y_%m_%d_%H%M%S")
-        config['save_dir'] = os.path.join(os.path.curdir, config['dir_name'], str(current_time))
-        os.makedirs(config['save_dir'], exist_ok=True)
-
-        # --------------- Logger --------------------
-        logger = wandb_logger.WandbLogger(
-            project="cancer-outcome-prediction",
-            name=config['name'],
-            save_dir=config['save_dir'],
-        )
-
-    # datamodule
-    datamodule = BurdenkoSignedDistanceDataLoader(**config['datamodule'], dtype=torch.float32)
-
-    # --------------- Denoiser --------------------
-    denoiser = UNet(
-        cond_embedder=BurdenkoClinicalEmbedder(embed_dim=config['denoiser']['embed_dim'], 
-                                               max_period=config['denoiser']['max_cond_period']),
-        **config['denoiser']
-    )
-    
-    # --------------- Diffusion Pipeline --------------------
-    noise_scheduler = GaussianNoiseScheduler(**config['scheduler'])
-
-    if args.resume_checkpoint is None:
-        diffuser = SequenceDiffusionPipeline(
-            noise_scheduler = noise_scheduler,
-            noise_estimator = denoiser,
-            **config['diffuser']
+        save_dir = os.path.join(os.path.curdir, config.get('dir_name'), str(current_time))
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Sauvegarde de la config
+        OmegaConf.save(config, os.path.join(save_dir, "config.yaml"))
+        
+        wb_logger = WandbLogger(
+            project=config.get('project_name'),
+            name=config.get('name'),
+            save_dir=save_dir,
+            config=config
         )
     else:
-        # Load the config from the checkpoint
-        config['diffuser']['resuming_from'] = args.resume_checkpoint
-        diffuser = SequenceDiffusionPipeline.load_from_checkpoint(
+        logger.info("Mode DEBUG activé : Aucune sauvegarde sur disque.")
+
+    # 3. DataModule & Modèles
+    datamodule = PETTranslationDataModule(**config.get('datamodule', {}))
+    denoiser = UNet(cond_embedder=None, **config.get('denoiser', {}))
+    noise_scheduler = GaussianNoiseScheduler(**config.get('scheduler', {}))
+
+    if args.resume_checkpoint:
+        logger.info(f"Reprise depuis : {args.resume_checkpoint}")
+        diffuser = TranslationDiffusionPipeline.load_from_checkpoint(
             args.resume_checkpoint,
-            noise_scheduler = noise_scheduler,
-            noise_estimator = denoiser,
-            **config['diffuser']
+            noise_estimator=denoiser,
+            noise_scheduler=noise_scheduler,
+            strict=False
+        )
+    else:
+        diffuser = TranslationDiffusionPipeline(
+            noise_estimator=denoiser,
+            noise_scheduler=noise_scheduler,
+            **config.get('diffuser', {})
         )
 
-    # -------------- Training Initialization ---------------
-    config['model_checkpoint']["dirpath"] = config['save_dir'] if not config['DEBUG'] else "./runs/temporary/"
-    checkpointing = ModelCheckpoint(**config['model_checkpoint'])
+    # 4. Callbacks
+    # On met toujours ces callbacks utilitaires
+    callbacks = [
+        # RichProgressBar(),
+        LearningRateMonitor(logging_interval='step')
+    ]
 
-    # --------------- Trainer --------------------
-    config['trainer']['default_root_dir'] = config['save_dir'] if not config['DEBUG'] else "./"
+    # On ajoute le Checkpoint UNIQUEMENT si on n'est PAS en debug
+    if not config.get('DEBUG'):
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=os.path.join(save_dir, "checkpoints"),
+            filename="{epoch:02d}",
+            **config.get('model_checkpoint', {})
+        )
+        callbacks.append(checkpoint_callback)
+
+    # 5. Trainer
     trainer = Trainer(
-        logger = logger if not config['DEBUG'] else False,
-        **config['trainer'],
-        callbacks=[checkpointing]
+        logger=wb_logger,
+        default_root_dir=save_dir, # Sera None en debug (utilise /tmp ou courant sans écrire)
+        callbacks=callbacks,
+        enable_checkpointing=not config.get('DEBUG'), # Désactive le checkpointing en debug
+        **config.get('trainer', {})
     )
 
-    if not config['DEBUG']:
-        # --------------- Save Config --------------------
-        OmegaConf.save(config, f"{config['save_dir']}/config.yaml")
-    
-    # Modify trainer call
+    # 6. Lancement
+    logger.info("Lancement de l'entraînement 🚀")
     trainer.fit(diffuser, datamodule=datamodule)
 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--config-file", type=str, required=True)
+    parser.add_argument("-d", "--debug", action="store_true")
+    parser.add_argument("-r", "--resume-checkpoint", type=str, default=None)
+    
+    args = parser.parse_args()
+    if not os.path.exists(args.config_file):
+        raise FileNotFoundError(f"Config introuvable : {args.config_file}")
+
+    main(args)

@@ -69,7 +69,7 @@ class DiffusionPipeline(BasicModel):
         self.save_hyperparameters(ignore=['latent_embedder'])
 
     def _step(self, batch, batch_idx, state, step):
-        input, target, results = batch, {}
+        x_0, target, results = batch, {}
 
         if self.latent_embedder is not None:
             x_0 = self.latent_embedder.encode(x_0, None)
@@ -382,7 +382,6 @@ class TranslationDiffusionPipeline(BasicModel):
         self,
         noise_scheduler,
         noise_estimator,
-        common_feature_estimator,
         estimator_objective="x_T",  # 'x_T' or 'x_0'
         estimate_variance=False,
         use_self_conditioning=False,
@@ -402,7 +401,6 @@ class TranslationDiffusionPipeline(BasicModel):
         self.loss_fct = loss(**loss_kwargs)
         self.noise_scheduler = noise_scheduler
         self.noise_estimator = noise_estimator
-        self.common_feature_estimator = common_feature_estimator
         self.estimator_objective = estimator_objective
         self.use_self_conditioning = use_self_conditioning
         self.classifier_free_guidance_dropout = classifier_free_guidance_dropout
@@ -417,17 +415,16 @@ class TranslationDiffusionPipeline(BasicModel):
         self.save_hyperparameters()
 
     def _step(self, batch, batch_idx, state, step):
-        condition = None  # condition is made channel-wise
-        (masked_x_0, x_0), results = batch, {}
-        targets = torch.clone(x_0)
+        source, target, results = batch['source'], batch['target'], {}
 
         if self.clip_x0:
-            x_0 = torch.clamp(x_0, -1, 1)
+            target = torch.clamp(target, -1, 1)
 
         # Sample Noise
         with torch.no_grad():
             # Randomly selecting t [0, T-1] and compute x_t (noisy version of x_0 at t)
-            x_t, x_T, t = self.noise_scheduler.sample(x_0)
+            x_t, x_T, t = self.noise_scheduler.sample(torch.clone(target))
+            condition = source
 
         # Use EMA Model
         if self.use_ema and (state != "train"):
@@ -435,104 +432,58 @@ class TranslationDiffusionPipeline(BasicModel):
         else:
             noise_estimator = self.noise_estimator
 
-        # Re-estimate x_T or x_0, self-conditioned on previous estimate
-        self_cond = None
-        if self.use_self_conditioning:
-            with torch.no_grad():
-                pred, pred_vertical = noise_estimator(x_t, t, condition, None)
-                if self.estimate_variance:
-                    pred, _ = pred.chunk(
-                        2, dim=1
-                    )  # Seperate actual prediction and variance estimation
-                if self.estimator_objective == "x_T":  # self condition on x_0
-                    self_cond = self.noise_scheduler.estimate_x_0(
-                        x_t, pred, t=t, clip_x0=self.clip_x0
-                    )
-                elif self.estimator_objective == "x_0":  # self condition on x_T
-                    self_cond = self.noise_scheduler.estimate_x_T(
-                        x_t, pred, t=t, clip_x0=self.clip_x0
-                    )
-                else:
-                    raise NotImplementedError(
-                        f"Option estimator_target={self.estimator_objective} not supported."
-                    )
-
         # Classifier free guidance
         if torch.rand(1) <= self.classifier_free_guidance_dropout:
             condition = None
 
-        # Run Denoise: (1) predicting common feature map
-        masked_x_0_features = self.common_feature_estimator(
-            masked_x_0
-        )  # => one channel feature map
-        x_t = torch.cat(
-            [x_t, masked_x_0_features], dim=1
-        )  # condition is the second half of the tensor
-        pred = noise_estimator(x_t, t, condition)
-        pred_vertical = []
+        x_t = torch.cat([x_t, condition], dim=1)  # condition is the second half of the tensor
+        prediction = noise_estimator(x_t, t, condition)
 
         # Separate variance (scale) if it was learned
         if self.estimate_variance:
-            pred, pred_var = pred.chunk(
-                2, dim=1
-            )  # Separate actual prediction and variance estimation
+            prediction, variance = prediction.chunk(2, dim=1)
 
         # Specify target
         if self.estimator_objective == "x_T":
             target = x_T
         elif self.estimator_objective == "x_0":
-            target = x_0
+            target = target
         else:
-            raise NotImplementedError(
-                f"Option estimator_target={self.estimator_objective} not supported."
-            )
+            raise NotImplementedError(f"Option estimator_target={self.estimator_objective} not supported.")
 
         # ------------------------- Compute Loss ---------------------------
-        interpolation_mode = "area"
-        loss = 0
-        weights = [
-            1 / 2**i for i in range(1 + len(pred_vertical))
-        ]  # horizontal (equal) + vertical (reducing with every step down)
-        tot_weight = sum(weights)
-        weights = [w / tot_weight for w in weights]
-
-        # ----------------- MSE/L1, ... ----------------------
-        loss += self.loss_fct(pred, target) * weights[0]
+        loss = self.loss_fct(prediction, target)
 
         # ----------------- Variance Loss --------------
         if self.estimate_variance:
             # var_scale = var_scale.clamp(-1, 1) # Should not be necessary
-            var_scale = (pred_var + 1) / 2  # Assumed to be in [-1, 1] -> [0, 1]
-            pred_logvar = self.noise_scheduler.estimate_variance_t(
-                t, x_t.ndim, log=True, var_scale=var_scale
-            )
+            var_scale = (variance + 1) / 2  # Assumed to be in [-1, 1] -> [0, 1]
+            pred_logvar = self.noise_scheduler.estimate_variance_t(t, x_t.ndim, log=True, var_scale=var_scale)
             # pred_logvar = pred_var  # If variance is estimated directly
 
             if self.estimator_objective == "x_T":
-                pred_x_0 = self.noise_scheduler.estimate_x_0(
-                    x_t, x_T, t, clip_x0=self.clip_x0
-                )
+                pred_x_0 = self.noise_scheduler.estimate_x_0(x_t, x_T, t, clip_x0=self.clip_x0)
             elif self.estimator_objective == "x_0":
-                pred_x_0 = pred
+                pred_x_0 = prediction
             else:
                 raise NotImplementedError()
 
             with torch.no_grad():
                 pred_mean = self.noise_scheduler.estimate_mean_t(x_t, pred_x_0, t)
-                true_mean = self.noise_scheduler.estimate_mean_t(x_t, x_0, t)
+                true_mean = self.noise_scheduler.estimate_mean_t(x_t, target, t)
                 true_logvar = self.noise_scheduler.estimate_variance_t(
                     t, x_t.ndim, log=True, var_scale=0
                 )
 
             kl_loss = torch.mean(
                 kl_gaussians(true_mean, true_logvar, pred_mean, pred_logvar),
-                dim=list(range(1, x_0.ndim)),
+                dim=list(range(1, target.ndim)),
             )
             nnl_loss = torch.mean(
                 F.gaussian_nll_loss(
-                    pred_x_0, x_0, torch.exp(pred_logvar), reduction="none"
+                    pred_x_0, target, torch.exp(pred_logvar), reduction="none"
                 ),
-                dim=list(range(1, x_0.ndim)),
+                dim=list(range(1, target.ndim)),
             )
             var_loss = torch.mean(torch.where(t == 0, nnl_loss, kl_loss))
             loss += var_loss
@@ -542,64 +493,64 @@ class TranslationDiffusionPipeline(BasicModel):
 
         # --------------------- Compute Metrics  -------------------------------
         with torch.no_grad():
-            results["L2"] = F.mse_loss(pred, target)
-            results["L1"] = F.l1_loss(pred, target)
+            results["L2"] = F.mse_loss(prediction, target)
+            results["L1"] = F.l1_loss(prediction, target)
 
         # ----------------- Log Scalars ----------------------
         for metric_name, metric_val in results.items():
             self.log(
-                f"{state} - {metric_name}",
+                f"{state}/{metric_name}",
                 metric_val,
-                batch_size=x_0.shape[0],
+                batch_size=target.shape[0],
                 on_step=True,
                 on_epoch=True,
                 sync_dist=True,
                 prog_bar=True,
             )
 
-        if (self.global_step + 1) % self.sample_every_n_steps == 0:
-            self.log_samples(targets[0, None, ...])
+        # if (self.global_step + 1) % self.sample_every_n_steps == 0:
+        #     self.log_samples(target[0, None, ...])
 
         return loss
 
-    def log_samples(self, images: torch.FloatTensor, *kwargs: Tuple[Any, ...]):
-        if self.trainer.global_rank == 0:
-            outputs = self.sample(
-                images,
-                condition=None,
-                steps=self.noise_scheduler.timesteps,
-                use_ddim=False,
-            )
+    # def log_samples(self, images: torch.FloatTensor, *kwargs: Tuple[Any, ...]):
+    #     if self.trainer.global_rank == 0:
+    #         outputs = self.sample(
+    #             images,
+    #             condition=None,
+    #             steps=self.noise_scheduler.timesteps,
+    #             use_ddim=False,
+    #         )
 
-            spatial_stack = lambda x: torch.cat(
-                [
-                    torch.vstack([img for img in x[:, idx, ...]])
-                    for idx in range(x.shape[1])
-                ],
-                dim=0,
-            )
+    #         spatial_stack = lambda x: torch.cat(
+    #             [
+    #                 torch.vstack([img for img in x[:, idx, ...]])
+    #                 for idx in range(x.shape[1])
+    #             ],
+    #             dim=0,
+    #         )
 
-            outputs = (
-                outputs.clamp(-1, 1)
-                .add(1)
-                .div(2)
-                .mul(255)
-                .clamp(0, 255)
-                .to(torch.uint8)
-            )
-            images = images.add(1).div(2).mul(255).clamp(0, 255).to(torch.uint8)
-            sample = spatial_stack(torch.cat([images, outputs], dim=1))
+    #         outputs = (
+    #             outputs.clamp(-1, 1)
+    #             .add(1)
+    #             .div(2)
+    #             .mul(255)
+    #             .clamp(0, 255)
+    #             .to(torch.uint8)
+    #         )
+    #         images = images.add(1).div(2).mul(255).clamp(0, 255).to(torch.uint8)
+    #         sample = spatial_stack(torch.cat([images, outputs], dim=1))
 
-            wandb.log(
-                {
-                    "Reconstruction examples": wandb.Image(
-                        sample.detach().cpu().numpy(),
-                        caption="({}) [{} - {}]".format(
-                            self.trainer.global_step, sample.min(), sample.max()
-                        ),
-                    )
-                }
-            )
+    #         wandb.log(
+    #             {
+    #                 "Reconstruction examples": wandb.Image(
+    #                     sample.detach().cpu().numpy(),
+    #                     caption="({}) [{} - {}]".format(
+    #                         self.trainer.global_step, sample.min(), sample.max()
+    #                     ),
+    #                 )
+    #             }
+    #         )
 
     def forward(
         self,
@@ -619,21 +570,14 @@ class TranslationDiffusionPipeline(BasicModel):
 
         # Concatenate inputs for guided and unguided diffusion as proposed by classifier-free-guidance
         if (condition is not None) and (guidance_scale != 1.0):
-            # Model prediction
-            pred_uncond = noise_estimator(
-                x_t, t, condition=un_cond, self_cond=self_cond
-            )
-            pred_cond = noise_estimator(
-                x_t, t, condition=condition, self_cond=self_cond
-            )
+            pred_uncond = noise_estimator(x_t, t, condition=un_cond, self_cond=self_cond)
+            pred_cond   = noise_estimator(x_t, t, condition=condition, self_cond=self_cond)
             pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
 
             if self.estimate_variance:
                 pred_uncond, pred_var_uncond = pred_uncond.chunk(2, dim=1)
                 pred_cond, pred_var_cond = pred_cond.chunk(2, dim=1)
-                pred_var = pred_var_uncond + guidance_scale * (
-                    pred_var_cond - pred_var_uncond
-                )
+                pred_var = pred_var_uncond + guidance_scale * (pred_var_cond - pred_var_uncond)
         else:
             pred = noise_estimator(x_t, t, condition=condition, self_cond=self_cond)
             if self.estimate_variance:
@@ -664,7 +608,7 @@ class TranslationDiffusionPipeline(BasicModel):
 
         elif self.estimator_objective == "x_T":
             if x_t.shape[1] != pred.shape[1]:
-                x_t = x_t[:, : pred.shape[1]]
+                x_t = x_t[:, :pred.shape[1]]
             x_t_prior, x_0 = self.noise_scheduler.estimate_x_t_prior_from_x_T(
                 x_t,
                 t,
@@ -681,9 +625,7 @@ class TranslationDiffusionPipeline(BasicModel):
         return x_t_prior, x_0, x_T, self_cond
 
     @torch.no_grad()
-    def denoise(
-        self, x_t, features, steps=None, condition=None, use_ddim=False, **kwargs
-    ):
+    def denoise(self, x_t, target, steps=None, condition=None, use_ddim=False, **kwargs):
         self_cond = None
 
         # ---------- run denoise loop ---------------
@@ -697,16 +639,12 @@ class TranslationDiffusionPipeline(BasicModel):
                 device=x_t.device,
             )  # [0, 1, 2, ..., T-1] if steps = T
         else:
-            timesteps_array = self.noise_scheduler.timesteps_array[
-                slice(0, steps)
-            ]  # [0, ...,T-1] (target time not time of x_t)
+            timesteps_array = self.noise_scheduler.timesteps_array[slice(0, steps)]  
 
         for i, t in tqdm(enumerate(reversed(timesteps_array))):
             # UNet prediction
-            x_t = torch.cat([x_t, features], dim=1)
-            x_t, x_0, x_T, self_cond = self.forward(
-                x_t, t.expand(x_t.shape[0]), condition, self_cond=self_cond, **kwargs
-            )
+            x_t = torch.cat([x_t, target], dim=1)
+            x_t, x_0, x_T, self_cond = self.forward(x_t, t.expand(x_t.shape[0]), condition, self_cond=self_cond, **kwargs)
 
             self_cond = self_cond if self.use_self_conditioning else None
 
@@ -725,18 +663,14 @@ class TranslationDiffusionPipeline(BasicModel):
         return x_t  # Should be x_0 in final step (t=0)
 
     @torch.no_grad()
-    def sample(self, images, condition=None, steps=None, use_ddim=False, **kwargs):
+    def sample(self, target, condition=None, steps=None, use_ddim=False, **kwargs):
         # creating noise
-        template = torch.zeros(images.shape, device=self.device)
+        template = torch.zeros(target.shape, device=self.device)
         x_T = self.noise_scheduler.x_final(template)
-
-        # extracting common feature map
-        images = self.channel_masking(images, masking_ratio=0.5)
-        masked_x_0_features = self.common_feature_estimator(images)
 
         x_0 = self.denoise(
             x_T,
-            masked_x_0_features,
+            target,
             steps=steps,
             condition=condition,
             use_ddim=use_ddim,
@@ -751,8 +685,7 @@ class TranslationDiffusionPipeline(BasicModel):
 
     def configure_optimizers(self):
         optimizer = self.optimizer(
-            list(self.noise_estimator.parameters())
-            + list(self.common_feature_estimator.parameters()),
+            list(self.noise_estimator.parameters()),
             **self.optimizer_kwargs,
         )
 
@@ -765,12 +698,3 @@ class TranslationDiffusionPipeline(BasicModel):
             return [optimizer], [lr_scheduler]
         else:
             return [optimizer]
-
-    def channel_masking(
-        self, image: torch.FloatTensor, masking_ratio
-    ) -> torch.FloatTensor:
-        for n_idx in range(image.shape[0]):
-            for c_idx in range(image.shape[1]):
-                if np.random.rand() < masking_ratio:
-                    image[n_idx, c_idx] = -1
-        return image

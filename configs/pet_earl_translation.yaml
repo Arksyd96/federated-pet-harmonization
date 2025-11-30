@@ -1,0 +1,83 @@
+# constants
+SEED: 101
+WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
+
+# modules state
+project_name: federated-pet
+dir_name: runs/pet-earl-translation-diffusion
+name: Traduction PET EARL (DiffusionModel)
+
+datamodule:
+    root_dir: data/federated-pet/Ano_Nifti
+    batch_size: 8
+    train_ratio: 0.8
+    patch_size: [64, 64, 64]
+    spacing: [2.0, 2.0, 2.0]
+    num_workers: 32 
+    cache_rate: 1.0  
+
+denoiser:
+    in_ch: 2
+    out_ch: 1
+    spatial_dims: 3
+    hid_chs: [64, 128, 256, 512]
+    kernel_sizes: [3, 3, 3, 3]
+    strides: [1, 2, 2, 2]
+    temb_channels: 128
+    max_period: 1000
+    scale_shift_norm: true
+
+    # Tuple (str, Dict) converti en liste YAML
+    act_name: 
+    - swish
+    - {}
+
+    # Tuple avec dictionnaire de paramètres
+    norm_name: 
+    - group
+    - {num_groups: 32, affine: true}
+
+    deep_supervision: false
+    use_res_block: true
+    estimate_variance: false
+    use_self_conditioning: false
+    dropout: 0.0
+    learnable_interpolation: true
+    use_attention: none 
+    num_res_blocks: 2
+
+scheduler:
+    timesteps: 1000
+    beta_start: 0.002
+    beta_end: 0.02
+    schedule_strategy: scaled_linear
+
+diffuser:
+    estimate_variance: false
+    use_self_conditioning: false
+    classifier_free_guidance_dropout: 0.0  # Disable during training by setting to 0
+    estimator_objective: x_T  # Noise
+    use_ema: false
+    clip_x0: false
+    sample_every_n_steps: 1
+    optimizer_kwargs: {lr: 4.0e-6}
+
+# trainer state
+model_checkpoint:
+    monitor: train/L1
+    every_n_epochs: 20
+    save_last: true
+    save_top_k: 1
+    mode: min
+
+trainer:
+    # strategy: ddp
+    # devices: 2
+    # num_nodes: 1
+    precision: 32
+    accelerator: gpu
+    log_every_n_steps: 1
+    min_epochs: 3000
+    max_epochs: 8000
+    check_val_every_n_epoch: 10
+    num_sanity_val_steps: 0

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import pytorch_lightning as pl
 
-def set_seed(seed: int, deterministic: bool = False):
+def set_seed(seed: int, deterministic: bool = False, workers: bool = False):
     random.seed(seed)
     np.random.seed(seed)
 
@@ -23,7 +23,7 @@ def set_seed(seed: int, deterministic: bool = False):
             True  # Enable for better performance if determinism is not required
         )
 
-    pl.seed_everything(seed)
+    pl.seed_everything(seed, workers=workers)
 
     print(f"Seed set to {seed} with deterministic={deterministic}")
 
