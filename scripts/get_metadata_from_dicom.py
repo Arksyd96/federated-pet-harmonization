@@ -196,14 +196,49 @@ def extract_series_metadata(series_id, series_files, include_sampling_check=Fals
     out['PatientWeight'] = safe_get(ds, 'PatientWeight', '')
     out['PatientSex'] = safe_get(ds, 'PatientSex', '')
 
-    # PET radiopharm info (essayons d'extraire quelques champs clés)
     rphs = getattr(ds, 'RadiopharmaceuticalInformationSequence', None)
-    if rphs and rphs.__len__() > 0:
-        rph = rphs[0]
-        out['RadionuclideTotalDose'] = safe_get(rph, 'RadionuclideTotalDose', None)
-        out['RadionuclideHalfLife'] = safe_get(rph, 'RadionuclideHalfLife', None)
-        out['RadiopharmaceuticalStartTime'] = safe_get(rph, 'RadiopharmaceuticalStartTime', None)
-        out['RadiopharmaceuticalStartDateTime'] = safe_get(rph, 'RadiopharmaceuticalStartDateTime', None)
+
+    if rphs and len(rphs) > 0:
+        # Initialisation de listes pour stocker les valeurs de CHAQUE traceur
+        list_names = []
+        list_doses = []
+        list_start_times = []
+        
+        # On boucle sur chaque élément 'item' dans la séquence 'rphs'
+        for item in rphs:
+            # 1. Extraction du Dose / Temps pour cet item spécifique
+            dose = safe_get(item, 'RadionuclideTotalDose', 'NA')
+            start_time = safe_get(item, 'RadiopharmaceuticalStartTime', 'NA')
+            
+            list_doses.append(str(dose))
+            list_start_times.append(str(start_time))
+            
+            # 2. Extraction du NOM (Complexe car peut être texte ou code)
+            # Priorité 1 : Le nom standardisé (Code Sequence)
+            rph_code_seq = getattr(item, 'RadiopharmaceuticalCodeSequence', None)
+            rph_name = "Unknown"
+            
+            if rph_code_seq and len(rph_code_seq) > 0:
+                rph_name = safe_get(rph_code_seq[0], 'CodeMeaning', "Unknown")
+            else:
+                # Priorité 2 : Le nom texte libre
+                rph_name = safe_get(item, 'Radiopharmaceutical', "Unknown")
+                
+            list_names.append(rph_name)
+
+        # --- ENREGISTREMENT DANS OUT ---
+        out['Radiopharmaceutical'] = " | ".join(list_names)
+        out['RadionuclideTotalDose'] = " | ".join(list_doses)
+        out['RadiopharmaceuticalStartTime'] = " | ".join(list_start_times)
+        
+        # Indicateur pratique pour filtrer plus tard
+        out['TracerCount'] = len(rphs)
+
+    else:
+        # Cas où il n'y a pas d'info
+        out['Radiopharmaceutical'] = None
+        out['RadionuclideTotalDose'] = None
+        out['TracerCount'] = 0
 
     # Calculs supplémentaires : n_slices, sampling_report
     if include_sampling_check:
@@ -261,7 +296,7 @@ def process_subjects_directory(root_path: str, out_root: str, include_sampling_c
             logging.warning(f'Skipping non-directory item: {subject_path}')
             continue
 
-        total_subjects = len(subjects_list)
+        total_subjects = subjects_list.__len__()
         progress = (idx + 1) / total_subjects * 100
         logging.info(f"Processing patient/study folder: {subject}; {idx + 1}/{total_subjects} [{progress:.2f}%]")
         df = collect_patient_metadata(subject_path, include_sampling_check=include_sampling_check)

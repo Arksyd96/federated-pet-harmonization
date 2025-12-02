@@ -20,7 +20,7 @@ def resample_one_patient(data):
     files = [f for f in os.listdir(subject_input_path) 
              if f.endswith(('.nii', '.nii.gz')) 
              and 'MIP' not in f
-             and not f.startswith('PT')]
+             and f.startswith('PT')]
     
     processed_count = 0
     
@@ -44,11 +44,10 @@ def resample_one_patient(data):
             # 3. Resampling
             resampler = sitk.ResampleImageFilter()
             resampler.SetOutputSpacing(target_spacing)
-            resampler.SetSize(new_size)
             resampler.SetOutputOrigin(image.GetOrigin())
             resampler.SetOutputDirection(image.GetDirection())
-            resampler.SetInterpolator(sitk.sitkBSpline) # B-Spline pour PET
-            resampler.SetDefaultPixelValue(0)
+            resampler.SetInterpolator(sitk.sitkLinear) # B-Spline pour PET
+            resampler.SetSize(new_size)
             
             resampled_image = resampler.Execute(image)
 

@@ -67,21 +67,26 @@ def compute_decay_corrected_injected_activity(ds: pydicom.Dataset) -> tuple:
         logging.warning(details['error'])
         return None, details
     
-    # Radionuclide total dose (Bq)
-    injected = float(getattr(rph, 'RadionuclideTotalDose', None))
-    details['InjectedActivity_Bq'] = injected
-
     # half-life (s)
     half_life = float(getattr(rph, 'RadionuclideHalfLife', None))
     details['RadionuclideHalfLife_s'] = half_life
+    print(f"Half-life: {half_life} s")
+
+    # Radionuclide total dose (Bq)
+    injected = float(getattr(rph, 'RadionuclideTotalDose', None))
+    details['InjectedActivity_Bq'] = injected
+    print(f"Injected dose: {injected} Bq")
 
     # injection time
     injection_time_str = getattr(rph, 'RadiopharmaceuticalStartTime', None)
     details['InjectionTime_str'] = injection_time_str
+    print(f"Injection time: {injection_time_str}")
 
     # acquisition time
-    acquisition_time_str = getattr(ds, 'AcquisitionTime', None) or getattr(ds, 'SeriesTime', None) or getattr(ds, 'StudyTime', None)
+    # acquisition_time_str = getattr(ds, 'AcquisitionTime', None)
+    acquisition_time_str = getattr(ds, 'AcquisitionTime', None)
     details['AcquisitionTime_str'] = acquisition_time_str
+    print(f"Acquisition time: {acquisition_time_str}")
 
     if injected is None or half_life is None or injection_time_str is None or acquisition_time_str is None:
         details['error'] = 'Missing required DICOM tags for activity decay correction. Check details.'
@@ -101,10 +106,13 @@ def compute_decay_corrected_injected_activity(ds: pydicom.Dataset) -> tuple:
     if delta_seconds < 0:
         delta_seconds += 24 * 3600
     details['TimeSinceInjection_s'] = delta_seconds
+    print(f"Time since injection: {delta_seconds} s")
 
     # decay correction
     decay_factor = np.exp(-np.log(2) * (delta_seconds / half_life))
+    print(f"Decay factor: {decay_factor}")
     decayed_activity = injected * decay_factor
+    print('injected activity (decay corrected): {:.2f} Bq'.format(decayed_activity))
     details['decayed_activity_Bq'] = decay_factor
     return decayed_activity, details
 
@@ -119,13 +127,16 @@ def save_image_nifti(sitk_image: sitk.Image, out_path: str, extra_metadata: dict
     logging.info(f'Saved NIfTI image to: {out_path}')
 
 
-def compute_suv_image(sitk_image: sitk.Image, dicom_filenames: list) -> tuple:
+def compute_suv_image(sitk_image: sitk.Image, ds: pydicom.Dataset) -> tuple:
     """Calcule une image SUV à partir d'une image SimpleITK lue depuis une série DICOM.
-    dicom_filenames: liste de fichiers (on utilisera le premier pour extraire les tags).
+    ds: metadata from one of the DICOM files in the series.
     Retourne (sitk_suv_image, metadata_dict)
     """
-    ds = pydicom.dcmread(dicom_filenames[0], stop_before_pixels=True)
+    # ds = pydicom.dcmread(dicom_filenames[0], stop_before_pixels=True)
+    print('ici à voir :', ds.AcquisitionTime)
     metadata = {}
+
+    assert getattr(ds, 'Units', None) == 'BQML', 'DICOM PET Units is not BQML, cannot compute SUV reliably.'
 
     # rescaling
     slope = float(getattr(ds, 'RescaleSlope', 1.0))
@@ -145,10 +156,12 @@ def compute_suv_image(sitk_image: sitk.Image, dicom_filenames: list) -> tuple:
         
     patient_weight_kg = float(patient_weight_kg)
     metadata['PatientWeight_kg'] = patient_weight_kg
+    print('Patient weight (kg):', patient_weight_kg)
 
     # injected activity and half-life
     decayed_activity, details = compute_decay_corrected_injected_activity(ds)
     metadata.update(details)
+    print('Decayed activity:', decayed_activity)
 
     # sitk to numpy and rescale
     arr = sitk.GetArrayFromImage(sitk_image).astype(np.float64)
@@ -162,8 +175,11 @@ def compute_suv_image(sitk_image: sitk.Image, dicom_filenames: list) -> tuple:
     
     # SUV = Bq/mL * patient_weight_kg * 1000 / decayed_activity (Bq)
     factor = (patient_weight_kg * 1000.0) / decayed_activity
+    print('suv factor', factor)
+
     metadata['SUV_factor'] = factor
     suv_arr = arr * factor
+    print('SUV array stats: min {:.2f}, max {:.2f}, mean {:.2f}'.format(suv_arr.min(), suv_arr.max(), suv_arr.mean()))
 
     # creating sitk image
     suv_image = sitk.GetImageFromArray(suv_arr)
@@ -199,7 +215,7 @@ def process_series_folder(series_path: str, out_subject_path: str, modality: str
         sdesc = getattr(ds, 'SeriesDescription', '')
         suid = getattr(ds, 'SeriesInstanceUID', series_id)
 
-        out_name = f"{md}_{series_path.split(os.sep)[-1]}.nii.gz"
+        out_name = f"{md}_{series_path.split(os.sep)[0]}.nii.gz"
         out_path = os.path.join(out_subject_path, out_name)
 
         # read the image via simpleITK
@@ -210,7 +226,7 @@ def process_series_folder(series_path: str, out_subject_path: str, modality: str
         # compute SUV for PET and EARL images
         if modality == 'PET' or modality == 'EARL':
             logging.info(f'-- Computing SUV for {modality} series at: {series_id}')
-            suv_image, meta = compute_suv_image(image, filenames)
+            suv_image, meta = compute_suv_image(image, ds)
             if suv_image is not None:
                 logging.info(f'-- Saving SUV NIfTI to: {out_path} (with metadata)')
                 save_image_nifti(suv_image, out_path, extra_metadata=meta)
@@ -258,7 +274,7 @@ def process_subjects_directory(root_path: str, out_root: str):
     if not os.path.exists(out):
         os.makedirs(out)
 
-    subjects_list = sorted(os.listdir(root))[:] # debugging
+    subjects_list = sorted(os.listdir(root))[1:2] # debugging
 
     for idx, subject in enumerate(subjects_list):
         subject_path = os.path.join(root, subject)
@@ -270,16 +286,15 @@ def process_subjects_directory(root_path: str, out_root: str):
         if not os.path.exists(out_subject_path):
             os.makedirs(out_subject_path)
 
-        process_subject(subject_path, out_subject_path, 
-                        curr_idx=idx + 1, total_subjects=subjects_list.__len__())
+        process_subject(subject_path, out_subject_path, curr_idx=idx + 1, total_subjects=subjects_list.__len__())
         
 
 # ----------------------- CLI ------------------------
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Convert DICOM CT/PET/EARL to NIfTI and compute PET SUV')
-    parser.add_argument('--input', type=str, required=True, help='Path to input DICOM dataset [folder with subfolders per series]')
-    parser.add_argument('--output', type=str, required=True, help='Path to output folder for NIfTI files [Same structure as input]')
+    parser.add_argument('--input', '-i', type=str, required=True, help='Path to input DICOM dataset [folder with subfolders per series]')
+    parser.add_argument('--output', '-o', type=str, required=True, help='Path to output folder for NIfTI files [Same structure as input]')
     args = parser.parse_args()
 
     process_subjects_directory(args.input, args.output)

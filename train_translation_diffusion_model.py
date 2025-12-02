@@ -1,9 +1,14 @@
+import resource
+rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
+
 import argparse
 import os
 import logging
 from datetime import datetime
 from omegaconf import OmegaConf
 
+import torch
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, RichProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer import Trainer
@@ -16,6 +21,9 @@ from modules.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+torch.set_float32_matmul_precision('high')
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 def main(args):
     # 1. Configuration
@@ -71,16 +79,17 @@ def main(args):
         )
 
     # 4. Callbacks
-    # On met toujours ces callbacks utilitaires
     callbacks = [
-        # RichProgressBar(),
-        LearningRateMonitor(logging_interval='step'), 
+        # RichProgressBar(), # TODO: Activer si besoin (bug)
         ModelCheckpoint(
             dirpath=os.path.join(save_dir, "./checkpoints"),
             filename="{epoch:02d}",
             **config.get('model_checkpoint', {})
         )
     ]
+
+    if not config.get('DEBUG'):
+        callbacks.append(LearningRateMonitor(logging_interval='step'))
 
     # 5. Trainer
     trainer = Trainer(

@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.utils import make_grid
 import pytorch_lightning as pl
 import wandb
 
@@ -412,7 +413,7 @@ class TranslationDiffusionPipeline(BasicModel):
         if use_ema:
             self.ema_model = EMAModel(self.noise_estimator, **ema_kwargs)
 
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['noise_estimator', 'noise_scheduler'])
 
     def _step(self, batch, batch_idx, state, step):
         source, target, results = batch['source'], batch['target'], {}
@@ -423,7 +424,8 @@ class TranslationDiffusionPipeline(BasicModel):
         # Sample Noise
         with torch.no_grad():
             # Randomly selecting t [0, T-1] and compute x_t (noisy version of x_0 at t)
-            x_t, x_T, t = self.noise_scheduler.sample(torch.clone(target))
+            target_placeholder = torch.clone(target)
+            x_t, x_T, t = self.noise_scheduler.sample(target_placeholder)
             condition = source
 
         # Use EMA Model
@@ -434,7 +436,7 @@ class TranslationDiffusionPipeline(BasicModel):
 
         # Classifier free guidance
         if torch.rand(1) <= self.classifier_free_guidance_dropout:
-            condition = None
+            condition = torch.zeros_like(condition)
 
         x_t = torch.cat([x_t, condition], dim=1)  # condition is the second half of the tensor
         prediction = noise_estimator(x_t, t, condition)
@@ -445,14 +447,14 @@ class TranslationDiffusionPipeline(BasicModel):
 
         # Specify target
         if self.estimator_objective == "x_T":
-            target = x_T
+            objective = x_T
         elif self.estimator_objective == "x_0":
-            target = target
+            objective = target
         else:
             raise NotImplementedError(f"Option estimator_target={self.estimator_objective} not supported.")
 
         # ------------------------- Compute Loss ---------------------------
-        loss = self.loss_fct(prediction, target)
+        loss = self.loss_fct(prediction, objective)
 
         # ----------------- Variance Loss --------------
         if self.estimate_variance:
@@ -493,64 +495,81 @@ class TranslationDiffusionPipeline(BasicModel):
 
         # --------------------- Compute Metrics  -------------------------------
         with torch.no_grad():
-            results["L2"] = F.mse_loss(prediction, target)
-            results["L1"] = F.l1_loss(prediction, target)
+            results["L2"] = F.mse_loss(prediction, objective)
+            results["L1"] = F.l1_loss(prediction, objective)
 
         # ----------------- Log Scalars ----------------------
         for metric_name, metric_val in results.items():
             self.log(
                 f"{state}/{metric_name}",
                 metric_val,
-                batch_size=target.shape[0],
+                batch_size=objective.shape[0],
                 on_step=True,
                 on_epoch=True,
                 sync_dist=True,
                 prog_bar=True,
             )
 
-        # if (self.global_step + 1) % self.sample_every_n_steps == 0:
-        #     self.log_samples(target[0, None, ...])
+        if (self.global_step + 1) % self.sample_every_n_steps == 0:
+            self.log_samples(source, target)
 
         return loss
 
-    # def log_samples(self, images: torch.FloatTensor, *kwargs: Tuple[Any, ...]):
-    #     if self.trainer.global_rank == 0:
-    #         outputs = self.sample(
-    #             images,
-    #             condition=None,
-    #             steps=self.noise_scheduler.timesteps,
-    #             use_ddim=False,
-    #         )
+    @torch.no_grad()
+    def log_samples(self, source: torch.FloatTensor, target: torch.FloatTensor = None):
+        if self.trainer.global_rank == 0:
+            self.noise_estimator.eval()
+            with torch.no_grad():
+                prediction = self.sample(
+                    source,
+                    condition=None, # Ou votre condition si nécessaire
+                    # steps=self.noise_scheduler.timesteps,
+                    steps=50,
+                    use_ddim=True,
+                )
+            self.noise_estimator.train()
 
-    #         spatial_stack = lambda x: torch.cat(
-    #             [
-    #                 torch.vstack([img for img in x[:, idx, ...]])
-    #                 for idx in range(x.shape[1])
-    #             ],
-    #             dim=0,
-    #         )
+            # On suppose le format (B, C, D, H, W). On coupe au milieu de la profondeur D.
+            mid_slice_idx = source.shape[2] // 2  # Index 32 pour une taille de 64
+            
+            # On récupère les slices 2D: (B, 1, 64, 64)
+            source_slice = source[:, :, mid_slice_idx, :, :]
+            pred_slice = prediction[:, :, mid_slice_idx, :, :]
+            
+            # Liste des images à afficher côte à côte
+            images_to_stack = [source_slice, pred_slice]
+            
+            # Si on a la vérité terrain (Target EARL), on l'ajoute aussi
+            if target is not None:
+                target_slice = target[:, :, mid_slice_idx, :, :]
+                images_to_stack.append(target_slice)
 
-    #         outputs = (
-    #             outputs.clamp(-1, 1)
-    #             .add(1)
-    #             .div(2)
-    #             .mul(255)
-    #             .clamp(0, 255)
-    #             .to(torch.uint8)
-    #         )
-    #         images = images.add(1).div(2).mul(255).clamp(0, 255).to(torch.uint8)
-    #         sample = spatial_stack(torch.cat([images, outputs], dim=1))
+            # Shape résultante par patient : (1, 64, 128) ou (1, 64, 192)
+            comparison_batch = torch.cat(images_to_stack, dim=3)
 
-    #         wandb.log(
-    #             {
-    #                 "Reconstruction examples": wandb.Image(
-    #                     sample.detach().cpu().numpy(),
-    #                     caption="({}) [{} - {}]".format(
-    #                         self.trainer.global_step, sample.min(), sample.max()
-    #                     ),
-    #                 )
-    #             }
-    #         )
+            # 4. Dénormalisation ([-1, 1] -> [0, 255])
+            # On applique clamp avant et après pour éviter les artefacts visuels bizarres
+            comparison_batch = (
+                comparison_batch
+                .clamp(-1, 1)   # S'assure qu'on ne dépasse pas les bornes théoriques
+                .add(1)         # [-1, 1] -> [0, 2]
+                .div(2)         # [0, 2]  -> [0, 1]
+                .mul(255)       # [0, 1]  -> [0, 255]
+                .clamp(0, 255)  # Sécurité finale
+                .to(torch.uint8)
+            )
+
+            # make_grid gère automatiquement l'agencement des batchs (B patients)
+            # nrow=1 force une colonne verticale de patients
+            grid = make_grid(comparison_batch, nrow=1, padding=2, normalize=False)
+
+            # WandB attend (H, W, C), donc on permute car PyTorch est (C, H, W)
+            wandb_image = wandb.Image(
+                grid.permute(1, 2, 0).cpu().numpy(), 
+                caption=f"Epoch {self.current_epoch} | Step {self.global_step} | (Left: Input, Mid: Pred, Right: Target)"
+            )
+
+            wandb.log({"Validation/Reconstruction_Slices": wandb_image})
 
     def forward(
         self,
@@ -625,7 +644,7 @@ class TranslationDiffusionPipeline(BasicModel):
         return x_t_prior, x_0, x_T, self_cond
 
     @torch.no_grad()
-    def denoise(self, x_t, target, steps=None, condition=None, use_ddim=False, **kwargs):
+    def denoise(self, x_t, source, steps=None, condition=None, use_ddim=False, **kwargs):
         self_cond = None
 
         # ---------- run denoise loop ---------------
@@ -643,7 +662,7 @@ class TranslationDiffusionPipeline(BasicModel):
 
         for i, t in tqdm(enumerate(reversed(timesteps_array))):
             # UNet prediction
-            x_t = torch.cat([x_t, target], dim=1)
+            x_t = torch.cat([x_t, source], dim=1)
             x_t, x_0, x_T, self_cond = self.forward(x_t, t.expand(x_t.shape[0]), condition, self_cond=self_cond, **kwargs)
 
             self_cond = self_cond if self.use_self_conditioning else None
@@ -663,14 +682,14 @@ class TranslationDiffusionPipeline(BasicModel):
         return x_t  # Should be x_0 in final step (t=0)
 
     @torch.no_grad()
-    def sample(self, target, condition=None, steps=None, use_ddim=False, **kwargs):
+    def sample(self, source, condition=None, steps=None, use_ddim=False, **kwargs):
         # creating noise
-        template = torch.zeros(target.shape, device=self.device)
+        template = torch.zeros(source.shape, device=self.device)
         x_T = self.noise_scheduler.x_final(template)
 
         x_0 = self.denoise(
             x_T,
-            target,
+            source,
             steps=steps,
             condition=condition,
             use_ddim=use_ddim,

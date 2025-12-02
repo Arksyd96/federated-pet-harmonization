@@ -25,7 +25,7 @@ def set_seed(seed: int, deterministic: bool = False, workers: bool = False):
 
     pl.seed_everything(seed, workers=workers)
 
-    print(f"Seed set to {seed} with deterministic={deterministic}")
+    print(f"Deterministic set to {deterministic}")
 
 def parse_dtype(dtype):
     if dtype == "float16":
