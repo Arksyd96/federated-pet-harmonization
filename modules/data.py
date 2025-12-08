@@ -11,6 +11,9 @@ from pytorch_lightning import LightningDataModule
 import nibabel as nib
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
+
+import torchio as tio
+
 from monai.transforms import (
     Compose,
     LoadImaged,
@@ -301,40 +304,54 @@ class JointZScoreNormalize(MapTransform):
         return d
     
 
-class MinMaxPercentileNormalize(MapTransform):
-    def __init__(self, keys, source_key="source", percentile=99.5, min_max_suv=3.0, allow_missing_keys=False):
-        super().__init__(keys, allow_missing_keys)
-        self.source_key = source_key
-        self.percentile = percentile
-        self.min_max_suv = min_max_suv # Sécurité pour les patients très faibles
+def robust_patch_normalization(src: torch.Tensor, tgt: torch.Tensor, percentiles=(0.5, 99.5), clone=True):
+    src_out, tgt_out = src, tgt
+    if clone:
+        src_out = src.clone()
+        tgt_out = tgt.clone()
+    
+    batch_size = src_out.shape[0]
+    norm_factors = torch.zeros((batch_size, 2), device=src.device)  # min, max per patch
 
-    def __call__(self, data):
-        d = dict(data)
-        img = d[self.source_key] # Image Source (Standard)
+    for idx in range(batch_size):
+        src_patch = src_out[idx]
+        tgt_patch = tgt_out[idx]
         
-        mask = img > 0
-        if mask.sum() > 0:
-            valid_voxels = img[mask]
-            robust_max = np.percentile(valid_voxels, self.percentile)
-        else:
-            robust_max = 1.0
-
-        final_max = max(robust_max, self.min_max_suv)
-        d["norm_max"] = np.array([final_max], dtype=np.float32)
-
-        for key in self.key_iterator(d):
-            x = d[key]
+        # Aplatir pour calculer les percentiles
+        src_flat = src_out.view(-1)
+        
+        # Calcul des seuils (quantile attend une entrée float)
+        # Note: quantile sur GPU est rapide
+        p_min = torch.quantile(src_flat, percentiles[0] / 100.0)
+        p_max = torch.quantile(src_flat, percentiles[1] / 100.0)
+        
+        if (p_max - p_min) < 1e-6:
+            continue
             
-            if isinstance(x, np.ndarray):
-                x_clipped = np.clip(x, 0, final_max)
-            else:
-                x_clipped = x.clamp(0, final_max)
-            
-            d[key] = (x_clipped / final_max) * 2.0 - 1.0
+        src_patch = 2 * (src_patch - p_min) / (p_max - p_min) - 1
+        tgt_patch = 2 * (tgt_patch - p_min) / (p_max - p_min) - 1
 
-        return d
+        norm_factors[idx, 0] = p_min
+        norm_factors[idx, 1] = p_max
+        
+        src_out[idx] = src_patch
+        tgt_out[idx] = tgt_patch
+        
+    return src_out, tgt_out, norm_factors
 
-# --- 2. LE LIGHTNING DATA MODULE ---
+
+class Float32Lambda:
+    def __init__(self):
+        pass
+
+    def __call__(self, subject):
+        for image in subject.get_images(intensity_only=False):
+            image.data = image.data.float()
+        return subject
+        
+    
+
+# --- LE LIGHTNING DATA MODULE ---
 class PETTranslationDataModule(LightningDataModule):
     def __init__(
         self, 
@@ -343,7 +360,8 @@ class PETTranslationDataModule(LightningDataModule):
         train_ratio: float = 0.8,
         patch_size: tuple = (64, 64, 64),
         num_workers: int = 8,             # Augmentez si vous avez bcp de coeurs
-        cache_rate: float = 1.0           # 1.0 = Charge tout le dataset en RAM
+        queue_max_length: int = 600,      
+        samples_per_volume: int = 4, # On tire 4 patches par patient
     ):
         super().__init__()
         self.root_dir = root_dir
@@ -351,116 +369,90 @@ class PETTranslationDataModule(LightningDataModule):
         self.train_ratio = train_ratio
         self.patch_size = patch_size
         self.num_workers = num_workers
-        self.cache_rate = cache_rate
+        self.queue_max_length = queue_max_length
+        self.samples_per_volume = samples_per_volume
 
-    # à définir selon l'arborescence de vos données
     def get_pt_earl_file_pairs(self, files: List[str]) -> List[Dict[str, str]]:
-        # Adaptez ces filtres à vos noms de fichiers exacts
-        files = [f for f in files if f.endswith('.nii') or f.endswith('.nii.gz') and 'MIP' not in f]
-        pt_files = [f for f in files if f.startswith('PT') and 'EARL' not in f]
-        earl_files = [f for f in files if f.startswith('PT') and 'EARL' in f]
+        #  --- Adaptez ces filtres à vos noms de fichiers exacts ---
+        files = [f for f in files if f.endswith('.nii') or f.endswith('.nii.gz')]
+        pt_files = [f for f in files if f.startswith('PET') and 'MIP' not in f]
+        earl_files = [f for f in files if f.startswith('EARL') and 'MIP' not in f]
         return pt_files[0], earl_files[0]
 
     def setup(self, stage=None):
-        # --- A. Listing des fichiers ---
-        data_dicts = []
-        subjects = sorted([d for d in os.listdir(self.root_dir) if os.path.isdir(os.path.join(self.root_dir, d))])
+        # --- Listing des fichiers ---
+        all_subjects = sorted([d for d in os.listdir(self.root_dir) if os.path.isdir(os.path.join(self.root_dir, d))])
         
-        for subj in subjects:
-            subj_path = os.path.join(self.root_dir, subj)
+        tio_subjects = list()
+        for subj_name in all_subjects:
+            subj_path = os.path.join(self.root_dir, subj_name)
             files = os.listdir(subj_path)
             pt_file, earl_file = self.get_pt_earl_file_pairs(files)
             
             if pt_file and earl_file:
-                data_dicts.append({
-                    "source": os.path.join(subj_path, pt_file),
-                    "target": os.path.join(subj_path, earl_file),
-                    "subject_id": subj # Toujours utile pour le debug
-                })
-        
-        np.random.shuffle(data_dicts) # Mélange avant split
-        split_idx = int(len(data_dicts) * self.train_ratio)
-        train_files, val_files = data_dicts[:split_idx], data_dicts[split_idx:]
-        
-        print(f"[DataModule] Setup complet. Train: {len(train_files)} | Val: {len(val_files)}")
-        print(f"[DataModule] Cache Rate: {self.cache_rate} (RAM usage estimé ~130Go pour 1000 patients)")
+                subject = tio.Subject(
+                    source=tio.Image(os.path.join(subj_path, pt_file), type=tio.INTENSITY),
+                    target=tio.Image(os.path.join(subj_path, earl_file), type=tio.INTENSITY),
+                    subject_id=subj_name
+                )
 
-        # --- B. Pipelines de Transformation ---        
-        self.train_transforms = Compose([
-            LoadImaged(keys=["source", "target"]),
-            EnsureChannelFirstd(keys=["source", "target"]),
-            Orientationd(keys=["source", "target"], axcodes="RAS"),
-            
-            # NOTRE NORMALISATION CUSTOM (Déterministe -> Sera cachée)
-            # JointZScoreNormalize(keys=["source", "target"], source_key="source", ignore_zeros=True),
-            MinMaxPercentileNormalize(keys=["source", "target"], source_key="source", percentile=99.5, min_max_suv=3.0),
-            
-            # Cropping
-            RandSpatialCropd(
-                keys=["source", "target"], 
-                roi_size=self.patch_size, 
-                random_center=True, 
-                random_size=False
-            ),
-            
-            # Data Augmentation géométrique
-            RandFlipd(keys=["source", "target"], prob=0.5, spatial_axis=0),
-            RandFlipd(keys=["source", "target"], prob=0.5, spatial_axis=1),
-            RandFlipd(keys=["source", "target"], prob=0.5, spatial_axis=2),
-            # RandRotate90d(keys=["source", "target"], prob=0.5, max_k=3),
-            
-            # Conversion finale
-            # Notez qu'on inclut "norm_mean" et "norm_std" pour qu'ils deviennent des Tensors dans le batch
-            ToTensord(keys=["source", "target", "norm_max"]),
+                tio_subjects.append(subject)
+        
+        # --- Split train/val ---
+        np.random.shuffle(tio_subjects) # Mélange avant split
+        split_idx = int(len(tio_subjects) * self.train_ratio)
+        self.train_subjects, self.val_subjects = tio_subjects[:split_idx], tio_subjects[split_idx:]
+
+        # just for the record (in case needed)
+        self.train_subj_paths, self.val_subj_paths = all_subjects[:split_idx], all_subjects[split_idx:]
+        
+        print(f"[TorchIO] {len(self.train_subjects)} Train, {len(self.val_subjects)} Val.")
+
+        # --- Pipelines de Transformation ---        
+        self.transform = tio.Compose([
+            Float32Lambda(),
+            tio.ToCanonical(),
+            tio.RandomFlip(axes=(0, 1, 2), p=0.5),
+            # tio.RandomAffine(scales=(0.9, 1.1), degrees=10, isotropic=True, p=0.5),
         ])
-
-        self.val_transforms = Compose([
-            LoadImaged(keys=["source", "target"]),
-            EnsureChannelFirstd(keys=["source", "target"]),
-            Orientationd(keys=["source", "target"], axcodes="RAS"),
-            
-            MinMaxPercentileNormalize(keys=["source", "target"], source_key="source", percentile=99.5, min_max_suv=3.0),
-            
-            # En validation, on crop aussi (ou on utilise SlidingWindowInferer dans le modèle)
-            RandSpatialCropd(keys=["source", "target"], roi_size=self.patch_size, random_center=True, random_size=False),
-            
-            ToTensord(keys=["source", "target", "norm_mean", "norm_std"]),
-        ])
-
-        # --- C. Création des Datasets avec Cache ---
-        self.train_ds = CacheDataset(
-            data=train_files, 
-            transform=self.train_transforms, 
-            cache_rate=self.cache_rate, 
-            num_workers=self.num_workers
-        )
-        
-        self.val_ds = CacheDataset(
-            data=val_files, 
-            transform=self.val_transforms, 
-            cache_rate=self.cache_rate, 
-            num_workers=self.num_workers
-        )
 
     def train_dataloader(self):
-        return DataLoader(
-            self.train_ds, 
-            batch_size=self.batch_size, 
-            shuffle=True, 
+        train_dataset = tio.SubjectsDataset(self.train_subjects, transform=self.transform)
+        sampler = tio.data.UniformSampler(self.patch_size)
+        patches_queue = tio.Queue(
+            subjects_dataset=train_dataset,
+            max_length=self.queue_max_length,
+            samples_per_volume=self.samples_per_volume,
+            sampler=sampler,
             num_workers=self.num_workers,
-            collate_fn=list_data_collate, # Obligatoire pour MONAI (gère les dicts)
-            # pin_memory=True,
-            # persistent_workers=True if self.num_workers > 0 else False
+            shuffle_subjects=True,
+            shuffle_patches=True
+        )
+        return tio.SubjectsLoader(
+            patches_queue,
+            batch_size=self.batch_size,
+            num_workers=0,
+            pin_memory=True
         )
 
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_ds, 
-            batch_size=self.batch_size, 
-            shuffle=False, 
-            num_workers=self.num_workers,
-            collate_fn=list_data_collate,
-            # pin_memory=True,
-            # persistent_workers=True if self.num_workers > 0 else False
-        )  
 
+    def val_dataloader(self):
+        val_dataset = tio.SubjectsDataset(self.val_subjects, transform=self.transform)
+        sampler = tio.data.UniformSampler(self.patch_size)
+
+        patches_queue = tio.Queue(
+            subjects_dataset=val_dataset,
+            max_length=100,
+            samples_per_volume=1,
+            sampler=sampler,
+            num_workers=self.num_workers,
+            shuffle_subjects=False,
+            shuffle_patches=False
+        )
+        
+        return tio.SubjectsLoader(
+            patches_queue,
+            batch_size=self.batch_size,
+            num_workers=0,
+            pin_memory=True
+        )

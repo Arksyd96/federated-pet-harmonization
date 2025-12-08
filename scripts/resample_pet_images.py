@@ -5,11 +5,21 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 
+def parse_interpolator(interpolator_str):
+    if interpolator_str == "linear":
+        return sitk.sitkLinear
+    elif interpolator_str == "nearest":
+        return sitk.sitkNearestNeighbor
+    elif interpolator_str == "bspline":
+        return sitk.sitkBSpline
+    else:
+        raise ValueError(f"Interpolateur inconnu: {interpolator_str}")
+
 def resample_one_patient(data):
     """
     Fonction wrapper qui traite UN patient (pour le multiprocessing).
     """
-    input_root, output_root, subject, target_spacing = data
+    input_root, output_root, subject, target_spacing, interpolator = data
     
     subject_input_path = os.path.join(input_root, subject)
     subject_output_path = os.path.join(output_root, subject)
@@ -17,10 +27,19 @@ def resample_one_patient(data):
     # Création du dossier destination
     os.makedirs(subject_output_path, exist_ok=True)
     
-    files = [f for f in os.listdir(subject_input_path) 
-             if f.endswith(('.nii', '.nii.gz')) 
-             and 'MIP' not in f
-             and f.startswith('PT')]
+    # changer selon les fichiers
+    # files = [
+    #     f for f in os.listdir(subject_input_path) 
+    #     if f.endswith(('.nii', '.nii.gz')) 
+    #     and f.startswith('PET') or f.startswith('EARL') # Seulement les images PET/EARL
+    #     and 'MIP' not in f
+    # ]
+
+    files = [ # Uniquement les masques
+        f for f in os.listdir(subject_input_path)
+        if f.endswith(('.nii', '.nii.gz'))
+        and not (f.startswith('PET') or f.startswith('EARL') or f.startswith('CT'))  # Exclure PET, EARL, CT
+    ]
     
     processed_count = 0
     
@@ -46,16 +65,23 @@ def resample_one_patient(data):
             resampler.SetOutputSpacing(target_spacing)
             resampler.SetOutputOrigin(image.GetOrigin())
             resampler.SetOutputDirection(image.GetDirection())
-            resampler.SetInterpolator(sitk.sitkLinear) # B-Spline pour PET
+            resampler.SetInterpolator(parse_interpolator(interpolator)) # B-Spline pour PET, or neighborhood for masks
             resampler.SetSize(new_size)
             
             resampled_image = resampler.Execute(image)
 
+            epsilon = 1e-4
+            mask = sitk.BinaryThreshold(
+                resampled_image, 
+                lowerThreshold=epsilon, upperThreshold=100000.0, 
+                insideValue=1, outsideValue=0
+            )
+
+            resampled_image = resampled_image * sitk.Cast(mask, resampled_image.GetPixelID())
+            resampled_image = sitk.Cast(resampled_image, sitk.sitkFloat32)
+
             # 4. Sauvegarde
-            # ASTUCE VITESSE : Si vous avez de la place disque, 
-            # remplacez filename par filename.replace('.gz', '') pour sauver en .nii non compressé.
-            # C'est 2x plus rapide à l'écriture.
-            sitk.WriteImage(resampled_image, output_file)
+            sitk.WriteImage(resampled_image, output_file, useCompression=True)
             processed_count += 1
             
         except Exception as e:
@@ -63,7 +89,7 @@ def resample_one_patient(data):
             
     return processed_count
 
-def process_dataset_multicore(input_root, output_root, target_spacing):
+def process_dataset_multicore(input_root, output_root, target_spacing, interpolator):
     if not os.path.exists(output_root):
         os.makedirs(output_root)
 
@@ -79,7 +105,7 @@ def process_dataset_multicore(input_root, output_root, target_spacing):
     # Préparation des arguments pour chaque process
     tasks = []
     for subject in subjects:
-        tasks.append((input_root, output_root, subject, target_spacing))
+        tasks.append((input_root, output_root, subject, target_spacing, interpolator))
 
     # Exécution Parallèle
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
@@ -94,6 +120,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", "-i", type=str, required=True)
     parser.add_argument("--output", "-o", type=str, required=True)
     parser.add_argument("--spacing", "-s", type=float, nargs=3, default=[2.0, 2.0, 2.0])
+    parser.add_argument("--interpolator", "-int", type=str, default="bspline", choices=["linear", "nearest", "bspline"])
     args = parser.parse_args()
 
-    process_dataset_multicore(args.input, args.output, args.spacing)
+    process_dataset_multicore(args.input, args.output, args.spacing, args.interpolator)

@@ -3,6 +3,8 @@
 Convertit des séries DICOM (CT, PET, EARL PET) en NIfTI en utilisant PyDicom + SimpleITK.
 - Préserve spacing, origin et direction.
 - Convertit les PET en SUV (estimation basée sur les champs DICOM standards si présents).
+- Basée sur une structure de dossiers où chaque sujet a son propre dossier contenant des sous-dossiers
+- Multi-threading pour accélérer le traitement.
 
 Usage:
 python pet_ct_to_nifti.py --input /chemin/vers/dataset --output /chemin/vers/output
@@ -10,23 +12,15 @@ python pet_ct_to_nifti.py --input /chemin/vers/dataset --output /chemin/vers/out
 
 Dépendances:
 pip install pydicom SimpleITK numpy tqdm
-
-
-Notes:
-- Le calcul de SUV est effectué quand les champs DICOM nécessaires sont présents:
-PatientWeight (0010,1030), RadiopharmaceuticalInformationSequence (0054,0016)
-avec RadionuclideTotalDose et RadionuclideHalfLife, et un temps d'injection.
-- Le script applique RescaleSlope/Intercept si présents.
-- Important: les DICOM PET peuvent stocker différentes unités/calibrations. Vérifiez les résultats sur un cas connu.
 """
 
 import os
-import sys
 import argparse
 import logging
-import math
-from datetime import datetime, timedelta
+from datetime import datetime
 
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pydicom
@@ -70,23 +64,19 @@ def compute_decay_corrected_injected_activity(ds: pydicom.Dataset) -> tuple:
     # half-life (s)
     half_life = float(getattr(rph, 'RadionuclideHalfLife', None))
     details['RadionuclideHalfLife_s'] = half_life
-    print(f"Half-life: {half_life} s")
 
     # Radionuclide total dose (Bq)
     injected = float(getattr(rph, 'RadionuclideTotalDose', None))
     details['InjectedActivity_Bq'] = injected
-    print(f"Injected dose: {injected} Bq")
 
     # injection time
     injection_time_str = getattr(rph, 'RadiopharmaceuticalStartTime', None)
     details['InjectionTime_str'] = injection_time_str
-    print(f"Injection time: {injection_time_str}")
 
     # acquisition time
     # acquisition_time_str = getattr(ds, 'AcquisitionTime', None)
-    acquisition_time_str = getattr(ds, 'AcquisitionTime', None)
+    acquisition_time_str = getattr(ds, 'SeriesTime', None)
     details['AcquisitionTime_str'] = acquisition_time_str
-    print(f"Acquisition time: {acquisition_time_str}")
 
     if injected is None or half_life is None or injection_time_str is None or acquisition_time_str is None:
         details['error'] = 'Missing required DICOM tags for activity decay correction. Check details.'
@@ -106,13 +96,10 @@ def compute_decay_corrected_injected_activity(ds: pydicom.Dataset) -> tuple:
     if delta_seconds < 0:
         delta_seconds += 24 * 3600
     details['TimeSinceInjection_s'] = delta_seconds
-    print(f"Time since injection: {delta_seconds} s")
 
     # decay correction
     decay_factor = np.exp(-np.log(2) * (delta_seconds / half_life))
-    print(f"Decay factor: {decay_factor}")
     decayed_activity = injected * decay_factor
-    print('injected activity (decay corrected): {:.2f} Bq'.format(decayed_activity))
     details['decayed_activity_Bq'] = decay_factor
     return decayed_activity, details
 
@@ -124,7 +111,6 @@ def save_image_nifti(sitk_image: sitk.Image, out_path: str, extra_metadata: dict
             sitk_image.SetMetaData(str(key), str(value))
 
     sitk.WriteImage(sitk_image, out_path)
-    logging.info(f'Saved NIfTI image to: {out_path}')
 
 
 def compute_suv_image(sitk_image: sitk.Image, ds: pydicom.Dataset) -> tuple:
@@ -132,13 +118,14 @@ def compute_suv_image(sitk_image: sitk.Image, ds: pydicom.Dataset) -> tuple:
     ds: metadata from one of the DICOM files in the series.
     Retourne (sitk_suv_image, metadata_dict)
     """
-    # ds = pydicom.dcmread(dicom_filenames[0], stop_before_pixels=True)
-    print('ici à voir :', ds.AcquisitionTime)
     metadata = {}
 
     assert getattr(ds, 'Units', None) == 'BQML', 'DICOM PET Units is not BQML, cannot compute SUV reliably.'
 
-    # rescaling
+    # TODO: If Units are not BQML, implement the conversion function based
+    # on the calibration factor and other parameters.
+
+    # rescale metadata: we do not rescale as SimpleITK does it automatically
     slope = float(getattr(ds, 'RescaleSlope', 1.0))
     intercept = float(getattr(ds, 'RescaleIntercept', 0.0))
     metadata['RescaleSlope'] = slope
@@ -156,16 +143,13 @@ def compute_suv_image(sitk_image: sitk.Image, ds: pydicom.Dataset) -> tuple:
         
     patient_weight_kg = float(patient_weight_kg)
     metadata['PatientWeight_kg'] = patient_weight_kg
-    print('Patient weight (kg):', patient_weight_kg)
 
     # injected activity and half-life
     decayed_activity, details = compute_decay_corrected_injected_activity(ds)
     metadata.update(details)
-    print('Decayed activity:', decayed_activity)
 
     # sitk to numpy and rescale
     arr = sitk.GetArrayFromImage(sitk_image).astype(np.float64)
-    arr = arr * slope + intercept
     metadata['applied_unit_assumption'] = 'Bq/mL'
 
     if patient_weight_kg is None or decayed_activity is None:
@@ -175,11 +159,9 @@ def compute_suv_image(sitk_image: sitk.Image, ds: pydicom.Dataset) -> tuple:
     
     # SUV = Bq/mL * patient_weight_kg * 1000 / decayed_activity (Bq)
     factor = (patient_weight_kg * 1000.0) / decayed_activity
-    print('suv factor', factor)
 
     metadata['SUV_factor'] = factor
     suv_arr = arr * factor
-    print('SUV array stats: min {:.2f}, max {:.2f}, mean {:.2f}'.format(suv_arr.min(), suv_arr.max(), suv_arr.mean()))
 
     # creating sitk image
     suv_image = sitk.GetImageFromArray(suv_arr)
@@ -192,8 +174,6 @@ def compute_suv_image(sitk_image: sitk.Image, ds: pydicom.Dataset) -> tuple:
 
 
 def process_series_folder(series_path: str, out_subject_path: str, modality: str):
-    logging.info(f'-- Processing series folder: {series_path.split(os.sep)[-1]}; [md: {modality}]')
-
     try:
         series_IDs = sitk.ImageSeriesReader.GetGDCMSeriesIDs(series_path) or []
     except Exception as e:
@@ -211,11 +191,10 @@ def process_series_folder(series_path: str, out_subject_path: str, modality: str
             logging.error(f'Failed to read DICOM file: {filenames[0]}. Error: {str(e)}')
             continue
 
-        md = getattr(ds, 'Modality', '').upper()
         sdesc = getattr(ds, 'SeriesDescription', '')
         suid = getattr(ds, 'SeriesInstanceUID', series_id)
 
-        out_name = f"{md}_{series_path.split(os.sep)[0]}.nii.gz"
+        out_name = f"{modality}_{series_path.split(os.sep)[-1]}.nii.gz"
         out_path = os.path.join(out_subject_path, out_name)
 
         # read the image via simpleITK
@@ -225,28 +204,23 @@ def process_series_folder(series_path: str, out_subject_path: str, modality: str
 
         # compute SUV for PET and EARL images
         if modality == 'PET' or modality == 'EARL':
-            logging.info(f'-- Computing SUV for {modality} series at: {series_id}')
             suv_image, meta = compute_suv_image(image, ds)
             if suv_image is not None:
-                logging.info(f'-- Saving SUV NIfTI to: {out_path} (with metadata)')
                 save_image_nifti(suv_image, out_path, extra_metadata=meta)
             else:
                 logging.warning(f'-- SUV computation failed for {modality} series: {series_id}.')
         
         else: # for CT
-            logging.info(f'-- Saving {modality} NIfTI to: {out_path}')
             save_image_nifti(image, out_path, extra_metadata={
-                'Modality': md,
+                'Modality': modality,
                 'SeriesDescription': sdesc
             })
 
 
-def process_subject(subject_path: str, out_subject_path: str, curr_idx: int = 1, total_subjects: int = 1):
-    logging.info('Processing subject: {} | {} / {}'.format(subject_path.split('/')[-1], curr_idx, total_subjects))
-
+def process_subject(subject_path: str, out_subject_path: str):
     immediate_subdirs = [p for p in os.listdir(subject_path)]
+
     if all(sd.lower().endswith('.dcm') for sd in immediate_subdirs):
-        logging.info(f'Detected DICOM files directly under subject folder: {subject_path}')
         process_series_folder(subject_path, out_subject_path, modality=None)
         return
 
@@ -267,36 +241,61 @@ def process_subject(subject_path: str, out_subject_path: str, curr_idx: int = 1,
     return
 
 
-def process_subjects_directory(root_path: str, out_root: str):
+def process_subjects_directory(root_path: str, out_root: str, num_workers: int = 1):
     root = os.path.abspath(root_path)
     out  = os.path.abspath(out_root)
 
     if not os.path.exists(out):
         os.makedirs(out)
 
-    subjects_list = sorted(os.listdir(root))[1:2] # debugging
+    all_subjects = sorted([s for s in os.listdir(root) if os.path.isdir(os.path.join(root, s))])
 
-    for idx, subject in enumerate(subjects_list):
+    tasks = list()
+    for subject in all_subjects:
         subject_path = os.path.join(root, subject)
-        if not os.path.isdir(subject_path):
-            logging.warning(f'Skipping non-directory item: {subject_path}')
-            continue
-
         out_subject_path = os.path.join(out, subject)
+
         if not os.path.exists(out_subject_path):
             os.makedirs(out_subject_path)
 
-        process_subject(subject_path, out_subject_path, curr_idx=idx + 1, total_subjects=subjects_list.__len__())
-        
+        tasks.append((subject_path, out_subject_path))
+
+    if num_workers is None or num_workers < 1:
+        num_workers = max(1, multiprocessing.cpu_count() - 2)
+
+    logging.info(f'Lancement du traitement sur {tasks.__len__()} avec {num_workers} workers... 🚀')
+    logging.getLogger().setLevel(logging.WARNING)
+    sitk.ProcessObject.SetGlobalWarningDisplay(False) # Annoying SimpleITK warnings, enable to debug
+
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(process_subject_wrapper, task): task for task in tasks}
+        for future in tqdm(as_completed(futures), total=len(futures), desc='Processing subjects'):
+            result = future.result()
+            if result is not None:
+                tqdm.write(result)
+
+
+def process_subject_wrapper(args):
+    subject_path, out_subject_path = args
+    
+    try:
+        process_subject(subject_path, out_subject_path)
+        return None
+    except Exception as e:
+        return f"Erreur sur {subject_path}: {e}"
 
 # ----------------------- CLI ------------------------
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Convert DICOM CT/PET/EARL to NIfTI and compute PET SUV')
-    parser.add_argument('--input', '-i', type=str, required=True, help='Path to input DICOM dataset [folder with subfolders per series]')
-    parser.add_argument('--output', '-o', type=str, required=True, help='Path to output folder for NIfTI files [Same structure as input]')
+    parser.add_argument('--input', '-i', type=str, required=True, 
+                        help='Path to input DICOM dataset [folder with subfolders per series]')
+    parser.add_argument('--output', '-o', type=str, required=True, 
+                        help='Path to output folder for NIfTI files [Same structure as input]')
+    parser.add_argument('--workers', '-w', type=int, default=None, # not required
+                        help='Number of parallel workers (default: CPU count - 2)')
     args = parser.parse_args()
 
-    process_subjects_directory(args.input, args.output)
+    process_subjects_directory(args.input, args.output, args.workers)
 
 

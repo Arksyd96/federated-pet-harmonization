@@ -26,19 +26,16 @@ setting:
   
   # --- GÉOMÉTRIE & MASQUES ---
   # Tolérance pour les petites différences de grille entre masque et image
-  geometryTolerance: 0.00001
-  
-  # Si le masque a été dessiné sur un CT et que le PET a une résolution différente,
-  # 'correctMask' permet de redimensionner le masque à la volée.
+  geometryTolerance: 1e-4
   correctMask: True
   
   # --- RÉÉCHANTILLONNAGE (RESAMPLING) ---
   # Fortement recommandé pour rendre les textures invariantes à la rotation
   # et gérer l'anisotropie des voxels (souvent le cas en PET clinique).
   # On force des voxels cubiques (isotropes).
-  interpolator: 'sitkBSpline'
-  resampledPixelSpacing: [2.0, 2.0, 2.0] # En mm. 2x2x2 est standard pour le PET corps entier.
-  padDistance: 10 # Marge de sécurité lors du crop
+  # interpolator: 'sitkBSpline'
+  # resampledPixelSpacing: [2.0, 2.0, 2.0] # En mm. 2x2x2 est standard pour le PET corps entier.
+  # padDistance: 10 # Marge de sécurité lors du crop
 
   # --- DIVERS ---
   label: 1

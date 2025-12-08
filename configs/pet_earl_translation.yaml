@@ -8,13 +8,13 @@ dir_name: runs/pet-earl-translation-diffusion
 name: Traduction PET EARL (DiffusionModel)
 
 datamodule:
-    root_dir: ../datasets/EARL/Ano_Nifti
+    root_dir: ./data/PET-EARL/Ano_Nifti_resampled/
     batch_size: 4
-    train_ratio: 1.0
+    train_ratio: 0.95
     patch_size: [64, 64, 64]
-    # spacing: [2.0, 2.0, 2.0]
     num_workers: 32 
-    cache_rate: 0.0  
+    queue_max_length: 600
+    samples_per_volume: 8
 
 denoiser:
     in_ch: 2
@@ -59,13 +59,13 @@ diffuser:
     estimator_objective: x_T  # Noise
     use_ema: false
     clip_x0: false
-    sample_every_n_steps: 10
+    sample_every_n_steps: 1500
     optimizer_kwargs: {lr: 4.0e-6}
 
 # trainer state
 model_checkpoint:
     monitor: train/L1
-    every_n_epochs: 20
+    every_n_epochs: 10
     save_last: true
     save_top_k: 1
     mode: min
@@ -79,5 +79,5 @@ trainer:
     log_every_n_steps: 1
     min_epochs: 3000
     max_epochs: 8000
-    check_val_every_n_epoch: 10
+    check_val_every_n_epoch: 1
     num_sanity_val_steps: 0

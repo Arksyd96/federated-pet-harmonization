@@ -21,7 +21,7 @@ def find_ct_file_in_folder(folder):
     for name in sorted(os.listdir(folder)):
         low = name.lower()
         if low.endswith('.nii') or low.endswith('.nii.gz'):
-            if 'ct' in low.split('_')[0] or low.startswith('ct') or 'ct' in low:
+            if low.startswith('ct') or 'ct' in low:
                 return os.path.join(folder, name)
     return None
 

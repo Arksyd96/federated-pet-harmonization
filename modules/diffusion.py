@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchio as tio
 from torchvision.utils import make_grid
 import pytorch_lightning as pl
 import wandb
@@ -22,6 +23,7 @@ from modules.utils import kl_gaussians  # TODO
 from modules.models.unet import UNet
 from modules.scheduler import GaussianNoiseScheduler
 from modules.models.base import BasicModel
+from modules.data import robust_patch_normalization
 
 class DiffusionPipeline(BasicModel):
     def __init__(
@@ -416,7 +418,11 @@ class TranslationDiffusionPipeline(BasicModel):
         self.save_hyperparameters(ignore=['noise_estimator', 'noise_scheduler'])
 
     def _step(self, batch, batch_idx, state, step):
-        source, target, results = batch['source'], batch['target'], {}
+        results = {}
+        source = batch['source'][tio.DATA]
+        target = batch['target'][tio.DATA]
+
+        source, target, _ = robust_patch_normalization(source, target, percentiles=(0.5, 99.5))
 
         if self.clip_x0:
             target = torch.clamp(target, -1, 1)
