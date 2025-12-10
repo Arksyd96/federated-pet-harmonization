@@ -10,13 +10,13 @@ imageType:
 
 featureClass:
   # Activer toutes les classes standards
-  shape:
-  firstorder:
-  glcm:
-  glrlm:
-  glszm:
-  gldm:
-  ngtdm:
+  shape: # Forme 3D
+  firstorder: # Statistiques de premier ordre
+  glcm: # Matrice de cooccurrence des niveaux de gris
+  glrlm: # Matrice de longueurs de course en niveaux de gris
+  glszm: # Matrice de zones en niveaux de gris
+  gldm: # Matrice de dépendance des niveaux de gris
+  ngtdm: # Matrice de différence de voisinage des niveaux de gris
 
 setting:
   # --- DISCRÉTISATION (CRITIQUE) ---
