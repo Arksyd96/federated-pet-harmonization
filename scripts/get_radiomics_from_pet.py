@@ -231,7 +231,7 @@ if __name__ == "__main__":
     parser.add_argument("--root", "-r", type=str, required=True, help="Root folder with subjects.")
     parser.add_argument("--mask", "-m", type=str, required=True, help="Mask filename on the same subject folder (e.g., 'MASK.nii.gz').")
     parser.add_argument("--use-sphere", "-s", action="store_true", help="Use spherical masks centered on the lesion's centroid.")
-    parser.add_argument("--sphere-radius", type=float, default=15.0, help="Radius of the spherical mask in mm (default: 15.0).")
+    parser.add_argument("--sphere-radius", type=float, default=20.0, help="Radius of the spherical mask in mm (default: 15.0).")
     parser.add_argument("--params", "-p", type=str, default=None, help="YAML pyradiomics params file.")
     parser.add_argument("--debug-radiomics", "-db",action="store_true")
     args = parser.parse_args()
