@@ -339,6 +339,32 @@ def robust_patch_normalization(src: torch.Tensor, tgt: torch.Tensor, percentiles
         
     return src_out, tgt_out, norm_factors
 
+def robust_patch_denormalization(src: torch.Tensor, tgt: torch.Tensor, norm_factors: torch.Tensor, clone=True):
+    src_out, tgt_out = src, tgt
+    if clone:
+        src_out = src.clone()
+        tgt_out = tgt.clone()
+        
+    batch_size = src_out.shape[0]
+    
+    for idx in range(batch_size):
+        p_min = norm_factors[idx, 0]
+        p_max = norm_factors[idx, 1]
+        
+        if (p_max - p_min) < 1e-6:
+            continue
+            
+        src_patch = src_out[idx]
+        tgt_patch = tgt_out[idx]
+        
+        src_patch = (src_patch + 1) * (p_max - p_min) / 2 + p_min
+        tgt_patch = (tgt_patch + 1) * (p_max - p_min) / 2 + p_min
+        
+        src_out[idx] = src_patch
+        tgt_out[idx] = tgt_patch
+        
+    return src_out, tgt_out
+
 
 class Float32Lambda:
     def __init__(self):
@@ -417,42 +443,47 @@ class PETTranslationDataModule(LightningDataModule):
         ])
 
     def train_dataloader(self):
-        train_dataset = tio.SubjectsDataset(self.train_subjects, transform=self.transform)
-        sampler = tio.data.UniformSampler(self.patch_size)
-        patches_queue = tio.Queue(
-            subjects_dataset=train_dataset,
-            max_length=self.queue_max_length,
-            samples_per_volume=self.samples_per_volume,
-            sampler=sampler,
-            num_workers=self.num_workers,
-            shuffle_subjects=True,
-            shuffle_patches=True
-        )
-        return tio.SubjectsLoader(
-            patches_queue,
-            batch_size=self.batch_size,
-            num_workers=0,
-            pin_memory=True
-        )
+        if self.train_subjects.__len__() > 0:
+            train_dataset = tio.SubjectsDataset(self.train_subjects, transform=self.transform)
+            sampler = tio.data.UniformSampler(self.patch_size)
+
+            patches_queue = tio.Queue(
+                subjects_dataset=train_dataset,
+                max_length=self.queue_max_length,
+                samples_per_volume=self.samples_per_volume,
+                sampler=sampler,
+                num_workers=self.num_workers,
+                shuffle_subjects=True,
+                shuffle_patches=True
+            )
+            return tio.SubjectsLoader(
+                patches_queue,
+                batch_size=self.batch_size,
+                num_workers=0,
+                pin_memory=True
+            )
+        return None
 
 
     def val_dataloader(self):
-        val_dataset = tio.SubjectsDataset(self.val_subjects, transform=self.transform)
-        sampler = tio.data.UniformSampler(self.patch_size)
+        if self.val_subjects.__len__() > 0:
+            val_dataset = tio.SubjectsDataset(self.val_subjects, transform=self.transform)
+            sampler = tio.data.UniformSampler(self.patch_size)
 
-        patches_queue = tio.Queue(
-            subjects_dataset=val_dataset,
-            max_length=100,
-            samples_per_volume=1,
-            sampler=sampler,
-            num_workers=self.num_workers,
-            shuffle_subjects=False,
-            shuffle_patches=False
-        )
-        
-        return tio.SubjectsLoader(
-            patches_queue,
-            batch_size=self.batch_size,
-            num_workers=0,
-            pin_memory=True
-        )
+            patches_queue = tio.Queue(
+                subjects_dataset=val_dataset,
+                max_length=100,
+                samples_per_volume=1,
+                sampler=sampler,
+                num_workers=self.num_workers,
+                shuffle_subjects=False,
+                shuffle_patches=False
+            )
+            
+            return tio.SubjectsLoader(
+                patches_queue,
+                batch_size=self.batch_size,
+                num_workers=0,
+                pin_memory=True
+            )
+        return None
