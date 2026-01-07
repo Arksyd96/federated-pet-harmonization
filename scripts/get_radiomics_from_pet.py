@@ -141,7 +141,7 @@ def process_single_subject(args):
     # --- Extraction PET ---
     pet_files = [
         f for f in os.listdir(subject_path) 
-        if f.startswith('PET') or f.startswith('EARL')
+        if (f.startswith('PET') or f.startswith('EARL') or f.startswith('predicted_'))
         and (f.endswith('.nii') or f.endswith('.nii.gz'))
         and 'MIP' not in f
     ]
