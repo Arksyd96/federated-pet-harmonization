@@ -487,3 +487,14 @@ class PETTranslationDataModule(LightningDataModule):
                 pin_memory=True
             )
         return None
+    
+    def test_dataloader(self):
+        if self.val_subjects.__len__() > 0:
+            val_dataset = tio.SubjectsDataset(self.val_subjects, transform=tio.Compose([Float32Lambda(), tio.ToCanonical()]))
+            return tio.SubjectsLoader(
+                val_dataset,
+                batch_size=1,
+                num_workers=0,
+                pin_memory=True,
+                shuffle=False
+            )

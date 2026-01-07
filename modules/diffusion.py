@@ -586,6 +586,7 @@ class TranslationDiffusionPipeline(BasicModel):
         guidance_scale=1.0,
         cold_diffusion=False,
         un_cond=None,
+        **kwargs
     ):
         # Note: x_t expected to be in range ~ [-1, 1]
         if self.use_ema:
@@ -664,9 +665,16 @@ class TranslationDiffusionPipeline(BasicModel):
                 device=x_t.device,
             )  # [0, 1, 2, ..., T-1] if steps = T
         else:
-            timesteps_array = self.noise_scheduler.timesteps_array[slice(0, steps)]  
+            timesteps_array = self.noise_scheduler.timesteps_array[slice(0, steps)] 
 
-        for i, t in tqdm(enumerate(reversed(timesteps_array))):
+        verbose = kwargs.get("verbose", True) 
+
+        # for i, t in tqdm(enumerate(reversed(timesteps_array))):
+        iterator = enumerate(reversed(timesteps_array))
+        if verbose:
+            iterator = tqdm(iterator, total=steps, desc="Denoising", leave=False, position=0)
+        
+        for i, t in iterator:
             # UNet prediction
             x_t = torch.cat([x_t, source], dim=1)
             x_t, x_0, x_T, self_cond = self.forward(x_t, t.expand(x_t.shape[0]), condition, self_cond=self_cond, **kwargs)
