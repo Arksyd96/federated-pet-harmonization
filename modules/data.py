@@ -304,7 +304,7 @@ class JointZScoreNormalize(MapTransform):
         return d
     
 
-def robust_patch_normalization(src: torch.Tensor, tgt: torch.Tensor, percentiles=(0.5, 99.5), clone=True):
+def robust_patch_normalization(src: torch.Tensor, tgt: torch.Tensor, percentiles=(0.1, 99.9), clone=True):
     src_out, tgt_out = src, tgt
     if clone:
         src_out = src.clone()
@@ -318,7 +318,7 @@ def robust_patch_normalization(src: torch.Tensor, tgt: torch.Tensor, percentiles
         tgt_patch = tgt_out[idx]
         
         # Aplatir pour calculer les percentiles
-        src_flat = src_out.view(-1)
+        src_flat = src_patch.view(-1)
         
         # Calcul des seuils (quantile attend une entrée float)
         # Note: quantile sur GPU est rapide
@@ -327,6 +327,9 @@ def robust_patch_normalization(src: torch.Tensor, tgt: torch.Tensor, percentiles
         
         if (p_max - p_min) < 1e-6:
             continue
+
+        src_patch = src_patch.clip(min=p_min, max=p_max)
+        tgt_patch = tgt_patch.clip(min=p_min, max=p_max)
             
         src_patch = 2 * (src_patch - p_min) / (p_max - p_min) - 1
         tgt_patch = 2 * (tgt_patch - p_min) / (p_max - p_min) - 1
@@ -494,7 +497,7 @@ class PETTranslationDataModule(LightningDataModule):
             return tio.SubjectsLoader(
                 val_dataset,
                 batch_size=1,
-                num_workers=0,
+                num_workers=-1,
                 pin_memory=True,
                 shuffle=False
             )

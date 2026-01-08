@@ -152,7 +152,7 @@ def process_single_subject(args):
 
     for pet_file in pet_files:
         pet_path = os.path.join(subject_path, pet_file)
-        modality = "EARL" if "EARL" in pet_file else "PET"
+        modality = 'PET_Standard' if pet_file.startswith('PET') else ('PET_EARL' if pet_file.startswith('EARL') else 'PET_Predicted')
 
         # Extraction
         feature_vector = extractor.execute(pet_path, current_mask_input)

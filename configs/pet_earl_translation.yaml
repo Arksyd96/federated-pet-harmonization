@@ -4,27 +4,27 @@ WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 # modules state
 project_name: federated-pet
-dir_name: runs/pet-earl-translation-diffusion
-name: Traduction PET EARL (DiffusionModel)
+dir_name: runs/2d-to-3d-pet-earl-translation-diffusion
+name: Traduction PET EARL 3x64x64 (DiffusionModel)
 
 datamodule:
     root_dir: ./data/PET-EARL/Ano_Nifti_resampled/
-    batch_size: 4
+    batch_size: 32
     train_ratio: 0.95
-    patch_size: [64, 64, 64]
-    num_workers: 32 
-    queue_max_length: 600
-    samples_per_volume: 8
+    patch_size: [3, 64, 64]
+    num_workers: 63 
+    queue_max_length: 16384
+    samples_per_volume: 128
 
 denoiser:
-    in_ch: 2
-    out_ch: 1
-    spatial_dims: 3
+    in_ch: 6
+    out_ch: 3
+    spatial_dims: 2
     hid_chs: [64, 128, 256, 512]
     kernel_sizes: [3, 3, 3, 3]
     strides: [1, 2, 2, 2]
     temb_channels: 128
-    max_period: 1000
+    max_period: 100
     scale_shift_norm: true
 
     # Tuple (str, Dict) converti en liste YAML
@@ -47,7 +47,7 @@ denoiser:
     num_res_blocks: 2
 
 scheduler:
-    timesteps: 1000
+    timesteps: 100
     beta_start: 0.002
     beta_end: 0.02
     schedule_strategy: scaled_linear
@@ -59,7 +59,7 @@ diffuser:
     estimator_objective: x_T  # Noise
     use_ema: false
     clip_x0: false
-    sample_every_n_steps: 1500
+    sample_every_n_steps: 1000
     optimizer_kwargs: {lr: 4.0e-6}
 
 # trainer state

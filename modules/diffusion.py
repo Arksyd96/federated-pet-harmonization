@@ -23,7 +23,7 @@ from modules.utils import kl_gaussians  # TODO
 from modules.models.unet import UNet
 from modules.scheduler import GaussianNoiseScheduler
 from modules.models.base import BasicModel
-from modules.data import robust_patch_normalization
+from modules.data import robust_patch_normalization, robust_patch_denormalization
 
 class DiffusionPipeline(BasicModel):
     def __init__(
@@ -422,17 +422,19 @@ class TranslationDiffusionPipeline(BasicModel):
         source = batch['source'][tio.DATA]
         target = batch['target'][tio.DATA]
 
-        source, target, _ = robust_patch_normalization(source, target, percentiles=(0.5, 99.5))
+        source, target = source.squeeze(1), target.squeeze(1)  # Remove extra dim introduced by torchIO
+        norm_source, norm_target, norm_factors = robust_patch_normalization(source, target, percentiles=(0.0, 99.9), clone=True)
+        target_delta = norm_target - norm_source # => [-2, 2]
 
-        if self.clip_x0:
-            target = torch.clamp(target, -1, 1)
+        # if self.clip_x0:
+        #     norm_target = torch.clamp(norm_target, -1, 1)
 
         # Sample Noise
         with torch.no_grad():
             # Randomly selecting t [0, T-1] and compute x_t (noisy version of x_0 at t)
-            target_placeholder = torch.clone(target)
+            target_placeholder = torch.clone(target_delta)
             x_t, x_T, t = self.noise_scheduler.sample(target_placeholder)
-            condition = source
+            condition = norm_source
 
         # Use EMA Model
         if self.use_ema and (state != "train"):
@@ -441,8 +443,8 @@ class TranslationDiffusionPipeline(BasicModel):
             noise_estimator = self.noise_estimator
 
         # Classifier free guidance
-        if torch.rand(1) <= self.classifier_free_guidance_dropout:
-            condition = torch.zeros_like(condition)
+        # if torch.rand(1) <= self.classifier_free_guidance_dropout:
+        #     condition = torch.zeros_like(condition)
 
         x_t = torch.cat([x_t, condition], dim=1)  # condition is the second half of the tensor
         prediction = noise_estimator(x_t, t, condition)
@@ -455,7 +457,7 @@ class TranslationDiffusionPipeline(BasicModel):
         if self.estimator_objective == "x_T":
             objective = x_T
         elif self.estimator_objective == "x_0":
-            objective = target
+            objective = target_delta
         else:
             raise NotImplementedError(f"Option estimator_target={self.estimator_objective} not supported.")
 
@@ -517,65 +519,130 @@ class TranslationDiffusionPipeline(BasicModel):
             )
 
         if (self.global_step + 1) % self.sample_every_n_steps == 0:
-            self.log_samples(source, target)
+            self.log_samples(norm_source[:8], norm_target[:8], norm_factors[:8])
 
         return loss
 
+    # @torch.no_grad()
+    # def log_samples(self, source: torch.FloatTensor, target: torch.FloatTensor = None):
+    #     if self.trainer.global_rank == 0:
+    #         self.noise_estimator.eval()
+    #         with torch.no_grad():
+    #             prediction = self.sample(
+    #                 source,
+    #                 condition=None, # Ou votre condition si nécessaire
+    #                 # steps=self.noise_scheduler.timesteps,
+    #                 steps=50,
+    #                 use_ddim=True,
+    #             )
+    #         self.noise_estimator.train()
+
+    #         # On suppose le format (B, C, D, H, W). On coupe au milieu de la profondeur D.
+    #         mid_slice_idx = source.shape[2] // 2  # Index 32 pour une taille de 64
+            
+    #         # On récupère les slices 2D: (B, 1, 64, 64)
+    #         source_slice = source[:, :, mid_slice_idx, :, :]
+    #         pred_slice = prediction[:, :, mid_slice_idx, :, :]
+            
+    #         # Liste des images à afficher côte à côte
+    #         images_to_stack = [source_slice, pred_slice]
+            
+    #         # Si on a la vérité terrain (Target EARL), on l'ajoute aussi
+    #         if target is not None:
+    #             target_slice = target[:, :, mid_slice_idx, :, :]
+    #             images_to_stack.append(target_slice)
+
+    #         # Shape résultante par patient : (1, 64, 128) ou (1, 64, 192)
+    #         comparison_batch = torch.cat(images_to_stack, dim=3)
+
+    #         # 4. Dénormalisation ([-1, 1] -> [0, 255])
+    #         # On applique clamp avant et après pour éviter les artefacts visuels bizarres
+    #         comparison_batch = (
+    #             comparison_batch
+    #             .clamp(-1, 1)   # S'assure qu'on ne dépasse pas les bornes théoriques
+    #             .add(1)         # [-1, 1] -> [0, 2]
+    #             .div(2)         # [0, 2]  -> [0, 1]
+    #             .mul(255)       # [0, 1]  -> [0, 255]
+    #             .clamp(0, 255)  # Sécurité finale
+    #             .to(torch.uint8)
+    #         )
+
+    #         # make_grid gère automatiquement l'agencement des batchs (B patients)
+    #         # nrow=1 force une colonne verticale de patients
+    #         grid = make_grid(comparison_batch, nrow=1, padding=2, normalize=False)
+
+    #         # WandB attend (H, W, C), donc on permute car PyTorch est (C, H, W)
+    #         wandb_image = wandb.Image(
+    #             grid.permute(1, 2, 0).cpu().numpy(), 
+    #             caption=f"Epoch {self.current_epoch} | Step {self.global_step} | (Left: Input, Mid: Pred, Right: Target)"
+    #         )
+
+    #         wandb.log({"Validation/Reconstruction_Slices": wandb_image})
+
     @torch.no_grad()
-    def log_samples(self, source: torch.FloatTensor, target: torch.FloatTensor = None):
+    def log_samples(self, source: torch.FloatTensor, target: torch.FloatTensor = None, norm_factors=None):
         if self.trainer.global_rank == 0:
             self.noise_estimator.eval()
             with torch.no_grad():
-                prediction = self.sample(
+                pred_delta = self.sample(
                     source,
-                    condition=None, # Ou votre condition si nécessaire
-                    # steps=self.noise_scheduler.timesteps,
+                    condition=None, 
                     steps=50,
                     use_ddim=True,
                 )
             self.noise_estimator.train()
 
-            # On suppose le format (B, C, D, H, W). On coupe au milieu de la profondeur D.
-            mid_slice_idx = source.shape[2] // 2  # Index 32 pour une taille de 64
+            prediction = source + pred_delta  # Reconstruction finale
+            source, target = robust_patch_denormalization(source, target, norm_factors)
+            prediction, _ = robust_patch_denormalization(prediction, prediction, norm_factors)
+            # => SUV [p_min, p_max]
             
-            # On récupère les slices 2D: (B, 1, 64, 64)
-            source_slice = source[:, :, mid_slice_idx, :, :]
-            pred_slice = prediction[:, :, mid_slice_idx, :, :]
-            
-            # Liste des images à afficher côte à côte
-            images_to_stack = [source_slice, pred_slice]
-            
-            # Si on a la vérité terrain (Target EARL), on l'ajoute aussi
-            if target is not None:
-                target_slice = target[:, :, mid_slice_idx, :, :]
-                images_to_stack.append(target_slice)
-
-            # Shape résultante par patient : (1, 64, 128) ou (1, 64, 192)
-            comparison_batch = torch.cat(images_to_stack, dim=3)
-
-            # 4. Dénormalisation ([-1, 1] -> [0, 255])
-            # On applique clamp avant et après pour éviter les artefacts visuels bizarres
-            comparison_batch = (
-                comparison_batch
-                .clamp(-1, 1)   # S'assure qu'on ne dépasse pas les bornes théoriques
-                .add(1)         # [-1, 1] -> [0, 2]
-                .div(2)         # [0, 2]  -> [0, 1]
-                .mul(255)       # [0, 1]  -> [0, 255]
-                .clamp(0, 255)  # Sécurité finale
-                .to(torch.uint8)
+            self.log('val/mse', F.mse_loss(prediction, target), 
+                batch_size=prediction.shape[0],
+                on_step=True,
+                on_epoch=True,
+                sync_dist=True,
+                prog_bar=True
             )
 
-            # make_grid gère automatiquement l'agencement des batchs (B patients)
-            # nrow=1 force une colonne verticale de patients
-            grid = make_grid(comparison_batch, nrow=1, padding=2, normalize=False)
+            # Format actuel : (B, C, H, W) avec C=3
+            # On veut visualiser le canal du milieu (la slice centrale du contexte)
+            mid_chan_idx = source.shape[1] // 2  # Pour 3 canaux -> index 1
+            
+            # On extrait ce canal tout en gardant la dimension pour avoir (B, 1, H, W)
+            source_slice = source[:, mid_chan_idx:mid_chan_idx + 1, :, :]
+            pred_slice = prediction[:, mid_chan_idx:mid_chan_idx + 1, :, :]
+            target_slice = target[:, mid_chan_idx:mid_chan_idx + 1, :, :]
+            
+            images_to_stack = [source_slice, pred_slice, target_slice]
+        
+            # Concaténation sur l'axe de la largeur (W est la dimension 3 dans B,C,H,W)
+            batch_stack = torch.cat(images_to_stack, dim=3)
+            SUV_DISPLAY_MAX = batch_stack.max().item()  # Pour normalisation [0, 1]
+            display_grid = (batch_stack / SUV_DISPLAY_MAX)
 
-            # WandB attend (H, W, C), donc on permute car PyTorch est (C, H, W)
+            # 4. Dénormalisation ([-1, 1] -> [0, 255])
+            # comparison_batch = (
+            #     comparison_batch
+            #     .clamp(-1, 1)
+            #     .add(1)
+            #     .div(2)
+            #     .mul(255)
+            #     .clamp(0, 255)
+            #     .to(torch.uint8)
+            # )
+
+            # make_grid gère l'agencement
+            grid = make_grid(display_grid, nrow=1, padding=2, normalize=False)
+
+            # WandB attend (H, W, C), permutation nécessaire
             wandb_image = wandb.Image(
                 grid.permute(1, 2, 0).cpu().numpy(), 
-                caption=f"Epoch {self.current_epoch} | Step {self.global_step} | (Left: Input, Mid: Pred, Right: Target)"
+                caption=f"Epoch {self.current_epoch} | Step {self.global_step} | (Left: Input Mid-Ch, Mid: Pred Mid-Ch, Right: Target)"
             )
 
             wandb.log({"Validation/Reconstruction_Slices": wandb_image})
+
 
     def forward(
         self,
