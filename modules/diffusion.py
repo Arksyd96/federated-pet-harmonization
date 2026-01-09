@@ -424,7 +424,7 @@ class TranslationDiffusionPipeline(BasicModel):
 
         source, target = source.squeeze(1), target.squeeze(1)  # Remove extra dim introduced by torchIO
         norm_source, norm_target, norm_factors = robust_patch_normalization(source, target, percentiles=(0.0, 99.9), clone=True)
-        target_delta = norm_target - norm_source # => [-2, 2]
+        target_delta = (norm_target - norm_source) * 5.0 # => [-2, 2]
 
         # if self.clip_x0:
         #     norm_target = torch.clamp(norm_target, -1, 1)
@@ -592,7 +592,7 @@ class TranslationDiffusionPipeline(BasicModel):
                 )
             self.noise_estimator.train()
 
-            prediction = source + pred_delta  # Reconstruction finale
+            prediction = source + (pred_delta / 5.0)  # Reconstruction finale
             source, target = robust_patch_denormalization(source, target, norm_factors)
             prediction, _ = robust_patch_denormalization(prediction, prediction, norm_factors)
             # => SUV [p_min, p_max]

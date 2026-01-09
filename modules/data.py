@@ -3,6 +3,7 @@ from typing import *
 import os
 import numpy as np
 import torch
+import multiprocessing
 
 import torch
 import torch.nn as nn
@@ -497,7 +498,7 @@ class PETTranslationDataModule(LightningDataModule):
             return tio.SubjectsLoader(
                 val_dataset,
                 batch_size=1,
-                num_workers=-1,
+                num_workers=multiprocessing.cpu_count() - 1,
                 pin_memory=True,
                 shuffle=False
             )
