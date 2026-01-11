@@ -263,6 +263,8 @@ class DiffusionPipeline(BasicModel):
 
 
         if self.estimator_objective == "x_0":
+            if x_t.shape[1] != pred.shape[1]:
+                x_t = x_t[:, : pred.shape[1]]
             x_t_prior, x_0 = self.noise_scheduler.estimate_x_t_prior_from_x_0(
                 x_t,
                 t,
@@ -424,7 +426,6 @@ class TranslationDiffusionPipeline(BasicModel):
 
         source, target = source.squeeze(1), target.squeeze(1)  # Remove extra dim introduced by torchIO
         norm_source, norm_target, norm_factors = robust_patch_normalization(source, target, percentiles=(0.0, 99.9), clone=True)
-        target_delta = (norm_target - norm_source) * 100.0 # => [-2, 2]
 
         # if self.clip_x0:
         #     norm_target = torch.clamp(norm_target, -1, 1)
@@ -457,7 +458,7 @@ class TranslationDiffusionPipeline(BasicModel):
         if self.estimator_objective == "x_T":
             objective = x_T
         elif self.estimator_objective == "x_0":
-            objective = target_delta
+            objective = target
         else:
             raise NotImplementedError(f"Option estimator_target={self.estimator_objective} not supported.")
 
@@ -686,6 +687,7 @@ class TranslationDiffusionPipeline(BasicModel):
         # pred_var_scale = pred_var_scale.clamp(0, 1)
 
         if self.estimator_objective == "x_0":
+            
             x_t_prior, x_0 = self.noise_scheduler.estimate_x_t_prior_from_x_0(
                 x_t,
                 t,

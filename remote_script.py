@@ -1,147 +1,93 @@
-import torch
-import torch.nn as nn
-import torchio as tio
-from tqdm import tqdm
+import argparse
 import os
-import SimpleITK as sitk
-from modules.data import PETTranslationDataModule
-from modules.diffusion import TranslationDiffusionPipeline
-from modules.models.unet import UNet
-from modules.scheduler import GaussianNoiseScheduler
-from modules.utils import set_seed
-from omegaconf import OmegaConf
+import numpy as np
+import nibabel as nib
+from tqdm import tqdm
 
-from modules.data import robust_patch_normalization, robust_patch_denormalization
+# Argument Parsing
+parser = argparse.ArgumentParser(description="Analyse des maxima SUV dans des volumes PET NIfTI.")
+parser.add_argument("--data_dir", type=str, required=True, help="Répertoire racine contenant les données PET NIfTI.")
+args = parser.parse_args()
 
 # --- CONFIGURATION ---
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+ROOT_DIR = args.data_dir  # Répertoire racine contenant les données PET NIfTI
 
-config = OmegaConf.load('./configs/pet_earl_translation.yaml')
-config = OmegaConf.to_container(config, resolve=True)
-set_seed(config.get('SEED', 42), workers=True)
+pet_max_values = []
 
-denoiser = UNet(cond_embedder=None, **config.get('denoiser', {}))
-noise_scheduler = GaussianNoiseScheduler(**config.get('scheduler', {}))
-diffuser = TranslationDiffusionPipeline.load_from_checkpoint(
-    './runs/2d-to-3d-pet-earl-translation-diffusion/2026_01_08_131448/checkpoints/last.ckpt',
-    noise_estimator=denoiser,
-    noise_scheduler=noise_scheduler,
-    strict=False
-)
+print(f"Exploration de {ROOT_DIR} ...")
 
-denoiser, noise_scheduler, diffuser = denoiser.to(device), noise_scheduler.to(device), diffuser.to(device)
-diffuser.eval()
+# 1. Récupération des fichiers
+pet_files = []
+for root, dirs, files in os.walk(ROOT_DIR):
+    for filename in files:
+        if filename.startswith("PET_") and filename.endswith(".nii.gz"):
+            pet_files.append(os.path.join(root, filename))
 
-print('model loaded')
-print('seed: {}'.format(config['SEED']))
+print(f"Analyse des maxima pour {len(pet_files)} patients...")
 
-datamodule = PETTranslationDataModule(**config.get('datamodule', {}))
+# 2. Boucle rapide : Juste le max par volume
+for file_path in tqdm(pet_files):
+    try:
+        # On charge juste le header si possible pour vérifier, mais nibabel charge tout en lazy loading
+        # get_fdata() charge en mémoire, on calcule le max et on libère
+        img = nib.load(file_path)
+        data = img.get_fdata()
+        
+        # On nettoie les valeurs aberrantes négatives ou NaN
+        valid_max = np.nanmax(data)
+        
+        # Sécurité : Si le max est infini (bug d'acquisition), on ignore
+        if np.isfinite(valid_max):
+            pet_max_values.append(valid_max)
+            
+    except Exception as e:
+        print(f"Erreur lecture {file_path}: {e}")
 
-datamodule.prepare_data()
-datamodule.setup()
-batch = next(iter(datamodule.test_dataloader()))
+# 3. Analyse Statistique Détaillée
+if not pet_max_values:
+    print("Aucune donnée trouvée.")
+    exit()
 
-print('Treating subject: {}'.format(batch['subject_id'][0]))
+pet_max_values = np.array(pet_max_values)
+total_patients = len(pet_max_values)
 
+# Calcul des percentiles
+percentiles_to_check = [90, 95, 98, 99, 99.5, 99.9]
+stats = {}
 
-# --- 1. Chargement des Données ---
-results = {}
-source, target = batch['source'][tio.DATA], batch['target'][tio.DATA]
-source, target = source.squeeze(1), target.squeeze(1)  # Remove extra dim introduced by torchIO
+for p in percentiles_to_check:
+    thresh = np.percentile(pet_max_values, p)
+    # Nombre de patients qui dépassent ce seuil (qui seront clippés)
+    n_clipped = np.sum(pet_max_values > thresh)
+    n_kept = total_patients - n_clipped
+    stats[p] = (thresh, n_kept, n_clipped)
 
-# --- 2. Préparation des Tenseurs ---
-source, target = source.to(device), target.to(device)
-b, d_dim, h_dim, w_dim = source.shape
-# batch is always 1 in inference
+absolute_max = np.max(pet_max_values)
 
-output_volume = torch.zeros((d_dim, h_dim, w_dim), device=device)
-count_map = torch.zeros((d_dim, h_dim, w_dim), device=device)
+print("\n" + "="*60)
+print(f"DISTRIBUTION DES MAXIMA SUV (Sur {total_patients} patients)")
+print("="*60)
+print(f"{'Percentile':<10} | {'Seuil (SUV)':<12} | {'Patients OK':<12} | {'Patients Clippés':<15}")
+print("-" * 60)
 
-# Fonction pour générer les indices de départ sans dépasser
-def get_start_indices(dim_size, patch_size, stride):
-    indices = []
-    i = 0
-    while i + patch_size <= dim_size:
-        indices.append(i)
-        i += stride
-    # Ajouter le dernier patch collé au bord si on n'est pas tombé pile poil
-    if indices[-1] + patch_size < dim_size:
-        indices.append(dim_size - patch_size)
-    return sorted(list(set(indices))) # set pour éviter doublons si ça tombe pile
+for p in percentiles_to_check:
+    thresh, kept, clipped = stats[p]
+    print(f"P{p:<9} | {thresh:<12.2f} | {kept:<12} | {clipped:<15} ({100*clipped/total_patients:.1f}%)")
 
-z_patch_size = 3
-y_patch_size = 64
-x_patch_size = 64
-overlap = 1  # recouvrement de 1 voxel
+print("-" * 60)
+print(f"Max Absolu : {absolute_max:.2f} SUV (Patient le plus chaud ou artefact)")
+print("="*60)
 
-z_starts = get_start_indices(d_dim, z_patch_size, z_patch_size - overlap)
-y_starts = get_start_indices(h_dim, y_patch_size, y_patch_size - overlap)
-x_starts = get_start_indices(w_dim, x_patch_size, x_patch_size - overlap)
+# Interprétation automatique
+recommended_p = 98 # Par défaut
+for p in percentiles_to_check:
+    thresh, kept, clipped = stats[p]
+    # Règle empirique : on tolère de clipper ~2-5% des patients si ça permet de gagner beaucoup en dynamique
+    if clipped <= (0.05 * total_patients): 
+        recommended_p = p
+        break
 
-total_patches = len(z_starts) * len(y_starts) * len(x_starts)
-print(f"Volume: {d_dim}x{h_dim}x{w_dim} | Patchs à traiter : {total_patches}")
-
-# --- 4. Boucle d'Inférence ---
-pbar = tqdm(total=total_patches, desc="Inférence par Patch")
-
-with torch.no_grad():
-    for z in z_starts:
-        for y in y_starts:
-            for x in x_starts:
-                
-                # A. Extraction du Patch Source
-                patch_src = source[:, z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size]
-                patch_tgt = target[:, z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size]
-                
-                # B. Prédiction (Appel à ta pipeline de diffusion)
-                norm_patch_src, norm_patch_tgt, norm_factors = robust_patch_normalization(patch_src, patch_tgt, percentiles=(0.0, 99.9), clone=True)
-                target_delta = norm_patch_tgt - norm_patch_src # => [-2, 2]
-                
-                # steps=50 (ou moins pour aller plus vite en test)
-                with torch.no_grad():
-                    delta = diffuser.sample(
-                        norm_patch_src,
-                        condition=None,
-                        steps=10,
-                        use_ddim=True,
-                        verbose=False
-                    )
-
-                norm_patch_pred = norm_patch_src + delta
-                patch_pred_suv, _ = robust_patch_denormalization(norm_patch_pred, norm_patch_pred, norm_factors)
-
-                # print(norm_patch_pred.min().item(), norm_patch_pred.max().item(), norm_patch_pred.mean().item())
-                # print(patch_pred_suv.min().item(), patch_pred_suv.max().item(), patch_pred_suv.mean().item())
-                # print(norm_factors)
-                
-                # C. Accumulation
-                output_volume[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += patch_pred_suv.squeeze(0)
-                count_map[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += 1.0
-                
-                pbar.update(1)
-
-pbar.close()
-
-# --- 5. Normalisation et Sauvegarde ---
-final_prediction = output_volume / count_map
-
-# Retour sur CPU pour sauvegarde
-final_prediction = final_prediction.cpu()
-final_prediction = final_prediction.squeeze().permute(2, 1, 0)  # Suppression des dimensions batch et channel
-
-output_sitk = sitk.GetImageFromArray(final_prediction)
-s_meta = sitk.ReadImage(batch['source']['path'][0])
-
-orient_filter = sitk.DICOMOrientImageFilter()
-orient_filter.SetDesiredCoordinateOrientation("LPS")
-output_sitk = orient_filter.Execute(s_meta)
-
-output_sitk.SetDirection(s_meta.GetDirection())
-output_sitk.SetOrigin(s_meta.GetOrigin())
-output_sitk.SetSpacing(s_meta.GetSpacing())
-
-output_path = os.path.join(os.path.dirname(batch['source']['path'][0]), f'predicted_EARL.nii.gz')
-sitk.WriteImage(output_sitk, output_path)
-
-print(f'Prediction saved at: {output_path}')
-
+rec_thresh, _, rec_clipped = stats[recommended_p]
+print(f"\n💡 RECOMMANDATION : Utilise le P{recommended_p} (Seuil = {rec_thresh:.2f})")
+print(f"   Cela permet de couvrir {total_patients - rec_clipped} patients sans aucune perte,")
+print(f"   et de ne saturer légèrement que les {rec_clipped} patients les plus extrêmes.")
