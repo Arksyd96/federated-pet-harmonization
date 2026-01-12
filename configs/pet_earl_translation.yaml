@@ -9,12 +9,12 @@ name: Traduction PET EARL 5x64x64 (DiffusionModel)
 
 datamodule:
     root_dir: ./data/PET-EARL/Ano_Nifti_resampled/
-    batch_size: 32
+    batch_size: 8
     train_ratio: 0.95
     patch_size: [5, 64, 64]
-    num_workers: 63 
-    queue_max_length: 16384
-    samples_per_volume: 128
+    num_workers: 32 
+    queue_max_length: 2048
+    samples_per_volume: 32
 
 denoiser:
     in_ch: 10
@@ -71,9 +71,6 @@ model_checkpoint:
     mode: min
 
 trainer:
-    # strategy: ddp
-    # devices: 2
-    # num_nodes: 1
     precision: 32
     accelerator: gpu
     log_every_n_steps: 1

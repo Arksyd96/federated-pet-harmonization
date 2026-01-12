@@ -421,80 +421,93 @@ class TranslationDiffusionPipeline(BasicModel):
 
     def _step(self, batch, batch_idx, state, step):
         results = {}
-        source = batch['source'][tio.DATA]
-        target = batch['target'][tio.DATA]
+        
+        source = batch['source'][tio.DATA]  # PET (Condition)
+        target = batch['target'][tio.DATA]  # EARL (Objective)
 
-        source, target = source.squeeze(1), target.squeeze(1)  # Remove extra dim introduced by torchIO
-        norm_source, norm_target, norm_factors = robust_patch_normalization(source, target, percentiles=(0.0, 99.9), clone=True)
+        # Suppression de la dimension TorchIO (B, 1, D, H, W) -> (B, D, H, W) ou (B, 1, H, W)
+        source, target = source.squeeze(1), target.squeeze(1)
 
-        # if self.clip_x0:
-        #     norm_target = torch.clamp(norm_target, -1, 1)
+        # 2. Normalisation Globale (Inline)
+        # On remplace robust_patch_normalization par le scaling global fixe [0, 50] -> [-1, 1]
+        # Cela évite l'amplification du bruit de fond.
+        SUV_MAX = 50.0 
+        
+        norm_source = 2.0 * (torch.clamp(source, 0, SUV_MAX) / SUV_MAX) - 1.0
+        norm_target = 2.0 * (torch.clamp(target, 0, SUV_MAX) / SUV_MAX) - 1.0
 
-        # Sample Noise
+        if self.clip_x0:
+            norm_target = torch.clamp(norm_target, -1, 1)
+
+        # 3. Processus de Diffusion (Forward)
         with torch.no_grad():
-            # Randomly selecting t [0, T-1] and compute x_t (noisy version of x_0 at t)
-            target_placeholder = torch.clone(target_delta)
-            x_t, x_T, t = self.noise_scheduler.sample(target_placeholder)
+            # On part de l'image cible normalisée (x_0)
+            x_0 = torch.clone(norm_target)
+            x_t, x_T, t = self.noise_scheduler.sample(norm_target)
+            
+            # La condition est l'image PET propre
             condition = norm_source
 
-        # Use EMA Model
+        # 4. Prédiction du Modèle
         if self.use_ema and (state != "train"):
             noise_estimator = self.ema_model.averaged_model
         else:
             noise_estimator = self.noise_estimator
 
-        # Classifier free guidance
-        # if torch.rand(1) <= self.classifier_free_guidance_dropout:
-        #     condition = torch.zeros_like(condition)
+        # Conditioning : Concaténation (Palette/SR3 Style)
+        # L'entrée du réseau devient : [Noisy EARL | Clean PET]
+        model_input = torch.cat([x_t, condition], dim=1)
+        prediction = noise_estimator(model_input, t, condition)
 
-        x_t = torch.cat([x_t, condition], dim=1)  # condition is the second half of the tensor
-        prediction = noise_estimator(x_t, t, condition)
-
-        # Separate variance (scale) if it was learned
+        # Séparation variance si apprise
         if self.estimate_variance:
             prediction, variance = prediction.chunk(2, dim=1)
 
-        # Specify target
+        # 5. Définition de l'Objectif
         if self.estimator_objective == "x_T":
-            objective = x_T
+            objective = x_T # Le bruit pur (epsilon)
         elif self.estimator_objective == "x_0":
-            objective = target
+            objective = x_0 # L'image EARL propre
         else:
             raise NotImplementedError(f"Option estimator_target={self.estimator_objective} not supported.")
 
-        # ------------------------- Compute Loss ---------------------------
+        # ------------------------- Calcul de la Loss Principale ---------------------------
         loss = self.loss_fct(prediction, objective)
 
-        # ----------------- Variance Loss --------------
+        # ----------------- Variance Loss (Code conservé et nettoyé) --------------
         if self.estimate_variance:
-            # var_scale = var_scale.clamp(-1, 1) # Should not be necessary
-            var_scale = (variance + 1) / 2  # Assumed to be in [-1, 1] -> [0, 1]
+            # var_scale assumed to be in [-1, 1] -> [0, 1]
+            var_scale = (variance + 1) / 2  
+            
             pred_logvar = self.noise_scheduler.estimate_variance_t(t, x_t.ndim, log=True, var_scale=var_scale)
-            # pred_logvar = pred_var  # If variance is estimated directly
 
+            # Reconstitution de x_0 pour le calcul de la KL divergence
             if self.estimator_objective == "x_T":
-                pred_x_0 = self.noise_scheduler.estimate_x_0(x_t, x_T, t, clip_x0=self.clip_x0)
+                # Si on a prédit le bruit, on déduit x_0
+                pred_x_0 = self.noise_scheduler.estimate_x_0(x_t, prediction, t, clip_x0=self.clip_x0)
             elif self.estimator_objective == "x_0":
+                # Si on a prédit x_0, c'est direct
                 pred_x_0 = prediction
             else:
                 raise NotImplementedError()
 
             with torch.no_grad():
+                # On compare la distribution prédite avec la distribution "réelle" postérieure
                 pred_mean = self.noise_scheduler.estimate_mean_t(x_t, pred_x_0, t)
-                true_mean = self.noise_scheduler.estimate_mean_t(x_t, target, t)
+                true_mean = self.noise_scheduler.estimate_mean_t(x_t, norm_target, t)
                 true_logvar = self.noise_scheduler.estimate_variance_t(
                     t, x_t.ndim, log=True, var_scale=0
                 )
 
             kl_loss = torch.mean(
                 kl_gaussians(true_mean, true_logvar, pred_mean, pred_logvar),
-                dim=list(range(1, target.ndim)),
+                dim=list(range(1, norm_target.ndim)),
             )
             nnl_loss = torch.mean(
                 F.gaussian_nll_loss(
-                    pred_x_0, target, torch.exp(pred_logvar), reduction="none"
+                    pred_x_0, norm_target, torch.exp(pred_logvar), reduction="none"
                 ),
-                dim=list(range(1, target.ndim)),
+                dim=list(range(1, norm_target.ndim)),
             )
             var_loss = torch.mean(torch.where(t == 0, nnl_loss, kl_loss))
             loss += var_loss
@@ -502,12 +515,11 @@ class TranslationDiffusionPipeline(BasicModel):
             results["variance_scale"] = torch.mean(var_scale)
             results["variance_loss"] = var_loss
 
-        # --------------------- Compute Metrics  -------------------------------
+        # --------------------- Metrics & Logs -------------------------------
         with torch.no_grad():
             results["L2"] = F.mse_loss(prediction, objective)
             results["L1"] = F.l1_loss(prediction, objective)
 
-        # ----------------- Log Scalars ----------------------
         for metric_name, metric_val in results.items():
             self.log(
                 f"{state}/{metric_name}",
@@ -516,133 +528,77 @@ class TranslationDiffusionPipeline(BasicModel):
                 on_step=True,
                 on_epoch=True,
                 sync_dist=True,
-                prog_bar=True,
+                prog_bar=(metric_name == "L1"), # Affiche L1 dans la barre de progression
             )
 
+        # Visualisation
         if (self.global_step + 1) % self.sample_every_n_steps == 0:
-            self.log_samples(norm_source[:8], norm_target[:8], norm_factors[:8])
+            self.log_samples(norm_source[:8], x_0[:8])
 
         return loss
 
-    # @torch.no_grad()
-    # def log_samples(self, source: torch.FloatTensor, target: torch.FloatTensor = None):
-    #     if self.trainer.global_rank == 0:
-    #         self.noise_estimator.eval()
-    #         with torch.no_grad():
-    #             prediction = self.sample(
-    #                 source,
-    #                 condition=None, # Ou votre condition si nécessaire
-    #                 # steps=self.noise_scheduler.timesteps,
-    #                 steps=50,
-    #                 use_ddim=True,
-    #             )
-    #         self.noise_estimator.train()
-
-    #         # On suppose le format (B, C, D, H, W). On coupe au milieu de la profondeur D.
-    #         mid_slice_idx = source.shape[2] // 2  # Index 32 pour une taille de 64
-            
-    #         # On récupère les slices 2D: (B, 1, 64, 64)
-    #         source_slice = source[:, :, mid_slice_idx, :, :]
-    #         pred_slice = prediction[:, :, mid_slice_idx, :, :]
-            
-    #         # Liste des images à afficher côte à côte
-    #         images_to_stack = [source_slice, pred_slice]
-            
-    #         # Si on a la vérité terrain (Target EARL), on l'ajoute aussi
-    #         if target is not None:
-    #             target_slice = target[:, :, mid_slice_idx, :, :]
-    #             images_to_stack.append(target_slice)
-
-    #         # Shape résultante par patient : (1, 64, 128) ou (1, 64, 192)
-    #         comparison_batch = torch.cat(images_to_stack, dim=3)
-
-    #         # 4. Dénormalisation ([-1, 1] -> [0, 255])
-    #         # On applique clamp avant et après pour éviter les artefacts visuels bizarres
-    #         comparison_batch = (
-    #             comparison_batch
-    #             .clamp(-1, 1)   # S'assure qu'on ne dépasse pas les bornes théoriques
-    #             .add(1)         # [-1, 1] -> [0, 2]
-    #             .div(2)         # [0, 2]  -> [0, 1]
-    #             .mul(255)       # [0, 1]  -> [0, 255]
-    #             .clamp(0, 255)  # Sécurité finale
-    #             .to(torch.uint8)
-    #         )
-
-    #         # make_grid gère automatiquement l'agencement des batchs (B patients)
-    #         # nrow=1 force une colonne verticale de patients
-    #         grid = make_grid(comparison_batch, nrow=1, padding=2, normalize=False)
-
-    #         # WandB attend (H, W, C), donc on permute car PyTorch est (C, H, W)
-    #         wandb_image = wandb.Image(
-    #             grid.permute(1, 2, 0).cpu().numpy(), 
-    #             caption=f"Epoch {self.current_epoch} | Step {self.global_step} | (Left: Input, Mid: Pred, Right: Target)"
-    #         )
-
-    #         wandb.log({"Validation/Reconstruction_Slices": wandb_image})
 
     @torch.no_grad()
-    def log_samples(self, source: torch.FloatTensor, target: torch.FloatTensor = None, norm_factors=None):
+    def log_samples(self, source_norm: torch.FloatTensor, target_norm: torch.FloatTensor):
         if self.trainer.global_rank == 0:
             self.noise_estimator.eval()
-            with torch.no_grad():
-                pred_delta = self.sample(
-                    source,
-                    condition=None, 
-                    steps=50,
-                    use_ddim=True,
-                )
-            self.noise_estimator.train()
 
-            prediction = source + (pred_delta / 100.0)  # Reconstruction finale
-            source, target = robust_patch_denormalization(source, target, norm_factors)
-            prediction, _ = robust_patch_denormalization(prediction, prediction, norm_factors)
-            # => SUV [p_min, p_max]
-            
-            self.log('val/mse', F.mse_loss(prediction, target), 
-                batch_size=prediction.shape[0],
-                on_step=True,
-                on_epoch=True,
-                sync_dist=True,
-                prog_bar=True
+            norm_pred = self.sample(
+                source_norm,          
+                steps=100,        
+                use_ddim=False,   
             )
 
-            # Format actuel : (B, C, H, W) avec C=3
-            # On veut visualiser le canal du milieu (la slice centrale du contexte)
-            mid_chan_idx = source.shape[1] // 2  # Pour 3 canaux -> index 1
+            # Denormalisation des images prédites
+            SUV_MAX = 50.0
+            pred_suv = 0.5 * (norm_pred + 1.0) * SUV_MAX
+            target_suv = 0.5 * (target_norm + 1.0) * SUV_MAX
+            source_suv = 0.5 * (source_norm + 1.0) * SUV_MAX
             
-            # On extrait ce canal tout en gardant la dimension pour avoir (B, 1, H, W)
-            source_slice = source[:, mid_chan_idx:mid_chan_idx + 1, :, :]
-            pred_slice = prediction[:, mid_chan_idx:mid_chan_idx + 1, :, :]
-            target_slice = target[:, mid_chan_idx:mid_chan_idx + 1, :, :]
+            # --- 4. MÉTRIQUES (Sur les valeurs SUV réelles) ---
+            # On calcule la MSE sur les vraies valeurs physiques pour avoir une idée clinique
+            mse_val = F.mse_loss(pred_suv, target_suv)
+            self.log('val/mse_suv', mse_val, 
+                on_step=False, on_epoch=True, sync_dist=True, prog_bar=False
+            )
+
+            # --- 5. VISUALISATION (Slice Centrale) ---
+            # On prend le milieu des canaux (contexte 2.5D) ou le canal 0 (2D)
+            mid_idx = source_suv.shape[1] // 2
             
-            images_to_stack = [source_slice, pred_slice, target_slice]
-        
-            # Concaténation sur l'axe de la largeur (W est la dimension 3 dans B,C,H,W)
-            batch_stack = torch.cat(images_to_stack, dim=3)
-            SUV_DISPLAY_MAX = batch_stack.max().item()  # Pour normalisation [0, 1]
-            display_grid = (batch_stack / SUV_DISPLAY_MAX)
+            # Extraction des slices (B, 1, H, W)
+            imgs_suv = {
+                'Input (PET)': source_suv[:, mid_idx:mid_idx + 1],
+                'Pred (EARL)': pred_suv[:, mid_idx:mid_idx + 1],
+                'Target (EARL)': target_suv[:, mid_idx:mid_idx + 1]
+            }
+            
+            # Stack horizontal : [Input | Pred | Target]
+            batch_stack = torch.cat(list(imgs_suv.values()), dim=3)
 
-            # 4. Dénormalisation ([-1, 1] -> [0, 255])
-            # comparison_batch = (
-            #     comparison_batch
-            #     .clamp(-1, 1)
-            #     .add(1)
-            #     .div(2)
-            #     .mul(255)
-            #     .clamp(0, 255)
-            #     .to(torch.uint8)
-            # )
-
-            # make_grid gère l'agencement
+            # --- 6. FORMATION DE L'IMAGE WANDB ---
+            SUV_DISPLAY_MAX = 15.0
+            display_grid = (batch_stack / SUV_DISPLAY_MAX).clamp(0, 1)
+            
+            # Création de la grille (1 colonne de patients)
             grid = make_grid(display_grid, nrow=1, padding=2, normalize=False)
 
-            # WandB attend (H, W, C), permutation nécessaire
-            wandb_image = wandb.Image(
-                grid.permute(1, 2, 0).cpu().numpy(), 
-                caption=f"Epoch {self.current_epoch} | Step {self.global_step} | (Left: Input Mid-Ch, Mid: Pred Mid-Ch, Right: Target)"
+            # Légende avec stats pour vérifier que le modèle ne prédit pas une image vide/grise
+            # afficher stats prediction et target
+            caption = (
+                f"Epoch {self.current_epoch} | (Left: PET, Mid: Pred, Right: EARL)\n"
+                f"Pred SUV - min: {pred_suv.min():.2f}, max: {pred_suv.max():.2f}, mean: {pred_suv.mean():.2f}\n"
+                f"Target SUV - min: {target_suv.min():.2f}, max: {target_suv.max():.2f}, mean: {target_suv.mean():.2f}"
             )
 
-            wandb.log({"Validation/Reconstruction_Slices": wandb_image})
+            wandb_image = wandb.Image(
+                grid.permute(1, 2, 0).cpu().numpy(), 
+                caption=caption
+            )
+
+            wandb.log({"Validation/Reconstruction": wandb_image})
+            
+            self.noise_estimator.train()
 
 
     def forward(
@@ -687,7 +643,8 @@ class TranslationDiffusionPipeline(BasicModel):
         # pred_var_scale = pred_var_scale.clamp(0, 1)
 
         if self.estimator_objective == "x_0":
-            
+            if x_t.shape[1] != pred.shape[1]:
+                x_t = x_t[:, :pred.shape[1]]
             x_t_prior, x_0 = self.noise_scheduler.estimate_x_t_prior_from_x_0(
                 x_t,
                 t,

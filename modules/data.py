@@ -378,8 +378,7 @@ class Float32Lambda:
         for image in subject.get_images(intensity_only=False):
             image.data = image.data.float()
         return subject
-        
-    
+
 
 # --- LE LIGHTNING DATA MODULE ---
 class PETTranslationDataModule(LightningDataModule):
@@ -402,12 +401,13 @@ class PETTranslationDataModule(LightningDataModule):
         self.queue_max_length = queue_max_length
         self.samples_per_volume = samples_per_volume
 
-    def get_pt_earl_file_pairs(self, files: List[str]) -> List[Dict[str, str]]:
+    def get_pt_earl_files(self, files: List[str]) -> List[Dict[str, str]]:
         #  --- Adaptez ces filtres à vos noms de fichiers exacts ---
         files = [f for f in files if f.endswith('.nii') or f.endswith('.nii.gz')]
         pt_files = [f for f in files if f.startswith('PET') and 'MIP' not in f]
         earl_files = [f for f in files if f.startswith('EARL') and 'MIP' not in f]
-        return pt_files[0], earl_files[0]
+        sampling_files = [f for f in files if f.startswith('body') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
+        return pt_files[0], earl_files[0], sampling_files[0]
 
     def setup(self, stage=None):
         # --- Listing des fichiers ---
@@ -417,12 +417,13 @@ class PETTranslationDataModule(LightningDataModule):
         for subj_name in all_subjects:
             subj_path = os.path.join(self.root_dir, subj_name)
             files = os.listdir(subj_path)
-            pt_file, earl_file = self.get_pt_earl_file_pairs(files)
+            pt_file, earl_file, sampling_file = self.get_pt_earl_files(files)
             
             if pt_file and earl_file:
                 subject = tio.Subject(
                     source=tio.Image(os.path.join(subj_path, pt_file), type=tio.INTENSITY),
                     target=tio.Image(os.path.join(subj_path, earl_file), type=tio.INTENSITY),
+                    sampling_map=tio.Image(os.path.join(subj_path, sampling_file), type=tio.LABEL), # Utilisé pour le sampling
                     subject_id=subj_name
                 )
 
@@ -442,14 +443,22 @@ class PETTranslationDataModule(LightningDataModule):
         self.transform = tio.Compose([
             Float32Lambda(),
             tio.ToCanonical(),
-            tio.RandomFlip(axes=(0, 1, 2), p=0.5),
-            # tio.RandomAffine(scales=(0.9, 1.1), degrees=10, isotropic=True, p=0.5),
+            tio.RandomFlip(axes=(0, 1, 2), p=0.5)
         ])
+        
 
     def train_dataloader(self):
         if self.train_subjects.__len__() > 0:
             train_dataset = tio.SubjectsDataset(self.train_subjects, transform=self.transform)
-            sampler = tio.data.UniformSampler(self.patch_size)
+            # sampler = tio.data.UniformSampler(self.patch_size)
+            sampler = tio.LabelSampler(
+                patch_size=self.patch_size,
+                label_name='sampling_map',
+                label_probabilities={
+                    0: 0.05,  # 5% de chance de prendre un patch centré sur l'air (pour la robustesse)
+                    1: 0.95   # 95% de chance de prendre un patch centré sur le patient
+                }
+            )
 
             patches_queue = tio.Queue(
                 subjects_dataset=train_dataset,
@@ -460,19 +469,28 @@ class PETTranslationDataModule(LightningDataModule):
                 shuffle_subjects=True,
                 shuffle_patches=True
             )
+
             return tio.SubjectsLoader(
                 patches_queue,
                 batch_size=self.batch_size,
                 num_workers=0,
                 pin_memory=True
             )
+        
         return None
 
 
     def val_dataloader(self):
         if self.val_subjects.__len__() > 0:
             val_dataset = tio.SubjectsDataset(self.val_subjects, transform=self.transform)
-            sampler = tio.data.UniformSampler(self.patch_size)
+            sampler = tio.LabelSampler(
+                patch_size=self.patch_size,
+                label_name='sampling_map',
+                label_probabilities={
+                    0: 0.05,  # 5% de chance de prendre un patch centré sur l'air (pour la robustesse)
+                    1: 0.95   # 95% de chance de prendre un patch centré sur le patient
+                }
+            )
 
             patches_queue = tio.Queue(
                 subjects_dataset=val_dataset,
@@ -490,6 +508,7 @@ class PETTranslationDataModule(LightningDataModule):
                 num_workers=0,
                 pin_memory=True
             )
+        
         return None
     
     def test_dataloader(self):
