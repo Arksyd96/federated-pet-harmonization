@@ -10,8 +10,7 @@ from modules.models.unet import UNet
 from modules.scheduler import GaussianNoiseScheduler
 from modules.utils import set_seed
 from omegaconf import OmegaConf
-
-from modules.data import robust_patch_normalization, robust_patch_denormalization
+from modules.data import robust_patch_denormalization, robust_patch_normalization
 
 # --- CONFIGURATION ---
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -23,7 +22,7 @@ set_seed(config.get('SEED', 42), workers=True)
 denoiser = UNet(cond_embedder=None, **config.get('denoiser', {}))
 noise_scheduler = GaussianNoiseScheduler(**config.get('scheduler', {}))
 diffuser = TranslationDiffusionPipeline.load_from_checkpoint(
-    './runs/2d-to-3d-pet-earl-translation-diffusion/2026_01_09_185154/checkpoints/last.ckpt',
+    './runs/2d-to-3d-pet-earl-translation-diffusion/2026_01_12_163742/checkpoints/last.ckpt',
     noise_estimator=denoiser,
     noise_scheduler=noise_scheduler,
     strict=False
@@ -74,7 +73,7 @@ y_patch_size = 64
 x_patch_size = 64
 overlap = 1  # recouvrement de 1 voxel
 
-z_starts = get_start_indices(d_dim, z_patch_size, z_patch_size - overlap)
+z_starts = get_start_indices(d_dim, z_patch_size, z_patch_size - overlap)[43:44]
 y_starts = get_start_indices(h_dim, y_patch_size, y_patch_size - overlap)
 x_starts = get_start_indices(w_dim, x_patch_size, x_patch_size - overlap)
 
@@ -93,8 +92,13 @@ with torch.no_grad():
                 patch_tgt = target[:, z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size]
                 
                 # B. Prédiction (Appel à ta pipeline de diffusion)
-                norm_patch_src, norm_patch_tgt, norm_factors = robust_patch_normalization(patch_src, patch_tgt, percentiles=(0.0, 99.9), clone=True)
-                target_delta = (norm_patch_tgt - norm_patch_src) * 100 # => [-2, 2]
+                # SUV_MAX = 50.0 
+                # norm_patch_src = 2.0 * (torch.clamp(patch_src, 0, SUV_MAX) / SUV_MAX) - 1.0
+                # norm_patch_tgt = 2.0 * (torch.clamp(patch_tgt, 0, SUV_MAX) / SUV_MAX) - 1.0
+                norm_patch_src, norm_patch_tgt, factors = robust_patch_normalization(
+                    patch_src, patch_tgt, percentiles=(0.0, 99.9), clone=True
+                ) 
+
                 
                 # steps=50 (ou moins pour aller plus vite en test)
                 with torch.no_grad():
@@ -106,15 +110,17 @@ with torch.no_grad():
                         verbose=False
                     )
 
-                norm_patch_pred = norm_patch_src + (delta / 100.0)
-                patch_pred_suv, _ = robust_patch_denormalization(norm_patch_pred, norm_patch_pred, norm_factors)
+                norm_patch_pred = norm_patch_src + (delta / 100)
 
-                # print(norm_patch_pred.min().item(), norm_patch_pred.max().item(), norm_patch_pred.mean().item())
-                # print(patch_pred_suv.min().item(), patch_pred_suv.max().item(), patch_pred_suv.mean().item())
-                # print(norm_factors)
-                
+                suv_patch_src, suv_patch_tgt = robust_patch_denormalization(norm_patch_src, norm_patch_tgt, factors, clone=True)
+                suv_patch_pred, suv_patch_pred = robust_patch_denormalization(norm_patch_pred, norm_patch_tgt, factors, clone=True)
+
+                # suv_patch_pred = 0.5 * (norm_patch_pred.clamp(-1, 1) + 1.0) * SUV_MAX
+                # suv_patch_src = 0.5 * (norm_patch_src + 1.0) * SUV_MAX
+                # suv_patch_tgt = 0.5 * (norm_patch_tgt + 1.0) * SUV_MAX
+
                 # C. Accumulation
-                output_volume[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += patch_pred_suv.squeeze(0)
+                output_volume[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += suv_patch_pred.squeeze(0)
                 count_map[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += 1.0
                 
                 pbar.update(1)
@@ -131,15 +137,15 @@ final_prediction = final_prediction.squeeze().permute(2, 1, 0)  # Suppression de
 output_sitk = sitk.GetImageFromArray(final_prediction)
 s_meta = sitk.ReadImage(batch['source']['path'][0])
 
-orient_filter = sitk.DICOMOrientImageFilter()
-orient_filter.SetDesiredCoordinateOrientation("LPS")
-output_sitk = orient_filter.Execute(s_meta)
-
 output_sitk.SetDirection(s_meta.GetDirection())
 output_sitk.SetOrigin(s_meta.GetOrigin())
 output_sitk.SetSpacing(s_meta.GetSpacing())
 
-output_path = os.path.join(os.path.dirname(batch['source']['path'][0]), f'predicted_ampli_EARL.nii.gz')
+orient_filter = sitk.DICOMOrientImageFilter()
+orient_filter.SetDesiredCoordinateOrientation("RPS")
+output_sitk = orient_filter.Execute(output_sitk)
+
+output_path = os.path.join(os.path.dirname(batch['source']['path'][0]), f'predicted_x_0_EARL.nii.gz')
 sitk.WriteImage(output_sitk, output_path)
 
 print(f'Prediction saved at: {output_path}')

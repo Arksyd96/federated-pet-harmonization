@@ -6,10 +6,14 @@ from tqdm import tqdm
 import concurrent.futures
 import multiprocessing
 
-def process_patient_volume(file_path):
+def process_patient_volume(args):
+    file_path, log_transform = args
     try:
         img = nib.load(file_path)
         data = img.get_fdata()
+
+        if log_transform:
+            data = np.log1p(data)
         
         valid_max = np.nanmax(data)
         
@@ -25,7 +29,7 @@ def main():
     # Argument Parsing
     parser = argparse.ArgumentParser(description="Analyse des maxima SUV dans des volumes PET NIfTI (Parallélisé).")
     parser.add_argument("--data-dir", type=str, required=True, help="Répertoire racine contenant les données PET NIfTI.")
-    # On laisse par défaut le nombre de cœurs - 2 pour garder le système réactif
+    parser.add_argument("--log-transform", action='store_true', help="Appliquer une transformation logarithmique aux données avant analyse.")
     default_workers = max(1, multiprocessing.cpu_count() - 2)
     parser.add_argument("--workers", type=int, default=default_workers, help=f"Nombre de processus (défaut: {default_workers}).")
     args = parser.parse_args()
@@ -52,7 +56,7 @@ def main():
         with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
             # On soumet toutes les tâches
             # future_to_file permettrait de savoir quel fichier a échoué si besoin
-            futures = {executor.submit(process_patient_volume, f): f for f in pet_files}
+            futures = {executor.submit(process_patient_volume, (f, args.log_transform)): f for f in pet_files}
             
             # as_completed permet de mettre à jour la barre dès qu'un fichier est fini
             for future in tqdm(concurrent.futures.as_completed(futures), total=total_files, desc="Calcul Maxima"):

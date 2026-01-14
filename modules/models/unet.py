@@ -1,10 +1,14 @@
 from typing import *
 import numpy as np
-import contextlib
 import torch
 import torch.nn as nn
-from monai.networks.blocks import UnetOutBlock
+import torch.nn.functional as F
+import torchio as tio
+from pytorch_lightning import LightningModule
+from torchvision.utils import make_grid
+import wandb
 
+from monai.networks.blocks import UnetOutBlock
 from modules.models.base import (
     BasicBlock,
     UnetBasicBlock,
@@ -347,3 +351,176 @@ class UNet(nn.Module):
 
         return y
 
+class TranslationUNet(LightningModule):
+    def __init__(
+        self,
+        in_ch: int,          
+        out_ch: int,         
+        spatial_dims: int, 
+        hid_chs: list = [64, 128, 256, 512],
+        kernel_sizes: list = [3, 3, 3, 3],
+        strides: list = [1, 2, 2, 2],
+        
+        # Hyperparamètres d'entraînement
+        alpha: float = 10.0,  # Facteur d'amplification du résidu
+        learning_rate: float = 1e-4,
+        weight_decay: float = 1e-5,
+        suv_global_log_max: float = 6.0, # Notre constante de normalisation clinique
+        loss_fn = nn.functional.l1_loss
+    ):
+        super().__init__()
+        self.suv_global_log_max = suv_global_log_max
+        self.alpha = alpha
+        self.loss_fn = loss_fn
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+
+        # --- 1. Instanciation du UNet ---
+        # On passe temb_channels=None pour désactiver l'embedding temporel (mode Regression)
+        self.model = UNet(
+            in_ch=in_ch,
+            out_ch=out_ch,
+            spatial_dims=spatial_dims,
+            hid_chs=hid_chs,
+            kernel_sizes=kernel_sizes,
+            strides=strides,
+            temb_channels=None,
+            use_attention='none', # Peut être activé si besoin
+            num_res_blocks=2
+        )
+
+        self.save_hyperparameters()
+
+    def forward(self, x):
+        return self.model(x, t=None, condition=None)
+
+    def _common_step(self, batch, batch_idx, stage):
+        # 1. Récupération des données
+        suv_source = batch['source'][tio.DATA].float() # PET
+        suv_target = batch['target'][tio.DATA].float() # EARL
+
+        # Gestion des dimensions pour le "2D Channel Wise"
+        if suv_source.ndim == 5 and self.hparams.spatial_dims == 2:
+            suv_source = suv_source.squeeze(1) # reduce channel dim
+            suv_target = suv_target.squeeze(1)
+
+        # 2. Normalisation Globale
+        log_source = torch.log1p(suv_source)
+        log_target = torch.log1p(suv_target)
+
+        # scale to [-1, 1+eps] (i don't clip here, but could be an option)
+        normalized_log_source = 2.0 * (log_source / self.suv_global_log_max) - 1.0
+        normalized_log_target = 2.0 * (log_target / self.suv_global_log_max) - 1.0
+
+        # 3. Target_Residual = EARL_norm - PET_norm
+        target_residual = (normalized_log_target - normalized_log_source) * self.alpha
+        predicted_residual = self.forward(normalized_log_source)
+
+        # 4. Loss compute
+        residual_loss = self.loss_fn(predicted_residual, target_residual)
+
+        normalized_log_prediction = normalized_log_source + (predicted_residual / self.alpha)
+        log_prediction = 0.5 * (normalized_log_prediction + 1.0) * self.suv_global_log_max
+        suv_prediction = torch.expm1(log_prediction)
+
+        loss_suv = self.loss_fn(suv_prediction, suv_target)
+
+        loss = residual_loss + (0.1 * loss_suv)
+
+        # 6. Logging Metrics
+        self.log(f"{stage}/loss", loss, on_step=True, on_epoch=True, prog_bar=True, 
+                 sync_dist=True, batch_size=suv_source.size(0))
+        self.log(f"{stage}/loss_residual", residual_loss, on_step=True, on_epoch=True, prog_bar=False,
+                    sync_dist=True, batch_size=suv_source.size(0))
+        self.log(f"{stage}/loss_suv", loss_suv, on_step=True, on_epoch=True, prog_bar=False,
+                    sync_dist=True, batch_size=suv_source.size(0))
+
+        return loss, (
+            normalized_log_source, 
+            normalized_log_target, 
+            normalized_log_prediction,
+            suv_source,
+            suv_target,
+            suv_prediction,
+            predicted_residual,
+            target_residual
+        )
+
+    def training_step(self, batch, batch_idx):
+        loss, _ = self._common_step(batch, batch_idx, "train")
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        loss, meta = self._common_step(batch, batch_idx, "val")
+        suv_source, suv_target, suv_prediction = meta[3], meta[4], meta[5]
+        
+        # MSE en espace normalisé
+        mse_val = F.mse_loss(suv_prediction, suv_target)
+        l1_val = F.l1_loss(suv_prediction, suv_target)
+
+        self.log("val/L2", mse_val, on_epoch=True, on_step=False, 
+                 sync_dist=True, prog_bar=False, batch_size=suv_target.size(0))
+        self.log("val/L1", l1_val, on_epoch=True, on_step=False, 
+                 sync_dist=True, prog_bar=False, batch_size=suv_target.size(0))
+
+        # Log Images (seulement sur le premier batch pour ne pas spammer)
+        if batch_idx == 0:
+            self.log_images(suv_source, suv_target, suv_prediction)
+            
+        return loss
+
+    def log_images(self, source, target, prediction):
+        """ Affiche les images dans WandB/Tensorboard """
+        # On prend la slice centrale pour l'affichage (index 2 sur 5)
+        mid = source.shape[1] // 2 
+        
+        # Extraction slice centrale (B, 1, H, W)
+        src_slice = source[:, mid:mid + 1, :, :]
+        tgt_slice = target[:, mid:mid + 1, :, :]
+        pred_slice = prediction[:, mid:mid + 1, :, :]
+        
+        # Clipping pour affichage (0 à 15 SUV pour le contraste clinique)
+        display_max = max(
+            15.0, 
+            src_slice.max().item(), 
+            tgt_slice.max().item(), 
+            pred_slice.max().item()
+        )
+        
+        imgs = torch.cat([src_slice, tgt_slice, pred_slice], dim=3) # Stack horizontal
+        imgs = (imgs / display_max).clamp(0, 1) # Normalisation visuelle
+        
+        grid = make_grid(imgs, nrow=1, padding=2)
+        
+        # Légende
+        caption = f"Left: PET (Input) | Mid: EARL (Target) | Right: Reconstructed (PET+Delta)\n" + \
+                    f"MSE (SUV space): {F.mse_loss(pred_slice, tgt_slice).item():.4f}"
+        
+        wandb_image = wandb.Image(
+                grid.permute(1, 2, 0).cpu().numpy(), 
+                caption=caption
+            )
+
+        wandb.log({"Validation/Reconstruction": wandb_image})
+
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay
+        )
+        
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=5, verbose=True
+        )
+        
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val/loss",
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }

@@ -375,7 +375,7 @@ class Float32Lambda:
         pass
 
     def __call__(self, subject):
-        for image in subject.get_images(intensity_only=False):
+        for image in subject.get_images(intensity_only=True):
             image.data = image.data.float()
         return subject
 
@@ -441,7 +441,7 @@ class PETTranslationDataModule(LightningDataModule):
 
         # --- Pipelines de Transformation ---        
         self.transform = tio.Compose([
-            Float32Lambda(),
+            # Float32Lambda(),
             tio.ToCanonical(),
             tio.RandomFlip(axes=(0, 1, 2), p=0.5)
         ])
@@ -479,7 +479,6 @@ class PETTranslationDataModule(LightningDataModule):
         
         return None
 
-
     def val_dataloader(self):
         if self.val_subjects.__len__() > 0:
             val_dataset = tio.SubjectsDataset(self.val_subjects, transform=self.transform)
@@ -494,10 +493,10 @@ class PETTranslationDataModule(LightningDataModule):
 
             patches_queue = tio.Queue(
                 subjects_dataset=val_dataset,
-                max_length=100,
-                samples_per_volume=1,
+                max_length=300,
+                samples_per_volume=32,
                 sampler=sampler,
-                num_workers=self.num_workers,
+                num_workers=4,
                 shuffle_subjects=False,
                 shuffle_patches=False
             )

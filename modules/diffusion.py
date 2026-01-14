@@ -432,7 +432,6 @@ class TranslationDiffusionPipeline(BasicModel):
         # On remplace robust_patch_normalization par le scaling global fixe [0, 50] -> [-1, 1]
         # Cela évite l'amplification du bruit de fond.
         SUV_MAX = 50.0 
-        
         norm_source = 2.0 * (torch.clamp(source, 0, SUV_MAX) / SUV_MAX) - 1.0
         norm_target = 2.0 * (torch.clamp(target, 0, SUV_MAX) / SUV_MAX) - 1.0
 

@@ -4,17 +4,17 @@ WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 # modules state
 project_name: federated-pet
-dir_name: runs/2d-to-3d-pet-earl-translation-diffusion
-name: Traduction PET EARL 5x64x64 (DiffusionModel)
+dir_name: runs/2d-to-3d-pet-earl-translation-unet
+name: Traduction PET EARL 5x64x64 (UNet)
 
 datamodule:
     root_dir: ./data/PET-EARL/Ano_Nifti_resampled/
-    batch_size: 8
+    batch_size: 32
     train_ratio: 0.95
     patch_size: [5, 64, 64]
-    num_workers: 32 
-    queue_max_length: 2048
-    samples_per_volume: 32
+    num_workers: 16 
+    queue_max_length: 4000
+    samples_per_volume: 96
 
 denoiser:
     in_ch: 10
@@ -62,10 +62,27 @@ diffuser:
     sample_every_n_steps: 1000
     optimizer_kwargs: {lr: 4.0e-6}
 
+
+# en cas d'utilisation d'un UNet pour la traduction
+translation_model:
+    in_ch: 5          
+    out_ch: 5         
+    spatial_dims: 2 
+    hid_chs: [64, 128, 256, 512]
+    kernel_sizes: [3, 3, 3, 3]
+    strides: [1, 2, 2, 2]
+    
+    # Hyperparamètres d'entraînement
+    alpha: 10.  # Facteur d'amplification du résidu
+    learning_rate: 1.0e-5
+    weight_decay: 1.0e-7
+    suv_global_log_max: 6.0 # Notre max P98 (en espace log)
+    
+
 # trainer state
 model_checkpoint:
-    monitor: train/L1
-    every_n_epochs: 10
+    monitor: val/L1
+    every_n_epochs: 1
     save_last: true
     save_top_k: 1
     mode: min
@@ -78,3 +95,11 @@ trainer:
     max_epochs: 8000
     check_val_every_n_epoch: 1
     num_sanity_val_steps: 0
+
+    # For Debugging
+    # Force l'arrêt de l'époque de train après 100 batchs (au lieu de 2000)
+    # limit_train_batches: 10
+    
+    # Force l'arrêt de la validation après 10 batchs (au lieu de tout le dataset)
+    # limit_val_batches: 10 
+    # fast_dev_run: true
