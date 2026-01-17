@@ -9,12 +9,12 @@ name: Traduction PET EARL 5x64x64 (UNet)
 
 datamodule:
     root_dir: ./data/PET-EARL/Ano_Nifti_resampled/
-    batch_size: 32
+    batch_size: 64
     train_ratio: 0.95
     patch_size: [5, 64, 64]
     num_workers: 16 
-    queue_max_length: 4000
-    samples_per_volume: 96
+    queue_max_length: 9000
+    samples_per_volume: 350
 
 denoiser:
     in_ch: 10
@@ -73,9 +73,9 @@ translation_model:
     strides: [1, 2, 2, 2]
     
     # Hyperparamètres d'entraînement
-    alpha: 10.  # Facteur d'amplification du résidu
-    learning_rate: 1.0e-5
-    weight_decay: 1.0e-7
+    alpha: 1.  # Facteur d'amplification du résidu
+    learning_rate: 1.0e-4
+    weight_decay: 1.0e-5
     suv_global_log_max: 6.0 # Notre max P98 (en espace log)
     
 
@@ -95,6 +95,9 @@ trainer:
     max_epochs: 8000
     check_val_every_n_epoch: 1
     num_sanity_val_steps: 0
+
+    gradient_clip_val: 1.0 # Sécurité anti-pics
+    gradient_clip_algorithm: "norm"
 
     # For Debugging
     # Force l'arrêt de l'époque de train après 100 batchs (au lieu de 2000)

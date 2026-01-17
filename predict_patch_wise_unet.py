@@ -18,7 +18,7 @@ config = OmegaConf.load('./configs/pet_earl_translation.yaml')
 config = OmegaConf.to_container(config, resolve=True)
 set_seed(config.get('SEED', 42), workers=True)
 
-ckpt_path = './runs/2d-to-3d-pet-earl-translation-unet/2026_01_13_174241/checkpoints/epoch=25.ckpt'
+ckpt_path = './runs/2d-to-3d-pet-earl-translation-unet/2026_01_13_174241/checkpoints/epoch=34.ckpt'
 model = TranslationUNet.load_from_checkpoint(ckpt_path)
 model.to(device)
 model.eval()

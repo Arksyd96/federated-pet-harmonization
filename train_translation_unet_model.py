@@ -9,7 +9,7 @@ from datetime import datetime
 from omegaconf import OmegaConf
 
 import torch
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, RichProgressBar
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer import Trainer
 

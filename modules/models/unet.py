@@ -19,7 +19,7 @@ from modules.models.base import (
     SequentialEmb,
 )
 from modules.models.attention import Attention, zero_module
-
+from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(
@@ -374,6 +374,7 @@ class TranslationUNet(LightningModule):
         self.loss_fn = loss_fn
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
+        self.ssim_loss = StructuralSimilarityIndexMeasure(data_range=1.0)
 
         # --- 1. Instanciation du UNet ---
         # On passe temb_channels=None pour désactiver l'embedding temporel (mode Regression)
@@ -404,7 +405,7 @@ class TranslationUNet(LightningModule):
             suv_source = suv_source.squeeze(1) # reduce channel dim
             suv_target = suv_target.squeeze(1)
 
-        # 2. Normalisation Globale
+        # normalisation Globale
         log_source = torch.log1p(suv_source)
         log_target = torch.log1p(suv_target)
 
@@ -412,27 +413,42 @@ class TranslationUNet(LightningModule):
         normalized_log_source = 2.0 * (log_source / self.suv_global_log_max) - 1.0
         normalized_log_target = 2.0 * (log_target / self.suv_global_log_max) - 1.0
 
-        # 3. Target_Residual = EARL_norm - PET_norm
+        # target_Residual = EARL_norm - PET_norm
         target_residual = (normalized_log_target - normalized_log_source) * self.alpha
         predicted_residual = self.forward(normalized_log_source)
 
-        # 4. Loss compute
+        # normalized residual loss
         residual_loss = self.loss_fn(predicted_residual, target_residual)
 
+        # reconstruction (log norm space)
         normalized_log_prediction = normalized_log_source + (predicted_residual / self.alpha)
+
+        # reconstruction (suv space)
         log_prediction = 0.5 * (normalized_log_prediction + 1.0) * self.suv_global_log_max
         suv_prediction = torch.expm1(log_prediction)
 
+        # residual suv loss
         loss_suv = self.loss_fn(suv_prediction, suv_target)
+        
+        # ssim loss range [0, 1]
+        nlp_01 = (normalized_log_prediction + 1.0) / 2.0
+        nlt_01 = (normalized_log_target + 1.0) / 2.0
+        nlp_01 , nlt_01 = torch.clamp(nlp_01, 0.0, 1.0), torch.clamp(nlt_01, 0.0, 1.0)
 
-        loss = residual_loss + (0.1 * loss_suv)
+        ssim_score = self.ssim_loss(nlp_01, nlt_01)
+        loss_ssim = 1 - ssim_score
+
+        # global loss
+        loss = residual_loss + (0.1 * loss_suv) + (20.0 * loss_ssim)
 
         # 6. Logging Metrics
         self.log(f"{stage}/loss", loss, on_step=True, on_epoch=True, prog_bar=True, 
-                 sync_dist=True, batch_size=suv_source.size(0))
+                    sync_dist=True, batch_size=suv_source.size(0))
         self.log(f"{stage}/loss_residual", residual_loss, on_step=True, on_epoch=True, prog_bar=False,
                     sync_dist=True, batch_size=suv_source.size(0))
         self.log(f"{stage}/loss_suv", loss_suv, on_step=True, on_epoch=True, prog_bar=False,
+                    sync_dist=True, batch_size=suv_source.size(0))
+        self.log(f"{stage}/ssim_score", ssim_score, on_step=True, on_epoch=True, prog_bar=True, 
                     sync_dist=True, batch_size=suv_source.size(0))
 
         return loss, (
