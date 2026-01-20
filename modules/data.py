@@ -431,7 +431,9 @@ class PETTranslationDataModule(LightningDataModule):
         
         # --- Split train/val ---
         np.random.shuffle(tio_subjects) # Mélange avant split
-        split_idx = int(len(tio_subjects) * self.train_ratio)
+        split_idx = self.train_ratio
+        if isinstance(self.train_ratio, float) and 0.0 <= self.train_ratio <= 1.0:
+            split_idx = int(len(tio_subjects) * self.train_ratio)
         self.train_subjects, self.val_subjects = tio_subjects[:split_idx], tio_subjects[split_idx:]
 
         # just for the record (in case needed)

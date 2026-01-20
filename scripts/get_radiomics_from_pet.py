@@ -183,7 +183,7 @@ def process_single_subject(args):
         return
     
 
-def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sphere_radius=15.0):
+def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sphere_radius=20.0):
     if not os.path.exists(root_dir):
         logging.error(f"Le dossier racine n'existe pas : {root_dir}")
         return
@@ -198,6 +198,8 @@ def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sph
 
     # Lister les sujets
     subjects = sorted([s for s in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, s))])
+    if args.include_only is not None and len(args.include_only) > 0:    
+        subjects = [s for s in subjects if s in args.include_only]
     
     # Config Workers (Laisser 2 coeurs libres pour le système)
     num_workers = max(1, multiprocessing.cpu_count() - 2)
@@ -229,9 +231,10 @@ def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sph
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extraction de Radiomics (PyRadiomics) sur images PET (Standard/EARL) avec masques.")
     parser.add_argument("--root", "-r", type=str, required=True, help="Root folder with subjects.")
+    parser.add_argument("--include-only", "-i", type=str, nargs='*', default=None, help="List of subject IDs to include (default: all).")
     parser.add_argument("--mask", "-m", type=str, required=True, help="Mask filename on the same subject folder (e.g., 'MASK.nii.gz').")
     parser.add_argument("--use-sphere", "-s", action="store_true", help="Use spherical masks centered on the lesion's centroid.")
-    parser.add_argument("--sphere-radius", type=float, default=20.0, help="Radius of the spherical mask in mm (default: 15.0).")
+    parser.add_argument("--sphere-radius", type=float, default=20.0, help="Radius of the spherical mask in mm (default: 20.0).")
     parser.add_argument("--params", "-p", type=str, default=None, help="YAML pyradiomics params file.")
     parser.add_argument("--debug-radiomics", "-db",action="store_true")
     args = parser.parse_args()
