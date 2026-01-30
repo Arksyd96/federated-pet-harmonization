@@ -7,10 +7,14 @@ import concurrent.futures
 import multiprocessing
 
 def process_patient_volume(args):
-    file_path, log_transform = args
+    file_path, mask, log_transform = args
     try:
         img = nib.load(file_path)
         data = img.get_fdata()
+        
+        if mask:
+            mask = nib.load(mask).get_fdata()
+            data = data[mask > 0]
 
         if log_transform:
             data = np.log1p(data)
@@ -29,6 +33,7 @@ def main():
     # Argument Parsing
     parser = argparse.ArgumentParser(description="Analyse des maxima SUV dans des volumes PET NIfTI (Parallélisé).")
     parser.add_argument("--data-dir", type=str, required=True, help="Répertoire racine contenant les données PET NIfTI.")
+    parser.add_argument("--mask-file", type=str, default=None, help="Fichier NIfTI de masque à appliquer avant analyse (optionnel).")
     parser.add_argument("--log-transform", action='store_true', help="Appliquer une transformation logarithmique aux données avant analyse.")
     default_workers = max(1, multiprocessing.cpu_count() - 2)
     parser.add_argument("--workers", type=int, default=default_workers, help=f"Nombre de processus (défaut: {default_workers}).")
@@ -40,13 +45,23 @@ def main():
     print(f"Exploration de {ROOT_DIR} ...")
 
     # 1. Récupération de la liste des fichiers (étape rapide, monothread)
-    pet_files = []
+    pet_files, mask_files = [], []
     for root, dirs, files in os.walk(ROOT_DIR):
         for filename in files:
             if filename.startswith("PET_") and filename.endswith(".nii.gz"):
                 pet_files.append(os.path.join(root, filename))
+                if args.mask_file:
+                    args.mask_file = args.mask_file + '.nii.gz' if not args.mask_file.endswith(('.nii', '.nii.gz')) else args.mask_file
+                    mask_path = os.path.join(root, args.mask_file)
+                    if os.path.exists(mask_path):
+                        mask_files.append(mask_path)
+                    else:
+                        mask_files.append(None)
 
     total_files = len(pet_files)
+    if not args.mask_file: # Si pas de masque, on remplit avec des None
+        mask_files = [None] * total_files
+    
     print(f"Analyse des maxima pour {total_files} patients avec {args.workers} workers...")
 
     pet_max_values = []
@@ -56,7 +71,7 @@ def main():
         with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
             # On soumet toutes les tâches
             # future_to_file permettrait de savoir quel fichier a échoué si besoin
-            futures = {executor.submit(process_patient_volume, (f, args.log_transform)): f for f in pet_files}
+            futures = {executor.submit(process_patient_volume, (f, m, args.log_transform)): (f, m) for f, m in zip(pet_files, mask_files)}
             
             # as_completed permet de mettre à jour la barre dès qu'un fichier est fini
             for future in tqdm(concurrent.futures.as_completed(futures), total=total_files, desc="Calcul Maxima"):

@@ -8,7 +8,7 @@ from tqdm import tqdm
 from omegaconf import OmegaConf
 
 # Tes modules personnalisés
-from modules.data import PETTranslationDataModule
+from modules.data import MultiTargetPETDataModule
 from modules.models.unet import TranslationUNet
 from modules.utils import set_seed
 
@@ -38,15 +38,13 @@ def process_subject(model, batch, device, filename):
     # --- 1. Préparation des Tenseurs ---
     # Récupération des données brutes (batch de taille 1)
     suv_source = batch['source'][tio.DATA].float().squeeze(1) # (B, D, H, W)
-    suv_target = batch['target'][tio.DATA].float().squeeze(1)
-
     suv_source = suv_source.to(device)
-    suv_target = suv_target.to(device)
     
-    b, d_dim, h_dim, w_dim = suv_target.shape
+    b, d_dim, h_dim, w_dim = suv_source.shape
 
     # Initialisation des volumes de sortie
-    output_volume = torch.zeros((d_dim, h_dim, w_dim), device=device)
+    output_earl_1_volume = torch.zeros((d_dim, h_dim, w_dim), device=device)
+    output_earl_2_volume = torch.zeros((d_dim, h_dim, w_dim), device=device)
     count_map = torch.zeros((d_dim, h_dim, w_dim), device=device)
 
     # --- 2. Configuration des Patchs ---
@@ -71,7 +69,6 @@ def process_subject(model, batch, device, filename):
                 for x in x_starts:
                     # Extraction
                     patch_src = suv_source[:, z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size]
-                    # patch_tgt = suv_target[:, z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size]
 
                     # Normalisation & Log Transform
                     log_source = torch.log1p(patch_src)
@@ -80,14 +77,21 @@ def process_subject(model, batch, device, filename):
                     
                     # Prédiction
                     predicted_residual = model.forward(normalized_log_source)
+                    pr_earl1, pr_earl2 = torch.chunk(predicted_residual, 2, dim=1)
 
                     # Reconstruction inverse
-                    normalized_log_prediction = normalized_log_source + (predicted_residual / ALPHA)
-                    log_prediction = 0.5 * (normalized_log_prediction + 1.0) * SUV_LOG_MAX
-                    suv_prediction = torch.expm1(log_prediction)
+                    normalized_log_pred_earl1 = normalized_log_source + (pr_earl1 / ALPHA)
+                    normalized_log_pred_earl2 = normalized_log_source + (pr_earl2 / ALPHA)
+
+                    log_pred_earl1 = 0.5 * (normalized_log_pred_earl1 + 1.0) * SUV_LOG_MAX
+                    log_pred_earl2 = 0.5 * (normalized_log_pred_earl2 + 1.0) * SUV_LOG_MAX
+                    
+                    suv_pred_earl1 = torch.expm1(log_pred_earl1)
+                    suv_pred_earl2 = torch.expm1(log_pred_earl2)
 
                     # Accumulation
-                    output_volume[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += suv_prediction.squeeze(0)
+                    output_earl_1_volume[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += suv_pred_earl1.squeeze(0)
+                    output_earl_2_volume[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += suv_pred_earl2.squeeze(0)
                     count_map[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += 1.0
                     
                     pbar.update(1)
@@ -95,31 +99,42 @@ def process_subject(model, batch, device, filename):
     pbar.close()
 
     # --- 4. Normalisation finale et Sauvegarde ---
-    final_prediction = output_volume / count_map
+    final_pred_earl1 = output_earl_1_volume / count_map
+    final_pred_earl2 = output_earl_2_volume / count_map
 
     # Post-processing pour format Nifti
-    final_prediction = final_prediction.cpu()
-    final_prediction = final_prediction.squeeze().permute(2, 1, 0)  # (W, H, D) -> Permute pour match ITK
+    final_pred_earl1 = final_pred_earl1.cpu()
+    final_pred_earl2 = final_pred_earl2.cpu()
+    
+    final_pred_earl1 = final_pred_earl1.squeeze().permute(2, 1, 0)  # (W, H, D) -> Permute pour match ITK
+    final_pred_earl2 = final_pred_earl2.squeeze().permute(2, 1, 0)  # (W, H, D) -> Permute pour match ITK
 
-    final_prediction = final_prediction.numpy()
-    final_prediction = np.flip(final_prediction, axis=2) # Flip Z
-    final_prediction = np.flip(final_prediction, axis=1) # Flip Y (Correction orientation)
+    final_pred_earl1 = final_pred_earl1.numpy()
+    final_pred_earl1 = np.flip(final_pred_earl1, axis=2) # Flip Z
+    final_pred_earl1 = np.flip(final_pred_earl1, axis=1) # Flip Y (Correction orientation)
+    
+    final_pred_earl2 = final_pred_earl2.numpy()
+    final_pred_earl2 = np.flip(final_pred_earl2, axis=2) # Flip Z
+    final_pred_earl2 = np.flip(final_pred_earl2, axis=1) # Flip Y (Correction orientation)
 
     # Création image SimpleITK
-    output_sitk = sitk.GetImageFromArray(final_prediction)
+    output_sitk_earl_1 = sitk.GetImageFromArray(final_pred_earl1)
+    output_sitk_earl_2 = sitk.GetImageFromArray(final_pred_earl2)
     
     # Copie métadonnées source
     source_path = batch['source']['path'][0]
     s_meta = sitk.ReadImage(source_path)
-    output_sitk.CopyInformation(s_meta)
+    output_sitk_earl_1.CopyInformation(s_meta)
+    output_sitk_earl_2.CopyInformation(s_meta)
 
     # Ecriture disque
     output_dir = os.path.dirname(source_path)
-    output_filename = f'{filename}.nii.gz'
-    output_path = os.path.join(output_dir, output_filename)
+    output_filename = f'{filename}'
     
-    sitk.WriteImage(output_sitk, output_path)
-    print(f'Prediction saved at: {output_path}')
+    for output_sitk, suffix in zip([output_sitk_earl_1, output_sitk_earl_2], ['_EARL1.nii.gz', '_EARL2.nii.gz']):
+        output_path = os.path.join(output_dir, f'{output_filename}{suffix}')
+        sitk.WriteImage(output_sitk, output_path)
+        print(f'Prediction saved at: {output_path}')
 
 
 def predict_patch_wise_earl(args):
@@ -136,7 +151,7 @@ def predict_patch_wise_earl(args):
     model.eval()
     print('Model loaded successfully.')
 
-    datamodule = PETTranslationDataModule(**config.get('datamodule', {}))
+    datamodule = MultiTargetPETDataModule(**config.get('datamodule', {}))
     datamodule.prepare_data()
     datamodule.setup()
 

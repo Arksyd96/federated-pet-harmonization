@@ -398,37 +398,45 @@ class TranslationUNet(LightningModule):
     def _common_step(self, batch, batch_idx, stage):
         # 1. Récupération des données
         suv_source = batch['source'][tio.DATA].float() # PET
-        suv_target = batch['target'][tio.DATA].float() # EARL
+        suv_targets = {
+            key: batch[key][tio.DATA].float() for key in ['target_1', 'target_2']
+            if key in batch
+        }
+        
+        if not suv_targets:
+            raise ValueError("Aucune cible (target_1, target_2) trouvée dans le batch.")
 
         # Gestion des dimensions pour le "2D Channel Wise"
         if suv_source.ndim == 5 and self.hparams.spatial_dims == 2:
-            suv_source = suv_source.squeeze(1) # reduce channel dim
-            suv_target = suv_target.squeeze(1)
+            suv_source = suv_source.squeeze(1) # Réduire la dimension du canal
+            for key in suv_targets:
+                suv_targets[key] = suv_targets[key].squeeze(1)
 
         # normalisation Globale
         log_source = torch.log1p(suv_source)
-        log_target = torch.log1p(suv_target)
+        concat_suv_targets = torch.cat([suv_targets[key] for key in sorted(suv_targets.keys())], dim=1)
+        log_target = torch.log1p(concat_suv_targets)
 
-        # scale to [-1, 1+eps] (i don't clip here, but could be an option)
-        normalized_log_source = 2.0 * (log_source / self.suv_global_log_max) - 1.0
-        normalized_log_target = 2.0 * (log_target / self.suv_global_log_max) - 1.0
+        # scale to [-1, 1+eps]
+        normalized_log_source = 2.0 * (log_source.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
+        normalized_log_target = 2.0 * (log_target.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
 
         # target_Residual = EARL_norm - PET_norm
-        target_residual = (normalized_log_target - normalized_log_source) * self.alpha
+        target_residual = (normalized_log_target - normalized_log_source.repeat(1, 2, 1, 1)) * self.alpha
         predicted_residual = self.forward(normalized_log_source)
 
         # normalized residual loss
         residual_loss = self.loss_fn(predicted_residual, target_residual)
 
         # reconstruction (log norm space)
-        normalized_log_prediction = normalized_log_source + (predicted_residual / self.alpha)
+        normalized_log_prediction = normalized_log_source.repeat(1, 2, 1, 1) + (predicted_residual / self.alpha)
 
         # reconstruction (suv space)
         log_prediction = 0.5 * (normalized_log_prediction + 1.0) * self.suv_global_log_max
         suv_prediction = torch.expm1(log_prediction)
 
         # residual suv loss
-        loss_suv = self.loss_fn(suv_prediction, suv_target)
+        loss_suv = self.loss_fn(suv_prediction, concat_suv_targets)
         
         # ssim loss range [0, 1]
         nlp_01 = (normalized_log_prediction + 1.0) / 2.0
@@ -439,7 +447,7 @@ class TranslationUNet(LightningModule):
         loss_ssim = 1 - ssim_score
 
         # global loss
-        loss = residual_loss + (0.1 * loss_suv) + (20.0 * loss_ssim)
+        loss = residual_loss + (0.1 * loss_suv) + (.5 * loss_ssim)
 
         # 6. Logging Metrics
         self.log(f"{stage}/loss", loss, on_step=True, on_epoch=True, prog_bar=True, 
@@ -456,7 +464,7 @@ class TranslationUNet(LightningModule):
             normalized_log_target, 
             normalized_log_prediction,
             suv_source,
-            suv_target,
+            concat_suv_targets,
             suv_prediction,
             predicted_residual,
             target_residual
@@ -495,9 +503,9 @@ class TranslationUNet(LightningModule):
         tgt_slice = target[:, mid:mid + 1, :, :]
         pred_slice = prediction[:, mid:mid + 1, :, :]
         
-        # Clipping pour affichage (0 à 15 SUV pour le contraste clinique)
+        # Clipping pour affichage (0 à 5 SUV pour le contraste clinique)
         display_max = max(
-            15.0, 
+            5.0, 
             src_slice.max().item(), 
             tgt_slice.max().item(), 
             pred_slice.max().item()
@@ -535,7 +543,7 @@ class TranslationUNet(LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "val/loss",
+                "monitor": "train/loss",
                 "interval": "epoch",
                 "frequency": 1,
             },

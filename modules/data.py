@@ -380,19 +380,164 @@ class Float32Lambda:
         return subject
 
 
-# --- LE LIGHTNING DATA MODULE ---
-class PETTranslationDataModule(LightningDataModule):
+# # --- LE LIGHTNING DATA MODULE ---
+# class PETTranslationDataModule(LightningDataModule):
+#     def __init__(
+#         self, 
+#         root_dir: str, 
+#         batch_size: int = 4, 
+#         train_ratio: float = 0.8,
+#         patch_size: tuple = (64, 64, 64),
+#         num_workers: int = 8,             # Augmentez si vous avez bcp de coeurs
+#         queue_max_length: int = 600,      
+#         samples_per_volume: int = 4, # On tire 4 patches par patient
+#     ):
+#         super().__init__()
+#         self.root_dir = root_dir
+#         self.batch_size = batch_size
+#         self.train_ratio = train_ratio
+#         self.patch_size = patch_size
+#         self.num_workers = num_workers
+#         self.queue_max_length = queue_max_length
+#         self.samples_per_volume = samples_per_volume
+
+#     def get_pt_earl_files(self, files: List[str]) -> List[Dict[str, str]]:
+#         #  --- Adaptez ces filtres à vos noms de fichiers exacts ---
+#         files = [f for f in files if f.endswith('.nii') or f.endswith('.nii.gz')]
+#         pt_files = [f for f in files if f.startswith('PET') and 'MIP' not in f]
+#         earl_files = [f for f in files if f.startswith('EARL') and 'MIP' not in f]
+#         sampling_files = [f for f in files if f.startswith('body') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
+#         return pt_files[0], earl_files[0], sampling_files[0]
+
+#     def setup(self, stage=None):
+#         # --- Listing des fichiers ---
+#         all_subjects = sorted([d for d in os.listdir(self.root_dir) if os.path.isdir(os.path.join(self.root_dir, d))])
+        
+#         tio_subjects = list()
+#         for subj_name in all_subjects:
+#             subj_path = os.path.join(self.root_dir, subj_name)
+#             files = os.listdir(subj_path)
+#             pt_file, earl_file, sampling_file = self.get_pt_earl_files(files)
+            
+#             if pt_file and earl_file:
+#                 subject = tio.Subject(
+#                     source=tio.Image(os.path.join(subj_path, pt_file), type=tio.INTENSITY),
+#                     target=tio.Image(os.path.join(subj_path, earl_file), type=tio.INTENSITY),
+#                     sampling_map=tio.Image(os.path.join(subj_path, sampling_file), type=tio.LABEL), # Utilisé pour le sampling
+#                     subject_id=subj_name
+#                 )
+
+#                 tio_subjects.append(subject)
+        
+#         # --- Split train/val ---
+#         np.random.shuffle(tio_subjects) # Mélange avant split
+#         split_idx = self.train_ratio
+#         if isinstance(self.train_ratio, float) and 0.0 <= self.train_ratio <= 1.0:
+#             split_idx = int(len(tio_subjects) * self.train_ratio)
+#         self.train_subjects, self.val_subjects = tio_subjects[:split_idx], tio_subjects[split_idx:]
+
+#         # just for the record (in case needed)
+#         self.train_subj_paths, self.val_subj_paths = all_subjects[:split_idx], all_subjects[split_idx:]
+        
+#         print(f"[TorchIO] {len(self.train_subjects)} Train, {len(self.val_subjects)} Val.")
+
+#         # --- Pipelines de Transformation ---        
+#         self.transform = tio.Compose([
+#             # Float32Lambda(),
+#             tio.ToCanonical(),
+#             tio.RandomFlip(axes=(0, 1, 2), p=0.5)
+#         ])
+
+#     def train_dataloader(self):
+#         if self.train_subjects.__len__() > 0:
+#             train_dataset = tio.SubjectsDataset(self.train_subjects, transform=self.transform)
+#             # sampler = tio.data.UniformSampler(self.patch_size)
+#             sampler = tio.LabelSampler(
+#                 patch_size=self.patch_size,
+#                 label_name='sampling_map',
+#                 label_probabilities={
+#                     0: 0.05,  # 5% de chance de prendre un patch centré sur l'air (pour la robustesse)
+#                     1: 0.95   # 95% de chance de prendre un patch centré sur le patient
+#                 }
+#             )
+
+#             patches_queue = tio.Queue(
+#                 subjects_dataset=train_dataset,
+#                 max_length=self.queue_max_length,
+#                 samples_per_volume=self.samples_per_volume,
+#                 sampler=sampler,
+#                 num_workers=self.num_workers,
+#                 shuffle_subjects=True,
+#                 shuffle_patches=True
+#             )
+
+#             return tio.SubjectsLoader(
+#                 patches_queue,
+#                 batch_size=self.batch_size,
+#                 num_workers=0,
+#                 pin_memory=True
+#             )
+        
+#         return None
+
+#     def val_dataloader(self):
+#         if self.val_subjects.__len__() > 0:
+#             val_dataset = tio.SubjectsDataset(self.val_subjects, transform=self.transform)
+#             sampler = tio.LabelSampler(
+#                 patch_size=self.patch_size,
+#                 label_name='sampling_map',
+#                 label_probabilities={
+#                     0: 0.05,  # 5% de chance de prendre un patch centré sur l'air (pour la robustesse)
+#                     1: 0.95   # 95% de chance de prendre un patch centré sur le patient
+#                 }
+#             )
+
+#             patches_queue = tio.Queue(
+#                 subjects_dataset=val_dataset,
+#                 max_length=300,
+#                 samples_per_volume=32,
+#                 sampler=sampler,
+#                 num_workers=4,
+#                 shuffle_subjects=False,
+#                 shuffle_patches=False
+#             )
+            
+#             return tio.SubjectsLoader(
+#                 patches_queue,
+#                 batch_size=self.batch_size,
+#                 num_workers=0,
+#                 pin_memory=True
+#             )
+        
+#         return None
+    
+#     def test_dataloader(self):
+#         if self.val_subjects.__len__() > 0:
+#             val_dataset = tio.SubjectsDataset(self.val_subjects, transform=tio.Compose([Float32Lambda(), tio.ToCanonical()]))
+#             return tio.SubjectsLoader(
+#                 val_dataset,
+#                 batch_size=1,
+#                 num_workers=multiprocessing.cpu_count() - 1,
+#                 pin_memory=True,
+#                 shuffle=False
+#             )
+
+
+class BasePETDataModule(LightningDataModule):
     def __init__(
         self, 
         root_dir: str, 
         batch_size: int = 4, 
         train_ratio: float = 0.8,
-        patch_size: tuple = (64, 64, 64),
-        num_workers: int = 8,             # Augmentez si vous avez bcp de coeurs
+        patch_size: Tuple[int, int, int] = (64, 64, 64),
+        num_workers: int = 8,             
         queue_max_length: int = 600,      
-        samples_per_volume: int = 4, # On tire 4 patches par patient
+        samples_per_volume: int = 4, 
     ):
         super().__init__()
+        # Sauvegarde des hyperparamètres pour PyTorch Lightning
+        self.save_hyperparameters()
+        
         self.root_dir = root_dir
         self.batch_size = batch_size
         self.train_ratio = train_ratio
@@ -400,16 +545,15 @@ class PETTranslationDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.queue_max_length = queue_max_length
         self.samples_per_volume = samples_per_volume
+        
+        self.train_subjects: List[tio.Subject] = []
+        self.val_subjects: List[tio.Subject] = []
+        self.transform: Optional[tio.Compose] = None
 
-    def get_pt_earl_files(self, files: List[str]) -> List[Dict[str, str]]:
-        #  --- Adaptez ces filtres à vos noms de fichiers exacts ---
-        files = [f for f in files if f.endswith('.nii') or f.endswith('.nii.gz')]
-        pt_files = [f for f in files if f.startswith('PET') and 'MIP' not in f]
-        earl_files = [f for f in files if f.startswith('EARL') and 'MIP' not in f]
-        sampling_files = [f for f in files if f.startswith('body') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
-        return pt_files[0], earl_files[0], sampling_files[0]
+    def get_pt_earl_files(self, files: List[str]) -> Dict[str, Optional[str]]:
+        raise NotImplementedError("La méthode get_pt_earl_files doit être implémentée par les sous-classes.")
 
-    def setup(self, stage=None):
+    def setup(self, stage: Optional[str] = None):
         # --- Listing des fichiers ---
         all_subjects = sorted([d for d in os.listdir(self.root_dir) if os.path.isdir(os.path.join(self.root_dir, d))])
         
@@ -417,108 +561,145 @@ class PETTranslationDataModule(LightningDataModule):
         for subj_name in all_subjects:
             subj_path = os.path.join(self.root_dir, subj_name)
             files = os.listdir(subj_path)
-            pt_file, earl_file, sampling_file = self.get_pt_earl_files(files)
+            file_paths = self.get_pt_earl_files(files)
             
-            if pt_file and earl_file:
-                subject = tio.Subject(
-                    source=tio.Image(os.path.join(subj_path, pt_file), type=tio.INTENSITY),
-                    target=tio.Image(os.path.join(subj_path, earl_file), type=tio.INTENSITY),
-                    sampling_map=tio.Image(os.path.join(subj_path, sampling_file), type=tio.LABEL), # Utilisé pour le sampling
-                    subject_id=subj_name
-                )
-
-                tio_subjects.append(subject)
+            # Vérification minimale (doit au moins avoir le PET source)
+            if not file_paths.get('source'):
+                print(f"Avertissement: Sujet {subj_name} ignoré (PET source manquant).")
+                continue
+            
+            # Création de l'objet tio.Subject
+            subject_dict = {
+                'source': tio.Image(os.path.join(subj_path, file_paths['source']), type=tio.INTENSITY),
+                'sampling_map': tio.Image(os.path.join(subj_path, file_paths['sampling_map']), type=tio.LABEL),
+                'subject_id': subj_name
+            }
+            
+            # Ajout des cibles (targets)
+            for key, file_name in file_paths.items():
+                if key.startswith('target') and file_name:
+                    subject_dict[key] = tio.Image(os.path.join(subj_path, file_name), type=tio.INTENSITY)
+            
+            # Création du sujet TorchIO
+            subject = tio.Subject(**subject_dict)
+            tio_subjects.append(subject)
         
         # --- Split train/val ---
         np.random.shuffle(tio_subjects) # Mélange avant split
+        
         split_idx = self.train_ratio
         if isinstance(self.train_ratio, float) and 0.0 <= self.train_ratio <= 1.0:
             split_idx = int(len(tio_subjects) * self.train_ratio)
+            
         self.train_subjects, self.val_subjects = tio_subjects[:split_idx], tio_subjects[split_idx:]
-
-        # just for the record (in case needed)
-        self.train_subj_paths, self.val_subj_paths = all_subjects[:split_idx], all_subjects[split_idx:]
         
         print(f"[TorchIO] {len(self.train_subjects)} Train, {len(self.val_subjects)} Val.")
 
         # --- Pipelines de Transformation ---        
         self.transform = tio.Compose([
-            # Float32Lambda(),
+            Float32Lambda(), # Assure la conversion en float32
             tio.ToCanonical(),
             tio.RandomFlip(axes=(0, 1, 2), p=0.5)
         ])
+
+    def _create_dataloader(self, subjects: List[tio.Subject], shuffle_subjects: bool, shuffle_patches: bool, is_validation: bool = False):
+        """Méthode utilitaire pour créer les DataLoaders (train et val)"""
+        if not subjects:
+            return None
         
+        dataset = tio.SubjectsDataset(subjects, transform=self.transform)
+        
+        # Le sampler reste le même pour les deux versions
+        sampler = tio.LabelSampler(
+            patch_size=self.patch_size,
+            label_name='sampling_map',
+            label_probabilities={
+                0: 0.05,  # 5% de chance de prendre un patch centré sur l'air
+                1: 0.95   # 95% de chance de prendre un patch centré sur le patient
+            }
+        )
+        
+        # Paramètres spécifiques à la validation
+        max_length = 300 if is_validation else self.queue_max_length
+        samples_per_volume = 32 if is_validation else self.samples_per_volume
+        num_workers = 4 if is_validation else self.num_workers
+        
+        patches_queue = tio.Queue(
+            subjects_dataset=dataset,
+            max_length=max_length,
+            samples_per_volume=samples_per_volume,
+            sampler=sampler,
+            num_workers=num_workers,
+            shuffle_subjects=shuffle_subjects,
+            shuffle_patches=shuffle_patches
+        )
+
+        # TorchIO recommande num_workers=0 pour le SubjectsLoader si la Queue est utilisée
+        return tio.SubjectsLoader(
+            patches_queue,
+            batch_size=self.batch_size,
+            num_workers=0,
+            pin_memory=True
+        )
 
     def train_dataloader(self):
-        if self.train_subjects.__len__() > 0:
-            train_dataset = tio.SubjectsDataset(self.train_subjects, transform=self.transform)
-            # sampler = tio.data.UniformSampler(self.patch_size)
-            sampler = tio.LabelSampler(
-                patch_size=self.patch_size,
-                label_name='sampling_map',
-                label_probabilities={
-                    0: 0.05,  # 5% de chance de prendre un patch centré sur l'air (pour la robustesse)
-                    1: 0.95   # 95% de chance de prendre un patch centré sur le patient
-                }
-            )
-
-            patches_queue = tio.Queue(
-                subjects_dataset=train_dataset,
-                max_length=self.queue_max_length,
-                samples_per_volume=self.samples_per_volume,
-                sampler=sampler,
-                num_workers=self.num_workers,
-                shuffle_subjects=True,
-                shuffle_patches=True
-            )
-
-            return tio.SubjectsLoader(
-                patches_queue,
-                batch_size=self.batch_size,
-                num_workers=0,
-                pin_memory=True
-            )
-        
-        return None
+        return self._create_dataloader(self.train_subjects, shuffle_subjects=True, shuffle_patches=True, is_validation=False)
 
     def val_dataloader(self):
-        if self.val_subjects.__len__() > 0:
-            val_dataset = tio.SubjectsDataset(self.val_subjects, transform=self.transform)
-            sampler = tio.LabelSampler(
-                patch_size=self.patch_size,
-                label_name='sampling_map',
-                label_probabilities={
-                    0: 0.05,  # 5% de chance de prendre un patch centré sur l'air (pour la robustesse)
-                    1: 0.95   # 95% de chance de prendre un patch centré sur le patient
-                }
-            )
-
-            patches_queue = tio.Queue(
-                subjects_dataset=val_dataset,
-                max_length=300,
-                samples_per_volume=32,
-                sampler=sampler,
-                num_workers=4,
-                shuffle_subjects=False,
-                shuffle_patches=False
-            )
-            
-            return tio.SubjectsLoader(
-                patches_queue,
-                batch_size=self.batch_size,
-                num_workers=0,
-                pin_memory=True
-            )
-        
-        return None
+        return self._create_dataloader(self.val_subjects, shuffle_subjects=False, shuffle_patches=False, is_validation=True)
     
     def test_dataloader(self):
-        if self.val_subjects.__len__() > 0:
-            val_dataset = tio.SubjectsDataset(self.val_subjects, transform=tio.Compose([Float32Lambda(), tio.ToCanonical()]))
+        if self.val_subjects:
+            # Pour le test, on charge le volume entier (batch_size=1)
+            test_dataset = tio.SubjectsDataset(self.val_subjects, transform=tio.Compose([Float32Lambda(), tio.ToCanonical()]))
             return tio.SubjectsLoader(
-                val_dataset,
+                test_dataset,
                 batch_size=1,
                 num_workers=multiprocessing.cpu_count() - 1,
                 pin_memory=True,
                 shuffle=False
             )
+        return None
+    
+
+class SingleTargetPETDataModule(BasePETDataModule):
+    def get_pt_earl_files(self, files: List[str]) -> Dict[str, Optional[str]]:
+        """
+        Filtre pour 1 PET, 1 EARL (target_1), 1 Mask (sampling_map).
+        """
+        # --- Adaptez ces filtres à vos noms de fichiers exacts ---
+        nii_files = [f for f in files if f.endswith('.nii') or f.endswith('.nii.gz')]
+        
+        pt_files = [f for f in nii_files if f.startswith('PET') and 'MIP' not in f]
+        earl_files = [f for f in nii_files if f.startswith('EARL') and 'MIP' not in f]
+        sampling_files = [f for f in nii_files if f.startswith('body') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
+        
+        # La cible unique est nommée 'target_1' pour la cohérence avec la classe mère
+        return {
+            'source': pt_files[0] if pt_files else None,
+            'target': earl_files[0] if earl_files else None,
+            'sampling_map': sampling_files[0] if sampling_files else None,
+        }
+
+class MultiTargetPETDataModule(BasePETDataModule):
+    def get_pt_earl_files(self, files: List[str]) -> Dict[str, Optional[str]]:
+        """
+        Filtre pour 1 PET, 2 EARL (target_1=EARL1, target_2=EARL2), 1 Mask.
+        """
+        # --- Adaptez ces filtres à vos noms de fichiers exacts ---
+        nii_files = [f for f in files if f.endswith('.nii') or f.endswith('.nii.gz')]
+        
+        pt_files = [f for f in nii_files if f.startswith('PET') and 'MIP' not in f]
+        sampling_files = [f for f in nii_files if f.startswith('body') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
+        
+        # Filtres spécifiques pour EARL1 et EARL2
+        earl1_files = [f for f in nii_files if 'EARL1' in f and 'MIP' not in f]
+        earl2_files = [f for f in nii_files if 'EARL2' in f and 'MIP' not in f]
+        
+        # Si un fichier est manquant, on utilise None comme demandé
+        return {
+            'source': pt_files[0] if pt_files else None,
+            'target_1': earl1_files[0] if earl1_files else None, # EARL 1
+            'target_2': earl2_files[0] if earl2_files else None, # EARL 2
+            'sampling_map': sampling_files[0] if sampling_files else None,
+        }

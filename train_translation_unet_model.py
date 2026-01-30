@@ -13,7 +13,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer import Trainer
 
-from modules.data import PETTranslationDataModule
+from modules.data import SingleTargetPETDataModule, MultiTargetPETDataModule
 from modules.models.unet import TranslationUNet
 from modules.utils import set_seed
 
@@ -57,7 +57,7 @@ def main(args):
         logger.info("Mode DEBUG activé : Aucune sauvegarde sur disque.")
 
     # 3. DataModule & Modèles
-    datamodule = PETTranslationDataModule(**config.get('datamodule', {}))
+    datamodule = MultiTargetPETDataModule(**config.get('datamodule', {}))
 
     model = None
     if args.resume_checkpoint:

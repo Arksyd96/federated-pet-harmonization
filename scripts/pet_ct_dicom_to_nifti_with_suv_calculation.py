@@ -86,6 +86,7 @@ def compute_decay_corrected_injected_activity(ds: pydicom.Dataset) -> tuple:
     # parse times
     injection_dt = parse_dicom_time(injection_time_str)
     acquisition_dt = parse_dicom_time(acquisition_time_str)
+    
     if injection_dt is None or acquisition_dt is None:
         details['error'] = 'Failed to parse injection or acquisition time.'
         logging.warning(details['error'])
@@ -101,6 +102,7 @@ def compute_decay_corrected_injected_activity(ds: pydicom.Dataset) -> tuple:
     decay_factor = np.exp(-np.log(2) * (delta_seconds / half_life))
     decayed_activity = injected * decay_factor
     details['decayed_activity_Bq'] = decay_factor
+    
     return decayed_activity, details
 
 

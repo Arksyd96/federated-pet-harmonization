@@ -11,6 +11,7 @@ from tqdm import tqdm
 import SimpleITK as sitk
 from radiomics import featureextractor
 from scipy.ndimage import distance_transform_edt
+import re
 
 
 # Configuration du logging par défaut
@@ -99,6 +100,14 @@ def get_extractor(param_file=None):
 
     return extractor
 
+def parse_pred_mod(filename):
+    assert 'predicted' in filename.lower(), 'Le nom de fichier ne semble pas être une prédiction valide.'
+    output_name = 'PET_Predicted'
+    dsr_xy = re.findall(r'DSR\d+', filename, re.IGNORECASE)
+    if dsr_xy.__len__() > 0:
+        output_name += f'_{dsr_xy[0].upper()}'
+    return output_name
+
 
 def process_single_subject(args):
     subject_id, root_dir, mask_filename, params_file, use_sphere, sphere_radius = args
@@ -152,7 +161,11 @@ def process_single_subject(args):
 
     for pet_file in pet_files:
         pet_path = os.path.join(subject_path, pet_file)
-        modality = 'PET_Standard' if pet_file.startswith('PET') else ('PET_EARL' if pet_file.startswith('EARL') else 'PET_Predicted')
+        modality = 'PET_Standard' if pet_file.startswith('PET') \
+                    else (
+                        'PET_EARL' if pet_file.startswith('EARL') 
+                        else parse_pred_mod(pet_file)
+                    )
 
         # Extraction
         feature_vector = extractor.execute(pet_path, current_mask_input)
