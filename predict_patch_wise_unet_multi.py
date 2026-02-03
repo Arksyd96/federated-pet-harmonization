@@ -28,12 +28,22 @@ def get_start_indices(dim_size, patch_size, stride):
     return sorted(list(set(indices))) # set pour éviter doublons
 
 
-def process_subject(model, batch, device, filename):
+def process_subject(model, batch, device, filename, curr_idx, length_loader):
     # Récupération des paramètres du modèle
     SUV_LOG_MAX = model.hparams.suv_global_log_max
     ALPHA = model.hparams.alpha
 
-    print('Treating subject: {}'.format(batch['subject_id'][0]))
+    print('Treating subject: {} ({}/{})'.format(batch['subject_id'][0], curr_idx, length_loader))
+    
+    # code temporaire pour debug
+    # check si les prédictions existent déjà pour ce patient :
+    # source_path = batch['source']['path'][0]
+    # output_dir = os.path.dirname(source_path)
+    # for suffix in ['_EARL1.nii.gz', '_EARL2.nii.gz']:
+    #     output_path = os.path.join(output_dir, f'{filename}{suffix}')
+    #     if os.path.exists(output_path):
+    #         print(f'Predictions already exist at: {output_path}. Skipping subject.')
+    #         return
 
     # --- 1. Préparation des Tenseurs ---
     # Récupération des données brutes (batch de taille 1)
@@ -53,7 +63,7 @@ def process_subject(model, batch, device, filename):
     x_patch_size = 64
     overlap = 2  # recouvrement de 1 voxel sur x et y
     
-    z_starts = get_start_indices(d_dim, z_patch_size, 2)
+    z_starts = get_start_indices(d_dim, z_patch_size, z_patch_size - 1)
     y_starts = get_start_indices(h_dim, y_patch_size, y_patch_size - overlap)
     x_starts = get_start_indices(w_dim, x_patch_size, x_patch_size - overlap)
 
@@ -69,6 +79,10 @@ def process_subject(model, batch, device, filename):
                 for x in x_starts:
                     # Extraction
                     patch_src = suv_source[:, z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size]
+                    if patch_src.mean() < 1e-3:
+                        # Patch vide, on skip
+                        pbar.update(1)
+                        continue
 
                     # Normalisation & Log Transform
                     log_source = torch.log1p(patch_src)
@@ -156,8 +170,8 @@ def predict_patch_wise_earl(args):
     datamodule.setup()
 
     loader = datamodule.test_dataloader()
-    for batch in loader:
-        process_subject(model, batch, device, args.filename)
+    for idx, batch in enumerate(loader):
+        process_subject(model, batch, device, args.filename, idx + 1, len(loader))
 
 
 if __name__ == "__main__":

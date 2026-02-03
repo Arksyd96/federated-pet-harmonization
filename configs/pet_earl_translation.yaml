@@ -4,14 +4,14 @@ WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 # modules state
 project_name: federated-pet
-dir_name: runs/2d-to-3d-pet-earl-translation-unet-dsr10-a100
-name: Traduction PET EARL1/2 5x64x64 DSR 10p A100 (UNet)
+dir_name: runs/2d-to-3d-pet-earl-translation-unet-dsr7-a100
+name: Traduction PET EARL1/2 5x64x64 DSR 7p A100 (UNet)
 
 datamodule:
-    root_dir: ./data/PET-EARL/A100EARL1et2_Nifti/
+    root_dir: ./data/PET-EARL/A100EARL1et2_Nifti/train
     batch_size: 64
-    # train_ratio: 0.95 # No DSR
-    train_ratio: 10 # for DSR with N subjects only
+    # train_ratio: 1.0 # No DSR
+    train_ratio: 7 # for DSR with N subjects only
     patch_size: [5, 64, 64]
     num_workers: 16 
     queue_max_length: 9000
@@ -108,5 +108,5 @@ trainer:
     # limit_train_batches: 10
     
     # Force l'arrêt de la validation après 10 batchs (au lieu de tout le dataset)
-    limit_val_batches: 30
+    limit_val_batches: 50
     # fast_dev_run: true

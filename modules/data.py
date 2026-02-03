@@ -620,7 +620,7 @@ class BasePETDataModule(LightningDataModule):
         )
         
         # Paramètres spécifiques à la validation
-        max_length = 300 if is_validation else self.queue_max_length
+        max_length = 1000 if is_validation else self.queue_max_length
         samples_per_volume = 32 if is_validation else self.samples_per_volume
         num_workers = 4 if is_validation else self.num_workers
         
