@@ -380,7 +380,7 @@ class Float32Lambda:
         return subject
 
 
-# # --- LE LIGHTNING DATA MODULE ---
+# # # --- LE LIGHTNING DATA MODULE ---
 # class PETTranslationDataModule(LightningDataModule):
 #     def __init__(
 #         self, 
@@ -703,3 +703,153 @@ class MultiTargetPETDataModule(BasePETDataModule):
             'target_2': earl2_files[0] if earl2_files else None, # EARL 2
             'sampling_map': sampling_files[0] if sampling_files else None,
         }
+        
+        
+
+class MultiDomainUnlearningDataModule(LightningDataModule):
+    def __init__(
+        self, 
+        root_dir: str, 
+        batch_size: int = 4, 
+        patch_size: tuple = (64, 64, 64),
+        num_workers: int = 8,
+        queue_max_length: int = 600,      
+        samples_per_volume: int = 4,
+    ):
+        super().__init__()
+        self.root_dir = root_dir
+        self.batch_size = batch_size
+        self.patch_size = patch_size
+        self.num_workers = num_workers
+        self.queue_max_length = queue_max_length
+        self.samples_per_volume = samples_per_volume
+        
+        # Pour stocker le mapping domaine -> ID
+        self.domain_to_id = {}
+
+    def get_pet_body_files(self, files: List[str]):
+        """Filtre les fichiers PET et body mask selon la nomenclature os."""
+        pet_files = [f for f in files if f.startswith('PET') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
+        body_files = [f for f in files if f.startswith('body') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
+        
+        # On retourne None si un fichier manque pour éviter de crash au setup
+        pet_file = pet_files[0] if len(pet_files) > 0 else None
+        body_file = body_files[0] if len(body_files) > 0 else None
+        
+        return pet_file, body_file
+
+    def _prepare_subjects(self, split: str) -> List[tio.Subject]:
+        """Parcourt l'arborescence : split / domain_n / subject / files."""
+        split_path = os.path.join(self.root_dir, split)
+        if not os.path.exists(split_path):
+            print(f"Attention: Le dossier {split_path} n'existe pas.")
+            return []
+
+        # Récupération des dossiers de domaines (domain_1, domain_2...)
+        domain_names = sorted([d for d in os.listdir(split_path) if os.path.isdir(os.path.join(split_path, d))])
+        
+        # Création du mapping d'ID domaine (basé sur le dossier train pour cohérence)
+        if split == 'train':
+            self.domain_to_id = {name: i for i, name in enumerate(domain_names)}
+            print(f"Mapping Domaines: {self.domain_to_id}")
+
+        tio_subjects = []
+        for domain_name in domain_names:
+            domain_id = self.domain_to_id.get(domain_name, -1) # -1 si domaine inconnu au test
+            domain_path = os.path.join(split_path, domain_name)
+            
+            # Listing des sujets dans ce domaine
+            subjects_in_domain = sorted([s for s in os.listdir(domain_path) if os.path.isdir(os.path.join(domain_path, s))])
+            
+            for subj_name in subjects_in_domain:
+                subj_path = os.path.join(domain_path, subj_name)
+                files = os.listdir(subj_path)
+                
+                pet_file, body_file = self.get_pet_body_files(files)
+                
+                if pet_file and body_file:
+                    subject = tio.Subject(
+                        source=tio.Image(os.path.join(subj_path, pet_file), type=tio.INTENSITY),
+                        sampling_map=tio.Image(os.path.join(subj_path, body_file), type=tio.LABEL),
+                        domain_id=torch.tensor(domain_id).long(), # Label pour le classifieur
+                        subject_name=subj_name,
+                        domain_name=domain_name
+                    )
+                    tio_subjects.append(subject)
+        
+        return tio_subjects
+
+    def setup(self, stage=None):
+        self.train_subjects = self._prepare_subjects('train')
+        self.val_subjects = self._prepare_subjects('test') 
+        
+        np.random.shuffle(self.train_subjects) # Mélange avant split
+            
+        print(f"[TorchIO] {len(self.train_subjects)} Train, {len(self.val_subjects)} Val (Test set).")
+        
+        # On définit les transformations
+        self.transform = tio.Compose([
+            Float32Lambda(),
+            tio.ToCanonical(),
+            tio.RandomFlip(axes=(0, 1, 2), p=0.5),
+        ])
+        
+
+    def _create_dataloader(self, subjects: List[tio.Subject], shuffle_subjects: bool, shuffle_patches: bool, is_validation: bool = False):
+        """Méthode utilitaire pour créer les DataLoaders (train et val)"""
+        if not subjects:
+            return None
+        
+        dataset = tio.SubjectsDataset(subjects, transform=self.transform)
+        
+        # Le sampler reste le même pour les deux versions
+        sampler = tio.LabelSampler(
+            patch_size=self.patch_size,
+            label_name='sampling_map',
+            label_probabilities={
+                0: 0.05,  # 5% de chance de prendre un patch centré sur l'air
+                1: 0.95   # 95% de chance de prendre un patch centré sur le patient
+            }
+        )
+        
+        # Paramètres spécifiques à la validation
+        max_length = 1000 if is_validation else self.queue_max_length
+        samples_per_volume = 32 if is_validation else self.samples_per_volume
+        num_workers = 4 if is_validation else self.num_workers
+        
+        patches_queue = tio.Queue(
+            subjects_dataset=dataset,
+            max_length=max_length,
+            samples_per_volume=samples_per_volume,
+            sampler=sampler,
+            num_workers=num_workers,
+            shuffle_subjects=shuffle_subjects,
+            shuffle_patches=shuffle_patches
+        )
+
+        # TorchIO recommande num_workers=0 pour le SubjectsLoader si la Queue est utilisée
+        return tio.SubjectsLoader(
+            patches_queue,
+            batch_size=self.batch_size,
+            num_workers=0,
+            pin_memory=True
+        )
+
+    def train_dataloader(self):
+        return self._create_dataloader(self.train_subjects, shuffle_subjects=True, shuffle_patches=True, is_validation=False)
+
+    def val_dataloader(self):
+        return self._create_dataloader(self.val_subjects, shuffle_subjects=False, shuffle_patches=False, is_validation=True)
+    
+    def test_dataloader(self):
+        if self.val_subjects:
+            # Pour le test, on charge le volume entier (batch_size=1)
+            test_dataset = tio.SubjectsDataset(self.val_subjects, transform=tio.Compose([Float32Lambda(), tio.ToCanonical()]))
+            return tio.SubjectsLoader(
+                test_dataset,
+                batch_size=1,
+                num_workers=multiprocessing.cpu_count() // 2,
+                pin_memory=True,
+                shuffle=False
+            )
+        return None        
