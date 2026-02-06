@@ -28,7 +28,7 @@ def get_start_indices(dim_size, patch_size, stride):
     return sorted(list(set(indices))) # set pour éviter doublons
 
 
-def process_subject(model, batch, device, filename, curr_idx, length_loader):
+def process_subject(model, batch, device, filename, check_if_exists, curr_idx, length_loader):
     # Récupération des paramètres du modèle
     SUV_LOG_MAX = model.hparams.suv_global_log_max
     ALPHA = model.hparams.alpha
@@ -37,13 +37,14 @@ def process_subject(model, batch, device, filename, curr_idx, length_loader):
     
     # code temporaire pour debug
     # check si les prédictions existent déjà pour ce patient :
-    # source_path = batch['source']['path'][0]
-    # output_dir = os.path.dirname(source_path)
-    # for suffix in ['_EARL1.nii.gz', '_EARL2.nii.gz']:
-    #     output_path = os.path.join(output_dir, f'{filename}{suffix}')
-    #     if os.path.exists(output_path):
-    #         print(f'Predictions already exist at: {output_path}. Skipping subject.')
-    #         return
+    if check_if_exists:
+        source_path = batch['source']['path'][0]
+        output_dir = os.path.dirname(source_path)
+        for suffix in ['_EARL1.nii.gz', '_EARL2.nii.gz']:
+            output_path = os.path.join(output_dir, f'{filename}{suffix}')
+            if os.path.exists(output_path):
+                print(f'Predictions already exist at: {output_path}. Skipping subject.')
+                return
 
     # --- 1. Préparation des Tenseurs ---
     # Récupération des données brutes (batch de taille 1)
@@ -171,13 +172,14 @@ def predict_patch_wise_earl(args):
 
     loader = datamodule.test_dataloader()
     for idx, batch in enumerate(loader):
-        process_subject(model, batch, device, args.filename, idx + 1, len(loader))
+        process_subject(model, batch, device, args.filename, args.check, idx + 1, len(loader))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Patch-wise Prediction with UNet Model")
     parser.add_argument('--config-file', '-c', type=str, required=True, help='Path to the config yaml file.')
     parser.add_argument('--ckpt-path', '-m', type=str, required=True, help='Path to the model checkpoint (.ckpt).')
+    parser.add_argument('--check', action='store_true', help='Check if predictions already exist before processing.')
     parser.add_argument('--filename', '-f', type=str, required=False, default='predicted_EARL_unet', help='Filename to process (if needed).')
     args = parser.parse_args()
     

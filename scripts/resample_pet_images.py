@@ -28,19 +28,19 @@ def resample_one_patient(data):
     os.makedirs(subject_output_path, exist_ok=True)
     
     # changer selon les fichiers
-    files = [
-        f for f in os.listdir(subject_input_path) 
-        if f.endswith(('.nii', '.nii.gz')) 
-        and f.startswith('PET') or f.startswith('EARL') # Seulement les images PET/EARL
-        and 'MIP' not in f
-    ]
-
-    # files = [ # Uniquement les masques
-    #     f for f in os.listdir(subject_input_path)
-    #     if f.endswith(('.nii', '.nii.gz'))
-    #     and not (f.startswith('PET') or f.startswith('EARL') or f.startswith('CT') or f.startswith('NAC'))  
-    #     # Exclure PET, EARL, CT
+    # files = [
+    #     f for f in os.listdir(subject_input_path) 
+    #     if f.endswith(('.nii', '.nii.gz')) 
+    #     and f.startswith('PET') or f.startswith('EARL') # Seulement les images PET/EARL
+    #     and 'MIP' not in f
     # ]
+
+    files = [ # Uniquement les masques
+        f for f in os.listdir(subject_input_path)
+        if f.endswith(('.nii', '.nii.gz'))
+        and not (f.startswith('PET') or f.startswith('EARL') or f.startswith('CT') or f.startswith('NAC'))  
+        # Exclure PET, EARL, CT
+    ]
     
     processed_count = 0
     
