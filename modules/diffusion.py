@@ -763,14 +763,17 @@ class TranslationDiffusionPipeline(BasicModel):
 class UnlearningHarmonizationDiffusionPipeline(BasicModel):
     def __init__(
         self,
-        iffn_encoder,             # Ton module IFFN (Encodeur F)
-        domain_classifier,        # Ton module Classifieur (Mouchard)
+        feature_extractor,        # module IFFN (Encodeur F)
+        domain_classifier,        # module Classifieur (Mouchard)
         noise_scheduler,
-        noise_estimator,          # Ton UNet de diffusion
+        noise_estimator,          # UNet de diffusion
         
         # --- Paramètres Dinsdale / Unlearning ---
         warmup_epochs=10,         # Correspond au 'epoch_stage_1' de Dinsdale
         beta_confusion=1.0,       # Poids de la confusion (args.beta)
+        alpha: float = 10.0,      # Facteur d'amplification du résidu
+        # weight_decay: float = 1e-5,
+        suv_global_log_max: float = 6.0, # Notre constante de normalisation clinique
         
         # Learning Rates séparés (Comme dans le papier)
         lr_main=1e-4,             # Encoder + UNet (Tâche)
@@ -793,7 +796,7 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         # On passe None au parent car on gère les optimizers manuellement
         super().__init__(optimizer=None, optimizer_kwargs=None, lr_scheduler=None)
         
-        self.iffn_encoder = iffn_encoder
+        self.feature_extractor = feature_extractor
         self.domain_classifier = domain_classifier
         self.noise_estimator = noise_estimator
         self.noise_scheduler = noise_scheduler
@@ -802,6 +805,8 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         self.warmup_epochs = warmup_epochs
         self.beta = beta_confusion
         self.lrs = {"main": lr_main, "dm": lr_dm, "conf": lr_conf}
+        self.alpha = alpha
+        self.suv_global_log_max = suv_global_log_max
         
         self.loss_fct = loss(**loss_kwargs)
         self.estimator_objective = estimator_objective
@@ -816,22 +821,19 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         if use_ema:
             # On applique l'EMA sur l'Encodeur et le UNet (la partie générative)
             self.ema_model = EMAModel(
-                nn.ModuleList([self.iffn_encoder, self.noise_estimator]), 
+                nn.ModuleList([self.feature_extractor, self.noise_estimator]), 
                 **ema_kwargs
             )
 
-        # IMPORTANT : Optimisation Manuelle requise pour Dinsdale
+        # IMPORTANT : Optimisation Manuelle requisee par la nature multi-optimizers
         self.automatic_optimization = False
         
-        self.save_hyperparameters(ignore=['noise_estimator', 'noise_scheduler', 'iffn_encoder', 'domain_classifier'])
+        self.save_hyperparameters(ignore=['noise_estimator', 'noise_scheduler', 'feature_extractor', 'domain_classifier'])
 
     def configure_optimizers(self):
-        """
-        Configuration stricte des 3 optimizers de Dinsdale.
-        """
         # 1. Main Optimizer : Tâche de reconstruction (Encoder + UNet)
         opt_main = torch.optim.Adam(
-            list(self.iffn_encoder.parameters()) + list(self.noise_estimator.parameters()),
+            list(self.feature_extractor.parameters()) + list(self.noise_estimator.parameters()),
             lr=self.lrs["main"]
         )
         
@@ -843,7 +845,7 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         
         # 3. Confusion Optimizer : Unlearning (Encoder seulement)
         opt_conf = torch.optim.Adam(
-            self.iffn_encoder.parameters(),
+            self.feature_extractor.parameters(),
             lr=self.lrs["conf"]
         )
         
@@ -853,13 +855,15 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         opt_main, opt_dm, opt_conf = self.optimizers()
         
         # Données
-        source = batch['source'][tio.DATA]
-        target = batch['target'][tio.DATA]
-        source_domain = batch['domain_id'] # Label réel du scanner (Input pour la loss domaine)
+        suv_source = batch['source'][tio.DATA] # PET
+        source_domain_id = batch['domain_id'] # Label réel du scanner (Input pour la loss domaine)
         
-        # Normalisation
-        source, target, _ = robust_patch_normalization(source, target, percentiles=(0.5, 99.5))
-        if self.clip_x0: target = torch.clamp(target, -1, 1)
+        if suv_source.ndim == 5:  # (B, 1, D, H, W) -> (B, D, H, W)
+            suv_source = suv_source.squeeze(1)
+        
+        # Normalisation scale to [-1, 1+eps]
+        log_source = torch.log1p(suv_source)
+        normalized_log_source = 2.0 * (log_source.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
 
         # Flag de phase : Stage 1 (Warmup) vs Stage 2 (Unlearning)
         is_stage_1 = self.current_epoch < self.warmup_epochs
@@ -873,16 +877,14 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         # -> C'est le même code, seule la backprop change un peu à la fin
         
         # A. Forward Encodeur
-        features = self.iffn_encoder(source)
+        features = self.feature_extractor(normalized_log_source)
 
         # B. Forward Diffusion (Task)
-        target_placeholder = torch.clone(target)
+        target_placeholder = torch.clone(normalized_log_source)
         x_t, x_T, t = self.noise_scheduler.sample(target_placeholder)
         
         # Conditionnement du UNet :
-        # - Contenu : Features F (via concaténation ou cross-attn)
-        # - Style/Domaine : ID Cible (EARL). Si absent, on suppose 0 ou fix.
-        target_domain_id = batch.get('target_domain_id', torch.zeros_like(source_domain))
+        target_domain_id = source_domain_id
         
         # Classifier Free Guidance logic
         if torch.rand(1) <= self.classifier_free_guidance_dropout:
@@ -894,11 +896,11 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
 
         # On suppose que ton UNet prend x_t concaténé avec F, et le label de classe
         unet_input = torch.cat([x_t, cond_input], dim=1)
-        prediction = self.noise_estimator(unet_input, t, class_labels=class_labels)
+        prediction = self.noise_estimator(unet_input, t, None, None)  # Pas de condition explicite, tout est dans l'entrée concaténée
         
         if self.estimate_variance: prediction, _ = prediction
             
-        objective = x_T if self.estimator_objective == "x_T" else target
+        objective = x_T if self.estimator_objective == "x_T" else normalized_log_source
         task_loss = self.loss_fct(prediction, objective)
 
         # ============================================================
@@ -911,7 +913,7 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
             
             # Forward Domain (On garde le graphe, pas de detach)
             domain_pred = self.domain_classifier(features)
-            loss_dm = F.cross_entropy(domain_pred, source_domain)
+            loss_dm = F.cross_entropy(domain_pred, target_domain_id)
             
             total_loss = task_loss + loss_dm
             
@@ -923,7 +925,10 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
             opt_main.step()
             opt_dm.step()
             
-            self.log("train/stage1_total_loss", total_loss, prog_bar=True)
+            for t, l in zip(['task_loss', 'domain_loss', 'total_loss'], [task_loss, loss_dm, total_loss]):
+                self.log(f'train/stage1_{t}', l, prog_bar=True, sync_dist=True, batch_size=objective.shape[0],
+                    on_step=True, on_epoch=True
+                )
 
         else:
             # --- STAGE 2 : UNLEARNING (Les 3 étapes dissociées) ---
@@ -936,13 +941,13 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
             # 2. Update Domain Classifier (Seul)
             # Dinsdale : "optimizer_dm.zero_grad(), output_dm = domain_predictor(features.detach())"
             # On doit détacher features pour ne pas toucher à l'encodeur ici
-            for p in self.iffn_encoder.parameters(): p.requires_grad = False
+            for p in self.feature_extractor.parameters(): p.requires_grad = False
             with torch.no_grad():
-                self.iffn_encoder.eval()
-                features_detached = self.iffn_encoder(source)
+                self.feature_extractor.eval()
+                features_detached = self.feature_extractor(normalized_log_source)
             
             domain_pred = self.domain_classifier(features_detached)
-            loss_dm = F.cross_entropy(domain_pred, source_domain)
+            loss_dm = F.cross_entropy(domain_pred, source_domain_id)
             
             opt_dm.zero_grad()
             self.manual_backward(loss_dm)
@@ -951,10 +956,10 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
             # 3. Update Encoder (Confusion)
             # Dinsdale : "optimizer_conf.zero_grad(), loss_conf = beta * conf_criterion..."
             # On doit refaire un forward partiel car le graphe a été consommé
-            for p in self.iffn_encoder.parameters(): p.requires_grad = True
-            self.iffn_encoder.train()
+            for p in self.feature_extractor.parameters(): p.requires_grad = True
+            self.feature_extractor.train()
 
-            features_conf = self.iffn_encoder(source)
+            features_conf = self.feature_extractor(normalized_log_source)
             domain_pred_conf = self.domain_classifier(features_conf)
             
             # Confusion Loss : KL Divergence vers distribution uniforme
@@ -972,47 +977,77 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
             opt_conf.step()
             
             # Logs Stage 2
-            self.log_dict({
-                "train/task_loss": task_loss,
-                "train/domain_loss_critic": loss_dm,
-                "train/confusion_loss_encoder": loss_conf
-            }, prog_bar=True)
+            for t, l in zip(['task_loss', 'domain_loss', 'confusion_loss'], [task_loss, loss_dm, loss_conf]):
+                self.log(f'train/stage2_{t}', l, prog_bar=True, sync_dist=True, batch_size=objective.shape[0],
+                    on_step=True, on_epoch=True
+                )
 
         # --- Fin du Step : EMA & Logs communs ---
         if self.use_ema:
             # On update l'EMA de l'encodeur et du UNet
-            self.ema_model.step(self.iffn_encoder)
+            self.ema_model.step(self.feature_extractor)
             self.ema_model.step(self.noise_estimator)
 
         # Visualization Périodique
         if (self.global_step + 1) % self.sample_every_n_steps == 0:
-            # On force la cible (ex: EARL=0) pour la visu
-            vis_domain = torch.zeros(1, device=self.device).long()
-            self.log_samples(source, target, vis_domain)
-
-    # ---------------------------------------------------------
-    # Méthodes Helper (Sample, Log, Forward Inférence)
-    # ---------------------------------------------------------
-
-    def forward(self, x_t, t, condition_features, target_domain_label=None, **kwargs):
-        """Utilisé pour l'inférence/sampling"""
-        # Sélection du modèle (EMA ou courant)
-        if self.use_ema:
-            # EMA contient une ModuleList [Encoder, UNet]
-            unet = self.ema_model.averaged_model[1]
-        else:
-            unet = self.noise_estimator
+            self.log_samples(normalized_log_source)
             
-        # Concaténation Features + Image Bruitée
-        unet_input = torch.cat([x_t, condition_features], dim=1)
+    
+    def validation_step(self, batch, batch_idx):
+        suv_source = batch['source'][tio.DATA] # PET
+        source_domain_id = batch['domain_id'] # Label réel du scanner (Input pour la loss domaine)
         
-        # Prédiction avec conditionnement de classe
-        return unet(unet_input, t, class_labels=target_domain_label)
+        if suv_source.ndim == 5:  # (B, 1, D, H, W) -> (B, D, H, W)
+            suv_source = suv_source.squeeze(1)
+        
+        # Normalisation scale to [-1, 1+eps]
+        log_source = torch.log1p(suv_source)
+        normalized_log_source = 2.0 * (log_source.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
+        
+        # A. Forward Encodeur
+        features = self.feature_extractor(normalized_log_source)
+
+        # B. Forward Diffusion (Task)
+        target_placeholder = torch.clone(normalized_log_source)
+        x_t, x_T, t = self.noise_scheduler.sample(target_placeholder)
+        
+        # Conditionnement du UNet :
+        target_domain_id = source_domain_id
+        
+        # Classifier Free Guidance logic
+        if torch.rand(1) <= self.classifier_free_guidance_dropout:
+            cond_input = torch.zeros_like(features)
+        else:
+            cond_input = features
+
+        # On suppose que ton UNet prend x_t concaténé avec F, et le label de classe
+        unet_input = torch.cat([x_t, cond_input], dim=1)
+        prediction = self.noise_estimator(unet_input, t, None)
+        
+        if self.estimate_variance: prediction, _ = prediction
+            
+        objective = x_T if self.estimator_objective == "x_T" else normalized_log_source
+        task_loss = self.loss_fct(prediction, objective)
+
+
+        domain_pred = self.domain_classifier(features)
+        loss_dm = F.cross_entropy(domain_pred, target_domain_id)
+            
+        total_loss = task_loss + loss_dm
+        
+        for t, l in zip(['task_loss', 'domain_loss', 'total_loss'], [task_loss, loss_dm, total_loss]):
+            self.log(f'val/{t}', l, prog_bar=True, sync_dist=True, batch_size=objective.shape[0],
+                on_step=True, on_epoch=True
+            )
+            
+        # # Visualization Périodique
+        # if (self.global_step + 1) % self.sample_every_n_steps == 0:
+        #     self.log_samples(normalized_log_source)
 
     @torch.no_grad()
-    def sample(self, source, target_domain_label=None, steps=None, use_ddim=False):
+    def sample(self, source, steps=None, use_ddim=False):
         # 1. Extraction Features
-        enc = self.ema_model.averaged_model[0] if self.use_ema else self.iffn_encoder
+        enc = self.ema_model.averaged_model[0] if self.use_ema else self.feature_extractor
         enc.eval()
         features = enc(source)
         
@@ -1020,61 +1055,148 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         template = torch.zeros_like(source)
         x_T = self.noise_scheduler.x_final(template)
         
-        # On passe 'features' comme 'condition_features' au forward
-        # et 'target_domain_label' comme 'target_domain_label'
         x_0 = self.denoise(
             x_T, 
-            source=None, # Plus besoin de source brute dans denoise car intégrée dans forward via features
-            steps=steps, 
-            condition_features=features, # <--- Passage des features IFFN
-            target_domain_label=target_domain_label,
+            source=features, # Plus besoin de source brute dans denoise car intégrée dans forward via features
+            condition=None,  # Conditionnement déjà intégré dans les features
+            steps=steps,
             use_ddim=use_ddim
         )
         return x_0
+    
+    def forward(
+        self,
+        x_t,
+        t,
+        condition=None,
+        self_cond=None,
+        guidance_scale=1.0,
+        cold_diffusion=False,
+        un_cond=None,
+        **kwargs
+    ):
+        # Note: x_t expected to be in range ~ [-1, 1]
+        if self.use_ema:
+            noise_estimator = self.ema_model.averaged_model
+        else:
+            noise_estimator = self.noise_estimator
 
+        # Concatenate inputs for guided and unguided diffusion as proposed by classifier-free-guidance
+        if (condition is not None) and (guidance_scale != 1.0):
+            pred_uncond = noise_estimator(x_t, t, condition=un_cond, self_cond=self_cond)
+            pred_cond   = noise_estimator(x_t, t, condition=condition, self_cond=self_cond)
+            pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+
+            if self.estimate_variance:
+                pred_uncond, pred_var_uncond = pred_uncond.chunk(2, dim=1)
+                pred_cond, pred_var_cond = pred_cond.chunk(2, dim=1)
+                pred_var = pred_var_uncond + guidance_scale * (pred_var_cond - pred_var_uncond)
+        else:
+            pred = noise_estimator(x_t, t, condition=condition, self_cond=self_cond)
+            if self.estimate_variance:
+                pred, pred_var = pred.chunk(2, dim=1)
+
+        if self.estimate_variance:
+            pred_var_scale = pred_var / 2 + 0.5  # [-1, 1] -> [0, 1]
+            pred_var_value = pred_var
+        else:
+            pred_var_scale = 0
+            pred_var_value = None
+
+        # pred_var_scale = pred_var_scale.clamp(0, 1)
+
+        if self.estimator_objective == "x_0":
+            if x_t.shape[1] != pred.shape[1]:
+                x_t = x_t[:, :pred.shape[1]]
+            x_t_prior, x_0 = self.noise_scheduler.estimate_x_t_prior_from_x_0(
+                x_t,
+                t,
+                pred,
+                clip_x0=self.clip_x0,
+                var_scale=pred_var_scale,
+                cold_diffusion=cold_diffusion,
+            )
+            x_T = self.noise_scheduler.estimate_x_T(
+                x_t, x_0=pred, t=t, clip_x0=self.clip_x0
+            )
+            self_cond = x_T
+
+        elif self.estimator_objective == "x_T":
+            if x_t.shape[1] != pred.shape[1]:
+                x_t = x_t[:, :pred.shape[1]]
+            x_t_prior, x_0 = self.noise_scheduler.estimate_x_t_prior_from_x_T(
+                x_t,
+                t,
+                pred,
+                clip_x0=self.clip_x0,
+                var_scale=pred_var_scale,
+                cold_diffusion=cold_diffusion,
+            )
+            x_T = pred
+            self_cond = x_0
+        else:
+            raise ValueError("Unknown Objective")
+
+        return x_t_prior, x_0, x_T, self_cond
+
+    
     @torch.no_grad()
-    def denoise(self, x_t, source, steps=None, condition_features=None, target_domain_label=None, use_ddim=False, **kwargs):
-        # Réécriture légère de denoise pour appeler self.forward avec les bons args
+    def denoise(self, x_t, source, steps=None, condition=None, use_ddim=False, **kwargs):
+        self_cond = None
+
+        # ---------- run denoise loop ---------------
         steps = self.noise_scheduler.timesteps if steps is None else steps
         if use_ddim:
-            timesteps_array = torch.linspace(0, self.noise_scheduler.T - 1, steps, dtype=torch.long, device=x_t.device)
+            timesteps_array = torch.linspace(
+                0,
+                self.noise_scheduler.T - 1,
+                steps,
+                dtype=torch.long,
+                device=x_t.device,
+            )  # [0, 1, 2, ..., T-1] if steps = T
         else:
-            timesteps_array = self.noise_scheduler.timesteps_array[slice(0, steps)]
+            timesteps_array = self.noise_scheduler.timesteps_array[slice(0, steps)] 
 
-        for i, t in tqdm(enumerate(reversed(timesteps_array)), leave=False):
-            t_tensor = t.expand(x_t.shape[0]).to(self.device)
-            
-            # Appel au forward adapté
-            model_output = self.forward(
-                x_t, 
-                t_tensor, 
-                condition_features=condition_features, 
-                target_domain_label=target_domain_label
-            )
-            
-            if self.estimate_variance: model_output, _ = model_output.chunk(2, dim=1)
-            
-            # ... Logique Scheduler standard (identique à ta classe originale) ...
-            # Placeholder : x_t = scheduler.step(...)
-            # Pour l'exemple, on suppose une fonction step simple :
-            x_t = self.noise_scheduler.step(model_output, t, x_t) # Pseudo-code
-            
-        return x_t
+        verbose = kwargs.get("verbose", True) 
+
+        # for i, t in tqdm(enumerate(reversed(timesteps_array))):
+        iterator = enumerate(reversed(timesteps_array))
+        if verbose:
+            iterator = tqdm(iterator, total=steps, desc="Denoising", leave=False, position=0)
+        
+        for i, t in iterator:
+            x_t = torch.cat([x_t, source], dim=1)
+            x_t, x_0, x_T, self_cond = self.forward(x_t, t.expand(x_t.shape[0]), condition, self_cond=self_cond, **kwargs)
+
+            self_cond = self_cond if self.use_self_conditioning else None
+
+            if use_ddim and (steps - i - 1 > 0):
+                t_next = timesteps_array[steps - i - 2]
+                alpha = self.noise_scheduler.alphas_cumprod[t]
+                alpha_next = self.noise_scheduler.alphas_cumprod[t_next]
+                sigma = (
+                    kwargs.get("eta", 1)
+                    * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+                )
+                c = (1 - alpha_next - sigma**2).sqrt()
+                noise = torch.randn_like(x_t)
+                x_t = x_0 * alpha_next.sqrt() + c * x_T + sigma * noise
+
+        return x_t  # Should be x_0 in final step (t=0)
 
     @torch.no_grad()
-    def log_samples(self, source, target, target_domain_label):
+    def log_samples(self, source):
         if self.trainer.global_rank == 0:
-            prediction = self.sample(source, target_domain_label=target_domain_label, steps=50, use_ddim=True)
+            prediction = self.sample(source, steps=50, use_ddim=True)
             
             # Logique d'affichage (Slices, WandB...)
             # Copie-colle ici ton code de visualisation slice 2D
             mid_slice = source.shape[2] // 2
             src_s = source[:, :, mid_slice, :, :]
-            tgt_s = target[:, :, mid_slice, :, :]
             pred_s = prediction[:, :, mid_slice, :, :]
             
-            grid = make_grid(torch.cat([src_s, pred_s, tgt_s], dim=3), nrow=1, normalize=True)
-            wandb.log({"Validation/Samples": wandb.Image(grid.permute(1,2,0).cpu().numpy())})
+            grid = make_grid(torch.cat([src_s, pred_s], dim=3), nrow=1, normalize=True)
+            wandb.log({"Validation/Samples": wandb.Image(grid.permute(1, 2, 0).cpu().numpy())})
 
 
 

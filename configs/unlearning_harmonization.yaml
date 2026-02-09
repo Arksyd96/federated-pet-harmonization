@@ -1,0 +1,136 @@
+# constants
+SEED: 101
+WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
+
+# modules state
+project_name: federated-pet
+dir_name: runs/unlearning-harmonization-diffusion
+name: Unlearning Harmonization with Diffusion (3 Domains)
+
+datamodule:
+    root_dir: ./data/PET-EARL/foundation-dataset
+    batch_size: 64
+    # train_ratio: 1.0 # No train_ratio here, we use train/test folders
+    patch_size: [5, 64, 64]
+    num_workers: 16 
+    queue_max_length: 9000
+    samples_per_volume: 350
+
+feature_extractor:
+    input_shape: [64, 64]
+    input_channels: 5
+    output_channels: 5
+    spatial_dims: 2
+    hidden_channels: [64, 128, 256, 512]
+    kernel_sizes: [3, 3, 3, 3]
+    strides: [2, 1, 1, 1]
+    use_residual_block: true
+    learnable_interpolation: true
+    use_attention: none
+    num_residual_blocks: 2
+
+domain_classifier:
+    in_ch: 5
+    num_domains: 3 # a100, chb, rennes
+    spatial_dims: 2
+    hid_chs: [32, 64, 128, 256]
+    kernel_sizes: [3, 3, 3, 3]
+    strides: [1, 2, 2, 2]
+
+    # Tuple (str, Dict) converti en liste YAML
+    act_name: 
+    - swish
+    - {}
+
+    # Tuple avec dictionnaire de paramètres
+    norm_name: 
+    - group
+    - {num_groups: 32, affine: true}
+
+    dropout: 0.2
+        
+denoiser:
+    in_ch: 10
+    out_ch: 5
+    spatial_dims: 2
+    hid_chs: [64, 128, 256, 512]
+    kernel_sizes: [3, 3, 3, 3]
+    strides: [1, 2, 2, 2]
+    temb_channels: 128
+    max_period: 100
+    scale_shift_norm: true
+
+    # Tuple (str, Dict) converti en liste YAML
+    act_name: 
+    - swish
+    - {}
+
+    # Tuple avec dictionnaire de paramètres
+    norm_name: 
+    - group
+    - {num_groups: 32, affine: true}
+
+    deep_supervision: false
+    use_res_block: true
+    estimate_variance: false
+    use_self_conditioning: false
+    dropout: 0.0
+    learnable_interpolation: true
+    use_attention: none
+    num_res_blocks: 2
+
+scheduler:
+    timesteps: 100
+    beta_start: 0.002
+    beta_end: 0.02
+    schedule_strategy: scaled_linear
+
+diffuser:
+    # --- Paramètres Dinsdale / Unlearning ---
+    warmup_epochs: 50         # Correspond au 'epoch_stage_1' de Dinsdale
+    beta_confusion: 1.0       # Poids de la confusion (args.beta)
+    
+    # Learning Rates séparés (Comme dans le papier)
+    lr_main: 1.e-4              # Encoder + UNet (Tâche)
+    lr_dm: 1.e-4                # Domain Classifier (Mouchard)
+    lr_conf: 1.e-6              # Unlearning (Encoder seulement, souvent plus faible pour éviter des changements brusques)
+    alpha: 1.0                  # Facteur d'amplification du résidu
+    # weight_decay: 1.e-5
+    suv_global_log_max: 6.0     # Notre constante de normalisation clinique
+
+    estimator_objective: x_T
+    estimate_variance: false
+    use_self_conditioning: false
+    classifier_free_guidance_dropout: 0.0
+    clip_x0: false
+    use_ema: false
+    sample_every_n_steps: 500
+    
+# trainer state
+model_checkpoint:
+    monitor: val/task_loss
+    every_n_epochs: 1
+    save_last: true
+    save_top_k: 1
+    mode: min
+
+trainer:
+    precision: 32
+    accelerator: gpu
+    log_every_n_steps: 1
+    min_epochs: 100
+    max_epochs: 300
+    check_val_every_n_epoch: 1
+    num_sanity_val_steps: 10
+
+    # On peut pas utiliser gradient_clip_val et gradient_clip_algorithm avec opt manuelle
+    # gradient_clip_val: 1.0 # Sécurité anti-pics
+    # gradient_clip_algorithm: "norm"
+
+    # For Debugging
+    # Force l'arrêt de l'époque de train après 100 batchs (au lieu de 2000)
+    # limit_train_batches: 10
+    
+    # Force l'arrêt de la validation après 10 batchs (au lieu de tout le dataset)
+    limit_val_batches: 50
+    # fast_dev_run: true
