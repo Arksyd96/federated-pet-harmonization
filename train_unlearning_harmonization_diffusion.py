@@ -71,6 +71,8 @@ def main(args):
         logger.info(f"Reprise depuis : {args.resume_checkpoint}")
         diffuser = UnlearningHarmonizationDiffusionPipeline.load_from_checkpoint(
             args.resume_checkpoint,
+            feature_extractor=feature_extractor,
+            domain_classifier=domain_classifier,
             noise_estimator=denoiser,
             noise_scheduler=noise_scheduler,
             strict=False

@@ -88,9 +88,8 @@ class DomainClassifier(nn.Module):
         
         # Logits de sortie pour la CrossEntropyLoss
         logits = self.classifier_head(latent)
-        probs = torch.softmax(logits, dim=1) if self.num_domains > 2 else torch.sigmoid(logits)
         
-        return probs
+        return logits
 
     def get_latent_features(self, x):
         h = self.in_conv(x)

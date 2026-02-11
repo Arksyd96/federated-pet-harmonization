@@ -771,14 +771,13 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         # --- Paramètres Dinsdale / Unlearning ---
         warmup_epochs=10,         # Correspond au 'epoch_stage_1' de Dinsdale
         beta_confusion=1.0,       # Poids de la confusion (args.beta)
-        alpha: float = 10.0,      # Facteur d'amplification du résidu
         # weight_decay: float = 1e-5,
         suv_global_log_max: float = 6.0, # Notre constante de normalisation clinique
         
         # Learning Rates séparés (Comme dans le papier)
         lr_main=1e-4,             # Encoder + UNet (Tâche)
         lr_dm=1e-4,               # Domain Classifier (Mouchard)
-        lr_conf=1e-6,             # Unlearning (Encoder seulement, souvent plus faible)
+        lr_conf=1e-4,             # Unlearning (Encoder seulement, souvent plus faible)
         
         # --- Paramètres Diffusion existants ---
         estimator_objective="x_T",
@@ -805,7 +804,6 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         self.warmup_epochs = warmup_epochs
         self.beta = beta_confusion
         self.lrs = {"main": lr_main, "dm": lr_dm, "conf": lr_conf}
-        self.alpha = alpha
         self.suv_global_log_max = suv_global_log_max
         
         self.loss_fct = loss(**loss_kwargs)
@@ -889,14 +887,12 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         # Classifier Free Guidance logic
         if torch.rand(1) <= self.classifier_free_guidance_dropout:
             cond_input = torch.zeros_like(features)
-            class_labels = None
         else:
             cond_input = features
-            class_labels = target_domain_id
 
         # On suppose que ton UNet prend x_t concaténé avec F, et le label de classe
         unet_input = torch.cat([x_t, cond_input], dim=1)
-        prediction = self.noise_estimator(unet_input, t, None, None)  # Pas de condition explicite, tout est dans l'entrée concaténée
+        prediction = self.noise_estimator(unet_input, t, None)  # Pas de condition explicite, tout est dans l'entrée concaténée
         
         if self.estimate_variance: prediction, _ = prediction
             
@@ -987,10 +983,6 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
             # On update l'EMA de l'encodeur et du UNet
             self.ema_model.step(self.feature_extractor)
             self.ema_model.step(self.noise_estimator)
-
-        # Visualization Périodique
-        if (self.global_step + 1) % self.sample_every_n_steps == 0:
-            self.log_samples(normalized_log_source)
             
     
     def validation_step(self, batch, batch_idx):
@@ -1029,7 +1021,6 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         objective = x_T if self.estimator_objective == "x_T" else normalized_log_source
         task_loss = self.loss_fct(prediction, objective)
 
-
         domain_pred = self.domain_classifier(features)
         loss_dm = F.cross_entropy(domain_pred, target_domain_id)
             
@@ -1040,19 +1031,60 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
                 on_step=True, on_epoch=True
             )
             
-        # # Visualization Périodique
-        # if (self.global_step + 1) % self.sample_every_n_steps == 0:
-        #     self.log_samples(normalized_log_source)
+        # Visualization Périodique
+        if batch_idx == 0:
+            self.log_samples(normalized_log_source)
+            
+    @torch.no_grad()
+    def log_samples(self, normalized_log_source):
+        if self.trainer.global_rank == 0:
+            normalized_log_prediction = self.sample(normalized_log_source, steps=50, use_ddim=True)
+            normalized_log_prediction = normalized_log_prediction.clamp(-1, 1)
+            
+            # denormalisations pour affichage
+            log_prediction = 0.5 * (normalized_log_prediction + 1.0) * self.suv_global_log_max
+            log_source = 0.5 * (normalized_log_prediction + 1.0) * self.suv_global_log_max
+            
+            prediction = torch.expm1(log_prediction)  # Inverse de log1p pour revenir à l'échelle SUV
+            source = torch.expm1(log_source)  # Inverse de log1p pour revenir à l'échelle SUV
+            
+            mid = source.shape[1] // 2 
+        
+            # Extraction slice centrale (B, 1, H, W)
+            src_slice = source[:, mid:mid + 1, :, :]
+            pred_slice = prediction[:, mid:mid + 1, :, :]
+            
+            # Clipping pour affichage (0 à 5 SUV pour le contraste clinique)
+            display_max = max(
+                5.0, 
+                src_slice.max().item(), 
+                pred_slice.max().item()
+            )
+            
+            imgs = torch.cat([src_slice, pred_slice], dim=3) # Stack horizontal
+            imgs = (imgs / display_max).clamp(0, 1) # Normalisation visuelle
+            
+            grid = make_grid(imgs, nrow=1, padding=2)
+            
+            # Légende
+            caption = f"PET / Recon PET"
+            
+            wandb_image = wandb.Image(
+                grid.permute(1, 2, 0).cpu().numpy(), 
+                caption=caption
+            )
+
+            wandb.log({"Validation/Reconstruction": wandb_image})
 
     @torch.no_grad()
-    def sample(self, source, steps=None, use_ddim=False):
+    def sample(self, normalized_log_source, steps=None, use_ddim=False):
         # 1. Extraction Features
         enc = self.ema_model.averaged_model[0] if self.use_ema else self.feature_extractor
         enc.eval()
-        features = enc(source)
+        features = enc(normalized_log_source)
         
         # 2. Noise Loop
-        template = torch.zeros_like(source)
+        template = torch.zeros_like(normalized_log_source)
         x_T = self.noise_scheduler.x_final(template)
         
         x_0 = self.denoise(
@@ -1184,19 +1216,7 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
 
         return x_t  # Should be x_0 in final step (t=0)
 
-    @torch.no_grad()
-    def log_samples(self, source):
-        if self.trainer.global_rank == 0:
-            prediction = self.sample(source, steps=50, use_ddim=True)
-            
-            # Logique d'affichage (Slices, WandB...)
-            # Copie-colle ici ton code de visualisation slice 2D
-            mid_slice = source.shape[2] // 2
-            src_s = source[:, :, mid_slice, :, :]
-            pred_s = prediction[:, :, mid_slice, :, :]
-            
-            grid = make_grid(torch.cat([src_s, pred_s], dim=3), nrow=1, normalize=True)
-            wandb.log({"Validation/Samples": wandb.Image(grid.permute(1, 2, 0).cpu().numpy())})
+
 
 
 

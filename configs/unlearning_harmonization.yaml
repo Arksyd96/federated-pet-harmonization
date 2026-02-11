@@ -93,7 +93,7 @@ diffuser:
     # Learning Rates séparés (Comme dans le papier)
     lr_main: 1.e-4              # Encoder + UNet (Tâche)
     lr_dm: 1.e-4                # Domain Classifier (Mouchard)
-    lr_conf: 1.e-6              # Unlearning (Encoder seulement, souvent plus faible pour éviter des changements brusques)
+    lr_conf: 1.e-4              # Unlearning (Encoder seulement, souvent plus faible pour éviter des changements brusques)
     alpha: 1.0                  # Facteur d'amplification du résidu
     # weight_decay: 1.e-5
     suv_global_log_max: 6.0     # Notre constante de normalisation clinique
@@ -104,7 +104,7 @@ diffuser:
     classifier_free_guidance_dropout: 0.0
     clip_x0: false
     use_ema: false
-    sample_every_n_steps: 500
+    sample_every_n_steps: 10
     
 # trainer state
 model_checkpoint:
@@ -120,7 +120,7 @@ trainer:
     log_every_n_steps: 1
     min_epochs: 100
     max_epochs: 300
-    check_val_every_n_epoch: 1
+    check_val_every_n_epoch: 5
     num_sanity_val_steps: 10
 
     # On peut pas utiliser gradient_clip_val et gradient_clip_algorithm avec opt manuelle
@@ -132,5 +132,5 @@ trainer:
     # limit_train_batches: 10
     
     # Force l'arrêt de la validation après 10 batchs (au lieu de tout le dataset)
-    limit_val_batches: 50
+    limit_val_batches: 100
     # fast_dev_run: true
