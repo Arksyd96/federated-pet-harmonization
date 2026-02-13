@@ -219,6 +219,12 @@ def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sph
     
     logging.info(f"Traitement de {len(subjects)} sujets avec {num_workers} workers 🚀")
     logging.info(f"Mode Sphère : {use_sphere} | Masque : {mask_filename}")
+    # calcul volume de la sphere pour info avec radius par défaut
+    if use_sphere:
+        voxel_volume = np.prod(sitk.ReadImage(os.path.join(root_dir, subjects[0], mask_filename)).GetSpacing())
+        sphere_volume_mm3 = (4/3) * np.pi * (sphere_radius ** 3)
+        sphere_volume_voxels = sphere_volume_mm3 / voxel_volume
+        logging.info(f"Volume de la sphère de rayon {sphere_radius}mm : {sphere_volume_mm3:.2f} mm³ ≈ {sphere_volume_voxels:.1f} voxels")
 
     # Préparation des tâches
     tasks = [
