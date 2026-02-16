@@ -87,8 +87,8 @@ scheduler:
 
 diffuser:
     # --- Paramètres Dinsdale / Unlearning ---
-    warmup_epochs: 50         # Correspond au 'epoch_stage_1' de Dinsdale
-    beta_confusion: 1.0       # Poids de la confusion (args.beta)
+    warmup_epochs: 30         # Correspond au 'epoch_stage_1' de Dinsdale
+    beta_confusion: 1.5       # Poids de la confusion (args.beta)
     
     # Learning Rates séparés (Comme dans le papier)
     lr_main: 1.e-4              # Encoder + UNet (Tâche)

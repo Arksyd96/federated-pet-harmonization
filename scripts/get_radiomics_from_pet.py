@@ -71,18 +71,18 @@ def generate_centered_sphere(sitk_mask, radius_mm=15.0, use_barycenter=False, ma
     safety_arr = (dist2 <= safety_radius_sq)
 
     if not np.any(sphere_arr):
-        return None
+        return None, "La sphère générée est vide. Vérifiez les paramètres de rayon et de marge."
 
     mask_arr = sitk.GetArrayFromImage(sitk_mask).astype(bool)
 
     if not np.all(mask_arr[safety_arr]):
-        return None
+        return None, "La sphère avec marge dépasse les limites du masque. Augmentez la marge ou réduisez le rayon."
 
     # 8. Conversion et retour
     out_sitk = sitk.GetImageFromArray(sphere_arr.astype(np.uint8))
     out_sitk.CopyInformation(sitk_mask)
     
-    return out_sitk
+    return out_sitk, "Sphère générée avec succès."
 
 
 def get_extractor(param_file=None):
@@ -132,7 +132,7 @@ def process_single_subject(args):
     if use_sphere:
         original_mask_sitk = sitk.ReadImage(mask_path)
         
-        sphere_mask_sitk = generate_centered_sphere(
+        sphere_mask_sitk, message = generate_centered_sphere(
             original_mask_sitk, 
             radius_mm=sphere_radius, 
             use_barycenter=False, 
@@ -140,7 +140,7 @@ def process_single_subject(args):
         )
         
         if sphere_mask_sitk is None:
-            logging.warning(f"[{subject_id}] Échec génération masque sphérique. Sujet ignoré.")
+            logging.warning(f"[{subject_id}] Échec génération masque sphérique. Sujet ignoré. => {message}")
             return
             
         current_mask_input = sphere_mask_sitk
