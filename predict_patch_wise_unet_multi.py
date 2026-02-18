@@ -35,7 +35,6 @@ def process_subject(model, batch, device, filename, check_if_exists, curr_idx, l
 
     print('Treating subject: {} ({}/{})'.format(batch['subject_id'][0], curr_idx, length_loader))
     
-    # code temporaire pour debug
     # check si les prédictions existent déjà pour ce patient :
     if check_if_exists:
         source_path = batch['source']['path'][0]

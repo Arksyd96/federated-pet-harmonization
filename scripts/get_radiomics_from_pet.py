@@ -108,7 +108,6 @@ def parse_pred_mod(filename):
         output_name += f'_{dsr_xy[0].upper()}'
     return output_name
 
-
 def process_single_subject(args):
     subject_id, root_dir, mask_filename, params_file, use_sphere, sphere_radius = args
 

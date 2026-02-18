@@ -1077,7 +1077,7 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
             wandb.log({"Validation/Reconstruction": wandb_image})
 
     @torch.no_grad()
-    def sample(self, normalized_log_source, steps=None, use_ddim=False):
+    def sample(self, normalized_log_source, steps=None, use_ddim=False, **kwargs):
         # 1. Extraction Features
         enc = self.ema_model.averaged_model[0] if self.use_ema else self.feature_extractor
         enc.eval()
@@ -1092,7 +1092,8 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
             source=features, # Plus besoin de source brute dans denoise car intégrée dans forward via features
             condition=None,  # Conditionnement déjà intégré dans les features
             steps=steps,
-            use_ddim=use_ddim
+            use_ddim=use_ddim,
+            **kwargs
         )
         return x_0
     
