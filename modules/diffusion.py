@@ -1043,7 +1043,7 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
             
             # denormalisations pour affichage
             log_prediction = 0.5 * (normalized_log_prediction + 1.0) * self.suv_global_log_max
-            log_source = 0.5 * (normalized_log_prediction + 1.0) * self.suv_global_log_max
+            log_source = 0.5 * (normalized_log_source + 1.0) * self.suv_global_log_max
             
             prediction = torch.expm1(log_prediction)  # Inverse de log1p pour revenir à l'échelle SUV
             source = torch.expm1(log_source)  # Inverse de log1p pour revenir à l'échelle SUV
@@ -1063,6 +1063,7 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
             
             imgs = torch.cat([src_slice, pred_slice], dim=3) # Stack horizontal
             imgs = (imgs / display_max).clamp(0, 1) # Normalisation visuelle
+            imgs = (imgs * 255.0).byte() # Passage à uint8 pour wandb
             
             grid = make_grid(imgs, nrow=1, padding=2)
             
