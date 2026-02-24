@@ -33,7 +33,7 @@ domain_classifier:
     in_ch: 5
     num_domains: 3 # a100, chb, rennes
     spatial_dims: 2
-    hid_chs: [32, 64, 128, 256]
+    hid_chs: [64, 128, 256, 512]
     kernel_sizes: [3, 3, 3, 3]
     strides: [1, 2, 2, 2]
 
@@ -47,7 +47,7 @@ domain_classifier:
     - group
     - {num_groups: 32, affine: true}
 
-    dropout: 0.2
+    dropout: 0.1
         
 denoiser:
     in_ch: 10
@@ -87,21 +87,20 @@ scheduler:
 
 diffuser:
     # --- Paramètres Dinsdale / Unlearning ---
-    warmup_epochs: 30         # Correspond au 'epoch_stage_1' de Dinsdale
-    beta_confusion: 1.5       # Poids de la confusion (args.beta)
+    warmup_epochs: 25         # Correspond au 'epoch_stage_1' de Dinsdale
+    beta_confusion: 0.5       # Poids de la confusion (args.beta)
     
     # Learning Rates séparés (Comme dans le papier)
     lr_main: 1.e-4              # Encoder + UNet (Tâche)
     lr_dm: 1.e-4                # Domain Classifier (Mouchard)
-    lr_conf: 1.e-4              # Unlearning (Encoder seulement, souvent plus faible pour éviter des changements brusques)
-    alpha: 1.0                  # Facteur d'amplification du résidu
+    lr_conf: 3.e-7              # Unlearning (Encoder seulement, souvent plus faible pour éviter des changements brusques
     # weight_decay: 1.e-5
     suv_global_log_max: 6.0     # Notre constante de normalisation clinique
 
     estimator_objective: x_T
     estimate_variance: false
     use_self_conditioning: false
-    classifier_free_guidance_dropout: 0.0
+    classifier_free_guidance_dropout: 0.1
     clip_x0: false
     use_ema: false
     sample_every_n_steps: 10
