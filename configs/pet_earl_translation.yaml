@@ -8,10 +8,10 @@ dir_name: runs/2d-to-3d-pet-earl-translation-unet-dsr12-a100
 name: Traduction PET EARL1/2 5x64x64 DSR 12p A100 (UNet)
 
 datamodule:
-    root_dir: ./data/PET-EARL/A100EARL1et2_Nifti/train
+    root_dir: ./data/PET-EARL/foundation-dataset/test/domain_a100
     batch_size: 64
     # train_ratio: 1.0 # No DSR
-    train_ratio: 12 # for DSR with N subjects only
+    train_ratio: 0 # for DSR with N subjects only
     patch_size: [5, 64, 64]
     num_workers: 16 
     queue_max_length: 9000
