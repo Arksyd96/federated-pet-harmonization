@@ -789,7 +789,6 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         ema_kwargs={},
         loss=torch.nn.L1Loss,
         loss_kwargs={},
-        sample_every_n_steps=500,
         **kwargs
     ):
         # On passe None au parent car on gère les optimizers manuellement
@@ -812,7 +811,6 @@ class UnlearningHarmonizationDiffusionPipeline(BasicModel):
         self.use_self_conditioning = use_self_conditioning
         self.classifier_free_guidance_dropout = classifier_free_guidance_dropout
         self.clip_x0 = clip_x0
-        self.sample_every_n_steps = sample_every_n_steps
 
         # EMA
         self.use_ema = use_ema

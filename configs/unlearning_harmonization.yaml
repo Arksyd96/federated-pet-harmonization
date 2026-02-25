@@ -80,7 +80,7 @@ denoiser:
     num_res_blocks: 2
 
 scheduler:
-    timesteps: 100
+    timesteps: 1000
     beta_start: 0.002
     beta_end: 0.02
     schedule_strategy: scaled_linear
@@ -88,22 +88,21 @@ scheduler:
 diffuser:
     # --- Paramètres Dinsdale / Unlearning ---
     warmup_epochs: 25         # Correspond au 'epoch_stage_1' de Dinsdale
-    beta_confusion: 0.5       # Poids de la confusion (args.beta)
+    beta_confusion: 1.0       # Poids de la confusion (args.beta)
     
     # Learning Rates séparés (Comme dans le papier)
     lr_main: 1.e-4              # Encoder + UNet (Tâche)
     lr_dm: 1.e-4                # Domain Classifier (Mouchard)
-    lr_conf: 3.e-7              # Unlearning (Encoder seulement, souvent plus faible pour éviter des changements brusques
+    lr_conf: 3.e-6              # Unlearning (Encoder seulement, souvent plus faible pour éviter des changements brusques
     # weight_decay: 1.e-5
     suv_global_log_max: 6.0     # Notre constante de normalisation clinique
 
-    estimator_objective: x_T
+    estimator_objective: x_0
     estimate_variance: false
     use_self_conditioning: false
     classifier_free_guidance_dropout: 0.1
     clip_x0: false
     use_ema: false
-    sample_every_n_steps: 10
     
 # trainer state
 model_checkpoint:
