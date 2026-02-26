@@ -1,0 +1,83 @@
+# constants
+SEED: 101
+WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
+
+project_name: federated-pet
+dir_name: runs/unlearning-harmonization-unet
+name: Unlearning Harmonization with UNet (3 Domains)
+
+datamodule:
+    root_dir: ./data/PET-EARL/foundation-dataset
+    batch_size: 64
+    patch_size: [5, 64, 64]
+    num_workers: 16
+    queue_max_length: 9000
+    samples_per_volume: 350
+
+# UNet principal — mode régression pure (temb_channels: null)
+unet:
+    in_ch: 5
+    out_ch: 5
+    spatial_dims: 2
+    hid_chs: [64, 128, 256, 512]
+    kernel_sizes: [3, 3, 3, 3]
+    strides: [1, 2, 2, 2]
+    temb_channels: null
+    deep_supervision: false
+    use_res_block: true
+    estimate_variance: false
+    use_self_conditioning: false
+    dropout: 0.1
+    learnable_interpolation: true
+    use_attention: none
+    num_res_blocks: 2
+
+    act_name:
+    - swish
+    - {}
+
+    norm_name:
+    - group
+    - {num_groups: 32, affine: true}
+
+
+domain_classifier:
+    feature_channels: [64, 128, 256, 512, 512]
+    num_domains: 3  # 0=a100, 1=chb, 2=rennes
+    spatial_dims: 2
+    dropout: 0.1
+
+# Pipeline UnlearningUNet
+pipeline:
+    num_domains: 3
+    warmup_epochs: 20
+    beta_confusion: 0.5       # Démarrer modéré, augmenter si le classifieur reste trop bon
+    level_weights: [1.0, 1.0, 1.0, 1.0, 1.0]  # Uniforme pour commencer
+    lr_main: 1.e-4
+    lr_dm: 1.e-4
+    lr_conf: 1.e-5            # Ordre de grandeur en dessous de lr_main
+    weight_decay: 1.e-5
+    suv_global_log_max: 6.0
+
+model_checkpoint:
+    monitor: val/task_loss
+    every_n_epochs: 1
+    save_last: true
+    save_top_k: 3
+    mode: min
+
+trainer:
+    precision: 32
+    accelerator: gpu
+    devices: 1
+    log_every_n_steps: 1
+    min_epochs: 50
+    max_epochs: 200
+    check_val_every_n_epoch: 5
+    num_sanity_val_steps: 2
+
+    # Non compatible avec optimisation manuelle (multi-optimiseurs)
+    # gradient_clip_val: 1.0
+    # gradient_clip_algorithm: "norm"
+
+    limit_val_batches: 100

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import List, Tuple, Dict
+from typing import List, Optional, Tuple, Dict
 from modules.models.base import UnetResBlock, BasicBlock, BasicDown
 
 class DomainClassifier(nn.Module):
@@ -94,3 +94,79 @@ class DomainClassifier(nn.Module):
     def get_latent_features(self, x):
         h = self.in_conv(x)
         return self.encoder(h)
+    
+
+def _make_level_classifier(
+    ch: int,
+    num_domains: int,
+    num_conv: int,
+    spatial_dims: int,
+    dropout: float,
+) -> nn.Sequential:
+    Conv = nn.Conv2d if spatial_dims == 2 else nn.Conv3d
+    BN   = nn.BatchNorm2d if spatial_dims == 2 else nn.BatchNorm3d
+    Pool = nn.AdaptiveAvgPool2d(1) if spatial_dims == 2 else nn.AdaptiveAvgPool3d(1)
+
+    layers: List[nn.Module] = []
+
+    # Couches convolutives (same shape)
+    for _ in range(num_conv):
+        layers += [
+            Conv(ch, ch, kernel_size=3, padding=1, bias=False),
+            BN(ch),
+            nn.ReLU(inplace=True),
+        ]
+
+    # Pooling + tête MLP
+    hidden = max(ch // 4, 64)
+    layers += [
+        Pool,
+        nn.Flatten(),
+        nn.Linear(ch, hidden),
+        nn.ReLU(inplace=True),
+        nn.Dropout(dropout),
+        nn.Linear(hidden, num_domains),
+    ]
+
+    return nn.Sequential(*layers)
+
+
+class MultiLevelDomainClassifier(nn.Module):
+    def __init__(
+        self,
+        feature_channels: List[int],
+        num_domains: int = 3,
+        spatial_dims: int = 2,
+        dropout: float = 0.2,
+        num_conv_per_level: Optional[List[int]] = None,
+    ):
+        super().__init__()
+        self.num_levels = len(feature_channels)
+
+        # Règle automatique si non spécifié
+        if num_conv_per_level is None:
+            num_conv_per_level = []
+            for i in range(self.num_levels):
+                if i == 0:
+                    num_conv_per_level.append(2)   # niveau bas : 2 conv
+                elif i == self.num_levels - 1:
+                    num_conv_per_level.append(0)   # latent : pas de conv
+                else:
+                    num_conv_per_level.append(1)   # niveaux intermédiaires : 1 conv
+
+        assert len(num_conv_per_level) == self.num_levels, (
+            f"num_conv_per_level should have {self.num_levels} elements, got {len(num_conv_per_level)}"
+        )
+
+        classifiers = []
+        for ch, n_conv in zip(feature_channels, num_conv_per_level):
+            classifiers.append(
+                _make_level_classifier(ch, num_domains, n_conv, spatial_dims, dropout)
+            )
+        self.classifiers = nn.ModuleList(classifiers)
+
+    def forward(self, encoder_features: List[torch.Tensor]) -> List[torch.Tensor]:
+        assert len(encoder_features) == self.num_levels, (
+            f"{self.num_levels} levels expected, received: {len(encoder_features)}"
+        )
+        return [clf(feat) for clf, feat in zip(self.classifiers, encoder_features)]

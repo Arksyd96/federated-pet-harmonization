@@ -622,3 +622,389 @@ class TranslationUNet(LightningModule):
         
 
 
+class UNetWithIntermediateFeatures(UNet):
+    def __init__(self, 
+        in_ch: int = 1,
+        out_ch: int = 1,
+        spatial_dims: int = 3,
+        hid_chs: List[int] = [256, 256, 512, 1024],
+        kernel_sizes: List[int] = [3, 3, 3, 3],
+        strides: List[int] = [1, 2, 2, 2],
+        temb_channels: int = 128,
+        max_period: int = 1000,
+        scale_shift_norm: bool = True,
+        act_name: Tuple[str, Dict] = ('swish', {}),
+        norm_name: Tuple[str, Dict] = ('group', {'num_groups': 32, 'affine': True}),
+        cond_embedder: Optional[nn.Module] = None,
+        deep_supervision: bool = False,
+        use_res_block: bool = True,
+        estimate_variance: bool = False,
+        use_self_conditioning: bool = False,
+        dropout: float = 0.0,
+        learnable_interpolation: bool = True,
+        use_attention: Union[str, List[str]] = 'none',
+        num_res_blocks: int = 2,
+        **kwargs):
+        super().__init__(in_ch, out_ch, spatial_dims, hid_chs, kernel_sizes, strides,
+                         temb_channels, max_period, scale_shift_norm, act_name, norm_name,
+                         cond_embedder, deep_supervision, use_res_block, estimate_variance,
+                         use_self_conditioning, dropout, learnable_interpolation,
+                         use_attention, num_res_blocks, **kwargs)
+
+        self._feature_indices: List[int] = []  
+        cursor = 0
+        for i in range(1, self.depth):
+            # Index du dernier res block de ce niveau
+            last_res_idx = cursor + self.num_res_blocks - 1
+            self._feature_indices.append(last_res_idx)
+            cursor += self.num_res_blocks
+            if i < self.depth - 1:
+                cursor += 1  # BasicDown compte aussi
+
+    def forward_with_features(
+        self,
+        x_t: torch.Tensor,
+        t: Optional[torch.Tensor] = None,
+        condition: Optional[torch.Tensor] = None,
+        self_cond: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        # --- Embeddings (time + condition) ---
+        if t is None:   time_emb = None
+        else:           time_emb = self.time_embedder(t)
+
+        if (condition is None) or (self.cond_embedder is None):
+            cond_emb = None
+        else:
+            cond_emb = self.cond_embedder(condition)
+
+        emb = save_add(time_emb, cond_emb)
+
+        # --- Self-conditioning ---
+        if self.use_self_conditioning:
+            self_cond = torch.zeros_like(x_t) if self_cond is None else x_t
+            x_t = torch.cat([x_t, self_cond], dim=1)
+
+        # --- Encodeur ---
+        x = [self.in_conv(x_t)]
+        encoder_features: List[torch.Tensor] = [x[0]]  # level_0
+
+        for i in range(len(self.in_blocks)):
+            feat = self.in_blocks[i](x[i], emb)
+            x.append(feat)
+            # On capture la feature si c'est la fin d'un niveau
+            if i in self._feature_indices:
+                encoder_features.append(feat)
+
+        # --- Middle block (espace latent) ---
+        h = self.middle_block(x[-1], emb)
+        encoder_features.append(h)  # latent = dernier élément
+
+        # --- Décodeur (identique à forward()) ---
+        y_ver = []
+        for i in range(len(self.out_blocks), 0, -1):
+            h = torch.cat([h, x.pop()], dim=1)
+            depth, j = i // (self.num_res_blocks + 1), i % (self.num_res_blocks + 1) - 1
+            (
+                y_ver.append(self.outc_ver[depth - 1](h))
+                if (len(self.outc_ver) >= depth > 0) and (j == 0)
+                else None
+            )
+            h = self.out_blocks[i - 1](h, emb)
+
+        y = self.outc(h)
+        return y, encoder_features
+    
+
+class UnlearningUNet(LightningModule):
+    def __init__(
+        self,
+        model: UNetWithIntermediateFeatures,
+        domain_classifier: nn.Module,
+        num_domains: int = 3,
+        warmup_epochs: int = 25,
+        beta_confusion: float = 1.0,
+        level_weights: Optional[List[float]] = None,
+        lr_main: float = 1e-4,
+        lr_dm: float = 1e-4,
+        lr_conf: float = 1e-5,  # plus faible : on désapprend doucement
+        weight_decay: float = 1e-5,
+        suv_global_log_max: float = 6.0,
+        loss_fn=F.l1_loss,
+    ):
+        super().__init__()
+
+        self.model = model
+        self.domain_classifier = domain_classifier
+        self.num_domains = num_domains
+        self.warmup_epochs = warmup_epochs
+        self.beta = beta_confusion
+        self.level_weights = level_weights
+        self.lrs = {"main": lr_main, "dm": lr_dm, "conf": lr_conf}
+        self.weight_decay = weight_decay
+        self.suv_global_log_max = suv_global_log_max
+        self.loss_fn = loss_fn
+        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
+
+        # Optimisation manuelle obligatoire (multi-optimiseurs adversariaux)
+        self.automatic_optimization = False
+
+        self.save_hyperparameters(ignore=["model", "domain_classifier", "loss_fn"])
+
+    # ------------------------------------------------------------------
+    # Utilitaires
+    # ------------------------------------------------------------------
+
+    def _encoder_parameters(self):
+        """Paramètres de l'encodeur uniquement (pour opt_conf)."""
+        return (
+            list(self.model.in_conv.parameters())
+            + list(self.model.in_blocks.parameters())
+            + list(self.model.middle_block.parameters())
+        )
+
+    def _normalize(self, suv: torch.Tensor) -> torch.Tensor:
+        """SUV → espace log normalisé [-1, 1]."""
+        log = torch.log1p(suv)
+        return 2.0 * (log.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
+
+    def _confusion_loss(self, logits_per_level: List[torch.Tensor]) -> torch.Tensor:
+        n = len(logits_per_level)
+        weights = self.level_weights if self.level_weights is not None else [1.0] * n
+        assert len(weights) == n
+
+        total = torch.tensor(0.0, device=logits_per_level[0].device)
+        for logits, w in zip(logits_per_level, weights):
+            uniform = torch.full_like(logits, 1.0 / self.num_domains)
+            kl = F.kl_div(F.log_softmax(logits, dim=1), uniform, reduction="batchmean")
+            total = total + w * kl
+
+        return total / sum(weights)
+
+    def _domain_loss(self, logits_per_level: List[torch.Tensor], labels: torch.Tensor) -> torch.Tensor:
+        n = len(logits_per_level)
+        weights = self.level_weights if self.level_weights is not None else [1.0] * n
+
+        total = torch.tensor(0.0, device=logits_per_level[0].device)
+        for logits, w in zip(logits_per_level, weights):
+            total = total + w * F.cross_entropy(logits, labels)
+
+        return total / sum(weights)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y, _ = self.model.forward_with_features(x, t=None)
+        return y
+
+    # ------------------------------------------------------------------
+    # configure_optimizers
+    # ------------------------------------------------------------------
+
+    def configure_optimizers(self):
+        # opt_main : encodeur + décodeur complet (tâche principale)
+        opt_main = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.lrs["main"],
+            weight_decay=self.weight_decay,
+        )
+
+        # opt_dm : classifieurs de domaine seulement
+        opt_dm = torch.optim.AdamW(
+            self.domain_classifier.parameters(),
+            lr=self.lrs["dm"],
+            weight_decay=self.weight_decay,
+        )
+
+        # opt_conf : encodeur seulement (désapprentissage)
+        opt_conf = torch.optim.AdamW(
+            self._encoder_parameters(),
+            lr=self.lrs["conf"],
+            weight_decay=self.weight_decay,
+        )
+
+        return [opt_main, opt_dm, opt_conf]
+
+    # ------------------------------------------------------------------
+    # training_step
+    # ------------------------------------------------------------------
+
+    def training_step(self, batch, batch_idx):
+        opt_main, opt_dm, opt_conf = self.optimizers()
+
+        # --- Données ---
+        suv_source = batch["source"][tio.DATA].float()
+        domain_labels = batch["domain_id"]  # LongTensor [B], valeurs dans {0, 1, 2}
+
+        if suv_source.ndim == 5:
+            suv_source = suv_source.squeeze(1)  # (B,1,D,H,W) → (B,D,H,W)
+
+        x = self._normalize(suv_source)  # [-1, 1]
+        is_stage_1 = self.current_epoch < self.warmup_epochs
+        bs = x.shape[0]
+
+        # ==============================================================
+        # STAGE 1 — Warmup : apprendre la tâche ET le classifieur ensemble
+        # ==============================================================
+        if is_stage_1:
+
+            # Forward complet (tâche + features)
+            reconstruction, enc_features = self.model.forward_with_features(x, t=None)
+            task_loss = self.loss_fn(reconstruction, x)
+
+            # Forward classifieur (graphe complet, pas de detach)
+            logits_per_level = self.domain_classifier(enc_features)
+            loss_dm = self._domain_loss(logits_per_level, domain_labels)
+
+            total_loss = task_loss + loss_dm
+
+            # Update encodeur + décodeur + classifieurs
+            opt_main.zero_grad()
+            opt_dm.zero_grad()
+            self.manual_backward(total_loss)
+            opt_main.step()
+            opt_dm.step()
+
+            # Logs
+            self._log_dict({
+                "train/stage1_task_loss":   task_loss,
+                "train/stage1_domain_loss": loss_dm,
+                "train/stage1_total_loss":  total_loss,
+            }, bs)
+
+        # ==============================================================
+        # STAGE 2 — Unlearning : 3 étapes dissociées (Dinsdale)
+        # ==============================================================
+        else:
+
+            # ----------------------------------------------------------
+            # Étape A : mise à jour tâche (encodeur + décodeur)
+            # ----------------------------------------------------------
+            reconstruction, enc_features = self.model.forward_with_features(x, t=None)
+            task_loss = self.loss_fn(reconstruction, x)
+
+            opt_main.zero_grad()
+            self.manual_backward(task_loss)
+            opt_main.step()
+
+            # ----------------------------------------------------------
+            # Étape B : mise à jour classifieur (encodeur GELÉ)
+            # Les features sont recalculées avec torch.no_grad() pour
+            # ne pas polluer le graphe de l'encodeur.
+            # ----------------------------------------------------------
+            self.model.eval()
+            for p in self.model.parameters():
+                p.requires_grad = False
+
+            with torch.no_grad():
+                _, enc_features_detached = self.model.forward_with_features(x, t=None)
+
+            self.model.train()
+            for p in self.model.parameters():
+                p.requires_grad = True
+
+            logits_dm = self.domain_classifier(enc_features_detached)
+            loss_dm = self._domain_loss(logits_dm, domain_labels)
+
+            opt_dm.zero_grad()
+            self.manual_backward(loss_dm)
+            opt_dm.step()
+
+            # ----------------------------------------------------------
+            # Étape C : confusion loss (encodeur seul)
+            # Nouveau forward pour avoir un graphe propre sur l'encodeur.
+            # ----------------------------------------------------------
+            _, enc_features_conf = self.model.forward_with_features(x, t=None)
+            logits_conf = self.domain_classifier(enc_features_conf)
+            loss_conf = self.beta * self._confusion_loss(logits_conf)
+
+            opt_conf.zero_grad()
+            self.manual_backward(loss_conf)
+            opt_conf.step()
+
+            # Logs
+            self._log_dict({
+                "train/stage2_task_loss":      task_loss,
+                "train/stage2_domain_loss":    loss_dm,
+                "train/stage2_confusion_loss": loss_conf,
+            }, bs)
+
+    # ------------------------------------------------------------------
+    # validation_step
+    # ------------------------------------------------------------------
+
+    def validation_step(self, batch, batch_idx):
+        suv_source = batch["source"][tio.DATA].float()
+        domain_labels = batch["domain_id"]
+
+        if suv_source.ndim == 5:
+            suv_source = suv_source.squeeze(1)
+
+        x = self._normalize(suv_source)
+        bs = x.shape[0]
+
+        # Forward
+        reconstruction, enc_features = self.model.forward_with_features(x, t=None)
+        task_loss = self.loss_fn(reconstruction, x)
+
+        # Domain loss (pour surveiller si le classifieur "perd" en stage 2)
+        logits = self.domain_classifier(enc_features)
+        loss_dm = self._domain_loss(logits, domain_labels)
+        loss_conf = self._confusion_loss(logits)
+
+        # SSIM
+        x_01 = (x.clamp(-1, 1) + 1.0) / 2.0
+        r_01 = (reconstruction.clamp(-1, 1) + 1.0) / 2.0
+        ssim_score = self.ssim(r_01, x_01)
+
+        # Accuracy du classifieur (doit descendre en stage 2)
+        # On prend la prédiction du niveau le plus profond (le latent)
+        preds = logits[-1].argmax(dim=1)
+        acc = (preds == domain_labels).float().mean()
+
+        self._log_dict({
+            "val/task_loss":     task_loss,
+            "val/domain_loss":   loss_dm,
+            "val/confusion_loss": loss_conf,
+            "val/ssim":          ssim_score,
+            "val/domain_acc":    acc,   # indicateur clé : doit tendre vers 1/N en stage 2
+        }, bs)
+
+        # Visualisation (premier batch uniquement)
+        if batch_idx == 0:
+            self._log_images(x, reconstruction, suv_source)
+
+        return task_loss
+
+    # ------------------------------------------------------------------
+    # Utilitaires de log
+    # ------------------------------------------------------------------
+
+    def _log_dict(self, d: dict, batch_size: int):
+        for k, v in d.items():
+            self.log(k, v, prog_bar=True, sync_dist=True, on_step=True,
+                     on_epoch=True, batch_size=batch_size)
+
+    def _log_images(self, x_norm, recon_norm, suv_source):
+        """Log WandB : slice centrale de source vs reconstruction."""
+        if self.trainer.global_rank != 0:
+            return
+
+        # Dénormalisation vers SUV pour l'affichage
+        log_pred = 0.5 * (recon_norm.clamp(-1, 1) + 1.0) * self.suv_global_log_max
+        suv_pred = torch.expm1(log_pred)
+
+        mid = suv_source.shape[1] // 2
+        src_slice  = suv_source[:, mid:mid+1, :, :]
+        pred_slice = suv_pred[:, mid:mid+1, :, :]
+
+        display_max = max(5.0, src_slice.max().item(), pred_slice.max().item())
+        imgs = torch.cat([src_slice, pred_slice], dim=3)
+        imgs = (imgs / display_max).clamp(0, 1)
+
+        grid = make_grid(imgs, nrow=1, padding=2)
+        wandb.log({
+            "Validation/Reconstruction": wandb.Image(
+                grid.permute(1, 2, 0).cpu().numpy(),
+                caption="Left: PET input | Right: PET harmonisée"
+            )
+        })
+
+

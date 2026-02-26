@@ -9,6 +9,8 @@ wandb/
 wandb_logs/
 lightning_logs/
 media/
+.vscode/
+__pycache__/
 
 # ignore all __pycache__ directories no matter the depth of the directory
 **/__pycache__/
