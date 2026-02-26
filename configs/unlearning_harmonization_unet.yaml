@@ -56,7 +56,7 @@ pipeline:
     lr_main: 1.e-4
     lr_dm: 1.e-4
     lr_conf: 1.e-5            # Ordre de grandeur en dessous de lr_main
-    weight_decay: 1.e-5
+    # weight_decay: 1.e-5
     suv_global_log_max: 6.0
 
 model_checkpoint:

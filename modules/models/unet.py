@@ -802,22 +802,19 @@ class UnlearningUNet(LightningModule):
         # opt_main : encodeur + décodeur complet (tâche principale)
         opt_main = torch.optim.AdamW(
             self.model.parameters(),
-            lr=self.lrs["main"],
-            weight_decay=self.weight_decay,
+            lr=self.lrs["main"]
         )
 
         # opt_dm : classifieurs de domaine seulement
         opt_dm = torch.optim.AdamW(
             self.domain_classifier.parameters(),
-            lr=self.lrs["dm"],
-            weight_decay=self.weight_decay,
+            lr=self.lrs["dm"]
         )
 
         # opt_conf : encodeur seulement (désapprentissage)
         opt_conf = torch.optim.AdamW(
             self._encoder_parameters(),
-            lr=self.lrs["conf"],
-            weight_decay=self.weight_decay,
+            lr=self.lrs["conf"]
         )
 
         return [opt_main, opt_dm, opt_conf]
