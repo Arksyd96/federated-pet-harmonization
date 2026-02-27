@@ -16,7 +16,7 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer import Trainer
 
 from modules.data import MultiDomainUnlearningDataModule
-from modules.models.unet import UNetWithIntermediateFeatures, UnlearningUNet
+from modules.models.unet import UNetWithIntermediateFeatures, UnlearningUNet, UNet
 from modules.models.domain_classifier import DeepMultiLevelDomainClassifier, DomainClassifier
 from modules.utils import set_seed
 
@@ -62,7 +62,7 @@ def main(args):
     datamodule = MultiDomainUnlearningDataModule(**config.get('datamodule', {}))
 
     # 4. Modèles
-    unet = UNetWithIntermediateFeatures(**config.get('unet', {}))
+    unet = UNet(**config.get('unet', {}))
     feature_extractor = ImageFrequencyFusionModel(**config.get('feature_extractor', {}))
     domain_classifier = DomainClassifier(**config.get('domain_classifier', {}))
 
