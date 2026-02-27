@@ -30,7 +30,7 @@ unet:
     dropout: 0.1
     learnable_interpolation: true
     use_attention: none
-    num_res_blocks: 2
+    num_res_blocks: 1
 
     act_name:
     - swish
@@ -39,6 +39,20 @@ unet:
     norm_name:
     - group
     - {num_groups: 32, affine: true}
+
+
+feature_extractor:
+    input_shape: [64, 64]
+    input_channels: 5
+    output_channels: 5
+    spatial_dims: 2
+    hidden_channels: [64, 128, 256, 512]
+    kernel_sizes: [3, 3, 3, 3]
+    strides: [2, 1, 1, 1]
+    use_residual_block: true
+    learnable_interpolation: true
+    use_attention: none
+    num_residual_blocks: 2
 
 
 domain_classifier:
@@ -63,7 +77,7 @@ model_checkpoint:
     monitor: val/task_loss
     every_n_epochs: 1
     save_last: true
-    save_top_k: 3
+    save_top_k: 1
     mode: min
 
 trainer:
@@ -73,7 +87,7 @@ trainer:
     log_every_n_steps: 1
     min_epochs: 50
     max_epochs: 200
-    check_val_every_n_epoch: 1
+    check_val_every_n_epoch: 2
     num_sanity_val_steps: 0
 
     # Non compatible avec optimisation manuelle (multi-optimiseurs)

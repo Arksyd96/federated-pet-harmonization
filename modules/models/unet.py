@@ -720,6 +720,7 @@ class UnlearningUNet(LightningModule):
         self,
         model: UNetWithIntermediateFeatures,
         domain_classifier: nn.Module,
+        feature_extractor: nn.Module,
         num_domains: int = 3,
         warmup_epochs: int = 25,
         beta_confusion: float = 1.0,
@@ -735,6 +736,7 @@ class UnlearningUNet(LightningModule):
 
         self.model = model
         self.domain_classifier = domain_classifier
+        self.feature_extractor = feature_extractor
         self.num_domains = num_domains
         self.warmup_epochs = warmup_epochs
         self.beta = beta_confusion
@@ -748,7 +750,7 @@ class UnlearningUNet(LightningModule):
         # Optimisation manuelle obligatoire (multi-optimiseurs adversariaux)
         self.automatic_optimization = False
 
-        self.save_hyperparameters(ignore=["model", "domain_classifier", "loss_fn"])
+        self.save_hyperparameters(ignore=["model", "domain_classifier", "loss_fn", "feature_extractor"])
 
     # ------------------------------------------------------------------
     # Utilitaires
@@ -858,7 +860,7 @@ class UnlearningUNet(LightningModule):
             suv_source = suv_source.squeeze(1)  # (B,1,D,H,W) → (B,D,H,W)
 
         x = self._normalize(suv_source)  # [-1, 1]
-        x_input, x_target = self._apply_patch_mask(x, mask_ratio=0.15, patch_size=8)
+        # x_input, x_target = self._apply_patch_mask(x, mask_ratio=0.15, patch_size=8)
 
         is_stage_1 = self.current_epoch < self.warmup_epochs
         bs = x.shape[0]
@@ -867,16 +869,17 @@ class UnlearningUNet(LightningModule):
         # STAGE 1 — Warmup : apprendre la tâche ET le classifieur ensemble
         # ==============================================================
         if is_stage_1:
+            feature_map = self.feature_extractor(x)  # [B, C, H', W']
 
             # Forward complet (tâche + features)
-            reconstruction, enc_features = self.model.forward_with_features(x_input, t=None)
-            task_loss = self.loss_fn(reconstruction, x_target)
+            reconstruction, enc_features = self.model.forward_with_features(feature_map, t=None)
+            task_loss = self.loss_fn(reconstruction, x)
 
             # Forward classifieur (graphe complet, pas de detach)
-            logits_per_level = self.domain_classifier(enc_features)
+            logits_per_level = self.domain_classifier(feature_map)
             loss_dm = self._domain_loss(logits_per_level, domain_labels)
 
-            total_loss = task_loss + loss_dm
+            total_loss = loss_dm + task_loss  # on peut aussi pondérer si besoin
 
             # Update encodeur + décodeur + classifieurs
             opt_main.zero_grad()
@@ -889,7 +892,7 @@ class UnlearningUNet(LightningModule):
             self._log_dict({
                 "train/stage1_task_loss":   task_loss,
                 "train/stage1_domain_loss": loss_dm,
-                "train/stage1_total_loss":  task_loss + loss_dm,
+                "train/stage1_total_loss":  total_loss,
             }, bs)
 
         # ==============================================================
@@ -900,8 +903,8 @@ class UnlearningUNet(LightningModule):
             # ----------------------------------------------------------
             # Étape A : mise à jour tâche (encodeur + décodeur)
             # ----------------------------------------------------------
-            reconstruction, enc_features = self.model.forward_with_features(x_input, t=None)
-            task_loss = self.loss_fn(reconstruction, x_target)
+            reconstruction, enc_features = self.model.forward_with_features(x, t=None)
+            task_loss = self.loss_fn(reconstruction, x)
 
             opt_main.zero_grad()
             self.manual_backward(task_loss)
@@ -917,7 +920,7 @@ class UnlearningUNet(LightningModule):
                 p.requires_grad = False
 
             with torch.no_grad():
-                _, enc_features_detached = self.model.forward_with_features(x_input, t=None)
+                _, enc_features_detached = self.model.forward_with_features(x, t=None)
 
             self.model.train()
             for p in self.model.parameters():
@@ -934,7 +937,7 @@ class UnlearningUNet(LightningModule):
             # Étape C : confusion loss (encodeur seul)
             # Nouveau forward pour avoir un graphe propre sur l'encodeur.
             # ----------------------------------------------------------
-            _, enc_features_conf = self.model.forward_with_features(x_input, t=None)
+            _, enc_features_conf = self.model.forward_with_features(x, t=None)
             logits_conf = self.domain_classifier(enc_features_conf)
             loss_conf = self.beta * self._confusion_loss(logits_conf)
 

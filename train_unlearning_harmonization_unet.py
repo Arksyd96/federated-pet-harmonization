@@ -1,4 +1,6 @@
 import resource
+
+from modules.models.iffn import ImageFrequencyFusionModel
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
 
@@ -15,7 +17,7 @@ from pytorch_lightning.trainer import Trainer
 
 from modules.data import MultiDomainUnlearningDataModule
 from modules.models.unet import UNetWithIntermediateFeatures, UnlearningUNet
-from modules.models.domain_classifier import DeepMultiLevelDomainClassifier
+from modules.models.domain_classifier import DeepMultiLevelDomainClassifier, DomainClassifier
 from modules.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -61,10 +63,8 @@ def main(args):
 
     # 4. Modèles
     unet = UNetWithIntermediateFeatures(**config.get('unet', {}))
-
-    # feature_channels doit correspondre exactement aux canaux exposés par
-    # UNetWithIntermediateFeatures : [hid_chs[0], hid_chs[1], ..., hid_chs[-1] (latent)]
-    domain_classifier = DeepMultiLevelDomainClassifier(**config.get('domain_classifier', {}))
+    feature_extractor = ImageFrequencyFusionModel(**config.get('feature_extractor', {}))
+    domain_classifier = DomainClassifier(**config.get('domain_classifier', {}))
 
     # 5. Pipeline Lightning
     if args.resume_checkpoint:
@@ -73,12 +73,14 @@ def main(args):
             args.resume_checkpoint,
             model=unet,
             domain_classifier=domain_classifier,
+            feature_extractor=feature_extractor,
             strict=False,
         )
     else:
         pipeline = UnlearningUNet(
             model=unet,
             domain_classifier=domain_classifier,
+            feature_extractor=feature_extractor,
             **config.get('pipeline', {}),
         )
 
