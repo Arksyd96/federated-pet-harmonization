@@ -846,20 +846,17 @@ class UnlearningUNet(LightningModule):
             reconstruction, enc_features = self.model.forward_with_features(x, t=None)
             task_loss = self.loss_fn(reconstruction, x)
 
-            opt_main.zero_grad()
-            self.manual_backward(task_loss)
-            opt_main.step()
-
-            with torch.no_grad():
-                _, enc_features_detached = self.model.forward_with_features(x, t=None)
-
             # Forward classifieur (graphe complet, pas de detach)
-            logits_per_level = self.domain_classifier(enc_features_detached)
+            logits_per_level = self.domain_classifier(enc_features)
             loss_dm = self._domain_loss(logits_per_level, domain_labels)
 
+            total_loss = task_loss + loss_dm
+
             # Update encodeur + décodeur + classifieurs
+            opt_main.zero_grad()
             opt_dm.zero_grad()
-            self.manual_backward(loss_dm)
+            self.manual_backward(total_loss)
+            opt_main.step()
             opt_dm.step()
 
             # Logs

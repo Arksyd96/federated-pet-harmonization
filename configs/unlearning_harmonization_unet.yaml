@@ -45,12 +45,12 @@ domain_classifier:
     feature_channels: [64, 128, 256, 512, 512]
     num_domains: 3  # 0=a100, 1=chb, 2=rennes
     spatial_dims: 2
-    dropout: 0.1
+    dropout: 0.0
 
 # Pipeline UnlearningUNet
 pipeline:
     num_domains: 3
-    warmup_epochs: 20
+    warmup_epochs: 25
     beta_confusion: 0.5       # Démarrer modéré, augmenter si le classifieur reste trop bon
     level_weights: [1.0, 1.0, 1.0, 1.0, 1.0]  # Uniforme pour commencer
     lr_main: 1.e-4
@@ -73,8 +73,8 @@ trainer:
     log_every_n_steps: 1
     min_epochs: 50
     max_epochs: 200
-    check_val_every_n_epoch: 5
-    num_sanity_val_steps: 2
+    check_val_every_n_epoch: 1
+    num_sanity_val_steps: 0
 
     # Non compatible avec optimisation manuelle (multi-optimiseurs)
     # gradient_clip_val: 1.0
