@@ -762,6 +762,30 @@ class UnlearningUNet(LightningModule):
             + list(self.model.middle_block.parameters())
         )
 
+    def _apply_patch_mask(
+        self,
+        x: torch.Tensor,
+        mask_ratio: float = 0.15,
+        patch_size: int = 8,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        B, C, H, W = x.shape
+        x_masked = x.clone()
+
+        n_patches_h = H // patch_size
+        n_patches_w = W // patch_size
+        n_patches_total = n_patches_h * n_patches_w
+        n_masked = max(1, int(n_patches_total * mask_ratio))
+
+        for b in range(B):
+            # Tirage aléatoire des indices de patches à masquer
+            indices = torch.randperm(n_patches_total, device=x.device)[:n_masked]
+            for idx in indices:
+                ph = (idx // n_patches_w) * patch_size
+                pw = (idx %  n_patches_w) * patch_size
+                x_masked[b, :, ph:ph + patch_size, pw:pw + patch_size] = 0.0
+
+        return x_masked, x
+
     def _normalize(self, suv: torch.Tensor) -> torch.Tensor:
         """SUV → espace log normalisé [-1, 1]."""
         log = torch.log1p(suv)
@@ -834,6 +858,8 @@ class UnlearningUNet(LightningModule):
             suv_source = suv_source.squeeze(1)  # (B,1,D,H,W) → (B,D,H,W)
 
         x = self._normalize(suv_source)  # [-1, 1]
+        x_input, x_target = self._apply_patch_mask(x, mask_ratio=0.15, patch_size=8)
+
         is_stage_1 = self.current_epoch < self.warmup_epochs
         bs = x.shape[0]
 
@@ -843,8 +869,8 @@ class UnlearningUNet(LightningModule):
         if is_stage_1:
 
             # Forward complet (tâche + features)
-            reconstruction, enc_features = self.model.forward_with_features(x, t=None)
-            task_loss = self.loss_fn(reconstruction, x)
+            reconstruction, enc_features = self.model.forward_with_features(x_input, t=None)
+            task_loss = self.loss_fn(reconstruction, x_target)
 
             # Forward classifieur (graphe complet, pas de detach)
             logits_per_level = self.domain_classifier(enc_features)
@@ -874,8 +900,8 @@ class UnlearningUNet(LightningModule):
             # ----------------------------------------------------------
             # Étape A : mise à jour tâche (encodeur + décodeur)
             # ----------------------------------------------------------
-            reconstruction, enc_features = self.model.forward_with_features(x, t=None)
-            task_loss = self.loss_fn(reconstruction, x)
+            reconstruction, enc_features = self.model.forward_with_features(x_input, t=None)
+            task_loss = self.loss_fn(reconstruction, x_target)
 
             opt_main.zero_grad()
             self.manual_backward(task_loss)
@@ -891,7 +917,7 @@ class UnlearningUNet(LightningModule):
                 p.requires_grad = False
 
             with torch.no_grad():
-                _, enc_features_detached = self.model.forward_with_features(x, t=None)
+                _, enc_features_detached = self.model.forward_with_features(x_input, t=None)
 
             self.model.train()
             for p in self.model.parameters():
@@ -908,7 +934,7 @@ class UnlearningUNet(LightningModule):
             # Étape C : confusion loss (encodeur seul)
             # Nouveau forward pour avoir un graphe propre sur l'encodeur.
             # ----------------------------------------------------------
-            _, enc_features_conf = self.model.forward_with_features(x, t=None)
+            _, enc_features_conf = self.model.forward_with_features(x_input, t=None)
             logits_conf = self.domain_classifier(enc_features_conf)
             loss_conf = self.beta * self._confusion_loss(logits_conf)
 
