@@ -15,7 +15,7 @@ from pytorch_lightning.trainer import Trainer
 
 from modules.data import MultiDomainUnlearningDataModule
 from modules.models.unet import UNetWithIntermediateFeatures, UnlearningUNet
-from modules.models.domain_classifier import MultiLevelDomainClassifier
+from modules.models.domain_classifier import DeepMultiLevelDomainClassifier
 from modules.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -64,7 +64,7 @@ def main(args):
 
     # feature_channels doit correspondre exactement aux canaux exposés par
     # UNetWithIntermediateFeatures : [hid_chs[0], hid_chs[1], ..., hid_chs[-1] (latent)]
-    domain_classifier = MultiLevelDomainClassifier(**config.get('domain_classifier', {}))
+    domain_classifier = DeepMultiLevelDomainClassifier(**config.get('domain_classifier', {}))
 
     # 5. Pipeline Lightning
     if args.resume_checkpoint:

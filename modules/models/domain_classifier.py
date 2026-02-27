@@ -4,10 +4,6 @@ from typing import List, Optional, Tuple, Dict
 from modules.models.base import UnetResBlock, BasicBlock, BasicDown
 
 class DomainClassifier(nn.Module):
-    """
-    Classifieur de domaine cohérent avec les architectures IFFN et UNet.
-    Prend en entrée des patchs (B, 5, H, W) et prédit la classe du domaine.
-    """
     def __init__(
         self,
         in_ch: int = 5,
@@ -96,41 +92,6 @@ class DomainClassifier(nn.Module):
         return self.encoder(h)
     
 
-def _make_level_classifier(
-    ch: int,
-    num_domains: int,
-    num_conv: int,
-    spatial_dims: int,
-    dropout: float,
-) -> nn.Sequential:
-    Conv = nn.Conv2d if spatial_dims == 2 else nn.Conv3d
-    BN   = nn.BatchNorm2d if spatial_dims == 2 else nn.BatchNorm3d
-    Pool = nn.AdaptiveAvgPool2d(1) if spatial_dims == 2 else nn.AdaptiveAvgPool3d(1)
-
-    layers: List[nn.Module] = []
-
-    # Couches convolutives (same shape)
-    for _ in range(num_conv):
-        layers += [
-            Conv(ch, ch, kernel_size=3, padding=1, bias=False),
-            BN(ch),
-            nn.ReLU(inplace=True),
-        ]
-
-    # Pooling + tête MLP
-    hidden = max(ch // 4, 64)
-    layers += [
-        Pool,
-        nn.Flatten(),
-        nn.Linear(ch, hidden),
-        nn.ReLU(inplace=True),
-        nn.Dropout(dropout),
-        nn.Linear(hidden, num_domains),
-    ]
-
-    return nn.Sequential(*layers)
-
-
 class MultiLevelDomainClassifier(nn.Module):
     def __init__(
         self,
@@ -161,12 +122,151 @@ class MultiLevelDomainClassifier(nn.Module):
         classifiers = []
         for ch, n_conv in zip(feature_channels, num_conv_per_level):
             classifiers.append(
-                _make_level_classifier(ch, num_domains, n_conv, spatial_dims, dropout)
+                self._make_level_classifier(ch, num_domains, n_conv, spatial_dims, dropout)
             )
         self.classifiers = nn.ModuleList(classifiers)
+
+    def _make_level_classifier(
+        self,
+        ch: int,
+        num_domains: int,
+        num_conv: int,
+        spatial_dims: int,
+        dropout: float,
+    ) -> nn.Sequential:
+        Conv = nn.Conv2d if spatial_dims == 2 else nn.Conv3d
+        BN   = nn.BatchNorm2d if spatial_dims == 2 else nn.BatchNorm3d
+        Pool = nn.AdaptiveAvgPool2d(1) if spatial_dims == 2 else nn.AdaptiveAvgPool3d(1)
+
+        layers: List[nn.Module] = []
+
+        # Couches convolutives (same shape)
+        for _ in range(num_conv):
+            layers += [
+                Conv(ch, ch, kernel_size=3, padding=1, bias=False),
+                BN(ch),
+                nn.ReLU(inplace=True),
+            ]
+
+        # Pooling + tête MLP
+        hidden = max(ch // 4, 64)
+        layers += [
+            Pool,
+            nn.Flatten(),
+            nn.Linear(ch, hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, num_domains),
+        ]
+
+        return nn.Sequential(*layers)
 
     def forward(self, encoder_features: List[torch.Tensor]) -> List[torch.Tensor]:
         assert len(encoder_features) == self.num_levels, (
             f"{self.num_levels} levels expected, received: {len(encoder_features)}"
         )
         return [clf(feat) for clf, feat in zip(self.classifiers, encoder_features)]
+    
+
+class DeepMultiLevelDomainClassifier(nn.Module):
+    def __init__(
+        self,
+        feature_channels: List[int],
+        num_domains: int = 3,
+        spatial_dims: int = 2,
+        hid_chs: List[int] = [64, 128, 256, 512],
+        kernel_sizes: List[int] = [3, 3, 3, 3],
+        strides: List[int] = [1, 2, 2, 2],
+        act_name: Tuple[str, Dict] = ('swish', {}),
+        norm_name: Tuple[str, Dict] = ('group', {'num_groups': 32, 'affine': True}),
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        self.num_levels = len(feature_channels)
+
+        # Pour N niveaux : depths = [N-1, N-2, ..., 1, 0]
+        depths = list(range(self.num_levels - 1, -1, -1))
+
+        Pool = nn.AdaptiveAvgPool2d(1) if spatial_dims == 2 else nn.AdaptiveAvgPool3d(1)
+
+        self.encoders = nn.ModuleList()   # BasicBlock + UnetResBlock + BasicDown
+        self.heads = nn.ModuleList()      # Pool + Flatten + MLP
+
+        for level_idx, (in_ch, depth) in enumerate(zip(feature_channels, depths)):
+
+            # ----------------------------------------------------------
+            # Encodeur (vide pour le latent)
+            # ----------------------------------------------------------
+            if depth == 0:
+                # Cas latent : aucun bloc, on va directement au pooling
+                self.encoders.append(nn.Identity())
+                out_ch = in_ch
+
+            else:
+                # InConv : BasicBlock(in_ch → hid_chs[0])
+                layers: List[nn.Module] = [
+                    BasicBlock(
+                        spatial_dims=spatial_dims,
+                        in_channels=in_ch,
+                        out_channels=hid_chs[0],
+                        kernel_size=kernel_sizes[0],
+                        stride=strides[0],
+                    )
+                ]
+
+                # Succession de UnetResBlock + BasicDown sur depth niveaux
+                # On prend les depth premiers éléments de hid_chs (après le 0)
+                for i in range(1, depth + 1):
+                    ch_in  = hid_chs[i - 1]
+                    ch_out = hid_chs[min(i, len(hid_chs) - 1)]
+
+                    layers.append(
+                        UnetResBlock(
+                            spatial_dims=spatial_dims,
+                            in_channels=ch_in,
+                            out_channels=ch_out,
+                            kernel_size=kernel_sizes[min(i, len(kernel_sizes) - 1)],
+                            stride=1,
+                            norm_name=norm_name,
+                            act_name=act_name,
+                            dropout=dropout,
+                        )
+                    )
+
+                    if strides[min(i, len(strides) - 1)] > 1:
+                        layers.append(
+                            BasicDown(
+                                spatial_dims=spatial_dims,
+                                in_channels=ch_out,
+                                out_channels=ch_out,
+                                kernel_size=kernel_sizes[min(i, len(kernel_sizes) - 1)],
+                                stride=strides[min(i, len(strides) - 1)],
+                            )
+                        )
+
+                self.encoders.append(nn.Sequential(*layers))
+                out_ch = hid_chs[min(depth, len(hid_chs) - 1)]
+
+            # ----------------------------------------------------------
+            # Tête de classification (identique pour tous les niveaux)
+            # ----------------------------------------------------------
+            hidden = max(out_ch // 2, 64)
+            self.heads.append(
+                nn.Sequential(
+                    Pool,
+                    nn.Flatten(),
+                    nn.Linear(out_ch, hidden),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden, num_domains),
+                )
+            )
+
+    def forward(self, encoder_features: List[torch.Tensor]) -> List[torch.Tensor]:
+        assert len(encoder_features) == self.num_levels, (
+            f"{self.num_levels} levels expected, received: {len(encoder_features)}"
+        )
+        return [
+            head(enc(feat))
+            for enc, head, feat in zip(self.encoders, self.heads, encoder_features)
+        ]
