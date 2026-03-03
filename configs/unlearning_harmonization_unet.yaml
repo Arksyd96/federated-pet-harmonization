@@ -8,6 +8,10 @@ name: Unlearning Harmonization with UNet (3 Domains)
 
 datamodule:
     root_dir: ./data/PET-EARL/foundation-dataset
+    split_config: 
+    - [0, 50]
+    - [0, 50]
+    - [0, 50]
     batch_size: 64
     patch_size: [5, 64, 64]
     num_workers: 16
@@ -27,7 +31,7 @@ unet:
     use_res_block: true
     estimate_variance: false
     use_self_conditioning: false
-    dropout: 0.1
+    dropout: 0.05
     learnable_interpolation: true
     use_attention: none
     num_res_blocks: 1
@@ -52,7 +56,7 @@ feature_extractor:
     use_residual_block: true
     learnable_interpolation: true
     use_attention: none
-    num_residual_blocks: 2
+    num_residual_blocks: 1
 
 
 domain_classifier:
@@ -64,9 +68,9 @@ domain_classifier:
 # Pipeline UnlearningUNet
 pipeline:
     num_domains: 3
-    warmup_epochs: 25
-    beta_confusion: 0.5       # Démarrer modéré, augmenter si le classifieur reste trop bon
-    level_weights: [1.0, 1.0, 1.0, 1.0, 1.0]  # Uniforme pour commencer
+    warmup_epochs: 0
+    beta_confusion: 1.0       # Démarrer modéré, augmenter si le classifieur reste trop bon
+    level_weights: null  # Uniforme pour commencer
     lr_main: 1.e-4
     lr_dm: 1.e-4
     lr_conf: 1.e-5            # Ordre de grandeur en dessous de lr_main

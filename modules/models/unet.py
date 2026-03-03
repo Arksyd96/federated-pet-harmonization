@@ -722,7 +722,7 @@ class UnlearningUNet(LightningModule):
         domain_classifier: nn.Module,
         feature_extractor: nn.Module,
         num_domains: int = 3,
-        warmup_epochs: int = 25,
+        warmup_epochs: int = 10,
         beta_confusion: float = 1.0,
         level_weights: Optional[List[float]] = None,
         lr_main: float = 1e-4,
@@ -763,6 +763,14 @@ class UnlearningUNet(LightningModule):
             + list(self.model.in_blocks.parameters())
             + list(self.model.middle_block.parameters())
         )
+        
+    def _decoder_parameters(self):
+        """Paramètres du décodeur uniquement (pour opt_main)."""
+        return (
+            list(self.model.out_blocks.parameters())
+            + list(self.model.outc.parameters())
+            + list(self.model.outc_ver.parameters())
+        )
 
     def _apply_patch_mask(
         self,
@@ -792,8 +800,13 @@ class UnlearningUNet(LightningModule):
         """SUV → espace log normalisé [-1, 1]."""
         log = torch.log1p(suv)
         return 2.0 * (log.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
+    
+    def _denormalize(self, norm_log: torch.Tensor) -> torch.Tensor:
+        """Espace log normalisé [-1, 1] → SUV."""
+        log = 0.5 * (norm_log + 1.0) * self.suv_global_log_max
+        return torch.expm1(log)
 
-    def _confusion_loss(self, logits_per_level: List[torch.Tensor]) -> torch.Tensor:
+    def _level_confusion_loss(self, logits_per_level: List[torch.Tensor]) -> torch.Tensor:
         n = len(logits_per_level)
         weights = self.level_weights if self.level_weights is not None else [1.0] * n
         assert len(weights) == n
@@ -806,7 +819,7 @@ class UnlearningUNet(LightningModule):
 
         return total / sum(weights)
 
-    def _domain_loss(self, logits_per_level: List[torch.Tensor], labels: torch.Tensor) -> torch.Tensor:
+    def _level_domain_loss(self, logits_per_level: List[torch.Tensor], labels: torch.Tensor) -> torch.Tensor:
         n = len(logits_per_level)
         weights = self.level_weights if self.level_weights is not None else [1.0] * n
 
@@ -860,8 +873,9 @@ class UnlearningUNet(LightningModule):
             suv_source = suv_source.squeeze(1)  # (B,1,D,H,W) → (B,D,H,W)
 
         x = self._normalize(suv_source)  # [-1, 1]
-        x_input, x_target = self._apply_patch_mask(x, mask_ratio=0.1, patch_size=8)
+        # x_input, x_target = self._apply_patch_mask(x, mask_ratio=0.1, patch_size=8)
 
+        self.warmup_epochs = 1 # Temporary : on fait du stage 2 direct pour tester le pipeline complet
         is_stage_1 = self.current_epoch < self.warmup_epochs
         bs = x.shape[0]
 
@@ -869,11 +883,11 @@ class UnlearningUNet(LightningModule):
         # STAGE 1 — Warmup : apprendre la tâche ET le classifieur ensemble
         # ==============================================================
         if is_stage_1:
-            feature_map = self.feature_extractor(x_input)  # [B, C, H', W']
-
             # Forward complet (tâche + features)
+            feature_map = self.feature_extractor(x)  # [B, C, H', W']
             reconstruction = self.model.forward(feature_map, t=None)
-            task_loss = self.loss_fn(reconstruction, x_target)
+            
+            task_loss = self.loss_fn(reconstruction, x)
 
             # Forward classifieur (graphe complet, pas de detach)
             logits = self.domain_classifier(feature_map)
@@ -899,12 +913,13 @@ class UnlearningUNet(LightningModule):
         # STAGE 2 — Unlearning : 3 étapes dissociées (Dinsdale)
         # ==============================================================
         else:
-
             # ----------------------------------------------------------
             # Étape A : mise à jour tâche (encodeur + décodeur)
             # ----------------------------------------------------------
-            reconstruction = self.model.forward(x_input, t=None)
-            task_loss = self.loss_fn(reconstruction, x_target)
+            feature_map = self.feature_extractor(x)  # [B, C, H', W']
+            reconstruction = self.model.forward(feature_map, t=None)
+            
+            task_loss = self.loss_fn(reconstruction, x)
 
             opt_main.zero_grad()
             self.manual_backward(task_loss)
@@ -920,7 +935,7 @@ class UnlearningUNet(LightningModule):
                 p.requires_grad = False
 
             with torch.no_grad():
-                detached_feature_map = self.feature_extractor(x_input)
+                detached_feature_map = self.feature_extractor(x)
 
             logits_dm = self.domain_classifier(detached_feature_map)
             loss_dm = F.cross_entropy(logits_dm, domain_labels)
@@ -937,10 +952,10 @@ class UnlearningUNet(LightningModule):
             for p in self.feature_extractor.parameters():
                 p.requires_grad = True
 
-            feature_map_conf = self.feature_extractor(x_input)
+            feature_map_conf = self.feature_extractor(x)
             logits_conf = self.domain_classifier(feature_map_conf)
+            
             # loss_conf = self.beta * self._confusion_loss(logits_conf)
-
             n_classes = logits_conf.shape[1]
             uniform_target = torch.full_like(logits_conf, 1.0 / n_classes)
             loss_conf = self.beta * F.kl_div(
@@ -974,14 +989,24 @@ class UnlearningUNet(LightningModule):
         x = self._normalize(suv_source)
         bs = x.shape[0]
 
-        # Forward
-        reconstruction, enc_features = self.model.forward_with_features(x, t=None)
+        # Forward complet (tâche + features)
+        feature_map = self.feature_extractor(x)  # [B, C, H', W']
+        reconstruction = self.model.forward(feature_map, t=None)
+        
         task_loss = self.loss_fn(reconstruction, x)
 
         # Domain loss (pour surveiller si le classifieur "perd" en stage 2)
-        logits = self.domain_classifier(enc_features)
-        loss_dm = self._domain_loss(logits, domain_labels)
-        loss_conf = self._confusion_loss(logits)
+        logits = self.domain_classifier(feature_map)
+        loss_dm = F.cross_entropy(logits, domain_labels)
+        
+        # loss_conf = self._confusion_loss(logits)
+        n_classes = logits.shape[1]
+        uniform_target = torch.full_like(logits, 1.0 / n_classes)
+        loss_conf = self.beta * F.kl_div(
+            F.log_softmax(logits, dim=1),
+            uniform_target,
+            reduction='batchmean'
+        )
 
         # SSIM
         x_01 = (x.clamp(-1, 1) + 1.0) / 2.0
@@ -990,7 +1015,8 @@ class UnlearningUNet(LightningModule):
 
         # Accuracy du classifieur (doit descendre en stage 2)
         # On prend la prédiction du niveau le plus profond (le latent)
-        preds = logits[-1].argmax(dim=1)
+        # preds = logits[-1].argmax(dim=1)
+        preds = logits.argmax(dim=1)
         acc = (preds == domain_labels).float().mean()
 
         self._log_dict({

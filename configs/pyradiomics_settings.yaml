@@ -10,7 +10,6 @@ imageType:
 
 featureClass:
   # Activer toutes les classes standards
-  shape: # Forme 3D
   firstorder: # Statistiques de premier ordre
   glcm: # Matrice de cooccurrence des niveaux de gris
   glrlm: # Matrice de longueurs de course en niveaux de gris

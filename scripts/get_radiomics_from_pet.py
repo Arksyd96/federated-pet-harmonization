@@ -149,7 +149,7 @@ def process_single_subject(args):
     # --- Extraction PET ---
     pet_files = [
         f for f in os.listdir(subject_path) 
-        if (f.startswith('PET') or f.startswith('EARL') or f.startswith('predicted'))
+        if (f.startswith('PET') or f.startswith('EARL') or f.startswith('predicted') or f.startswith('harmonized'))
         and (f.endswith('.nii') or f.endswith('.nii.gz'))
         and 'MIP' not in f
     ]
@@ -163,7 +163,10 @@ def process_single_subject(args):
         modality = 'PET_Standard' if pet_file.startswith('PET') \
                     else (
                         'PET_EARL' if pet_file.startswith('EARL') 
-                        else parse_pred_mod(pet_file)
+                        else (
+                            'PET_Harmonized' if pet_file.startswith('harmonized')
+                            else parse_pred_mod(pet_file)
+                        )
                     )
 
         # Extraction
@@ -195,7 +198,7 @@ def process_single_subject(args):
         return
     
 
-def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sphere_radius=20.0):
+def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sphere_radius=20.0, num_workers=None):
     if not os.path.exists(root_dir):
         logging.error(f"Le dossier racine n'existe pas : {root_dir}")
         return
@@ -214,7 +217,7 @@ def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sph
         subjects = [s for s in subjects if s in args.include_only]
     
     # Config Workers (Laisser 2 coeurs libres pour le système)
-    num_workers = max(1, multiprocessing.cpu_count() - 2)
+    num_workers = max(1, multiprocessing.cpu_count() - 2) if num_workers is None else num_workers
     
     logging.info(f"Traitement de {len(subjects)} sujets avec {num_workers} workers 🚀")
     logging.info(f"Mode Sphère : {use_sphere} | Masque : {mask_filename}")
@@ -254,10 +257,18 @@ if __name__ == "__main__":
     parser.add_argument("--use-sphere", "-s", action="store_true", help="Use spherical masks centered on the lesion's centroid.")
     parser.add_argument("--sphere-radius", type=float, default=20.0, help="Radius of the spherical mask in mm (default: 20.0).")
     parser.add_argument("--params", "-p", type=str, default=None, help="YAML pyradiomics params file.")
+    parser.add_argument("--num-workers", "-n", type=int, default=None, help="Number of parallel workers (default: all available minus 2).")
     parser.add_argument("--debug-radiomics", "-db",action="store_true")
     args = parser.parse_args()
 
     if args.debug_radiomics:    logging.getLogger('radiomics').setLevel(logging.INFO)
     else:                       logging.getLogger('radiomics').setLevel(logging.ERROR)
 
-    process_subjects(args.root, args.mask, args.params, use_sphere=args.use_sphere, sphere_radius=args.sphere_radius)
+    process_subjects(
+        args.root, 
+        args.mask, 
+        args.params, 
+        use_sphere=args.use_sphere, 
+        sphere_radius=args.sphere_radius, 
+        num_workers=args.num_workers
+    )

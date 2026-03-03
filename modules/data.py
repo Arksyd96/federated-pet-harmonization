@@ -706,113 +706,169 @@ class MultiTargetPETDataModule(BasePETDataModule):
         
         
 
+import os
+import numpy as np
+import torch
+import torchio as tio
+import multiprocessing
+from typing import List, Union, Tuple
+from pytorch_lightning import LightningDataModule
+
+# Définition des types pour plus de clarté
+SplitConfigType = Union[
+    float, 
+    Tuple[int, int], 
+    List[Union[float, Tuple[int, int]]]
+]
+
+class Float32Lambda:
+    # (Je suppose que tu as cette classe définie quelque part, je la laisse pour la signature)
+    def __call__(self, sample):
+        return sample
+
 class MultiDomainUnlearningDataModule(LightningDataModule):
     def __init__(
         self, 
         root_dir: str, 
+        split_config: SplitConfigType = 0.8, # NOUVEAU PARAMÈTRE
         batch_size: int = 4, 
         patch_size: tuple = (64, 64, 64),
         num_workers: int = 8,
         queue_max_length: int = 600,      
         samples_per_volume: int = 4,
+        seed: int = 42 # Ajout d'une seed pour garantir la reproductibilité du split
     ):
         super().__init__()
         self.root_dir = root_dir
+        self.split_config = split_config
         self.batch_size = batch_size
         self.patch_size = patch_size
         self.num_workers = num_workers
         self.queue_max_length = queue_max_length
         self.samples_per_volume = samples_per_volume
+        self.seed = seed
         
-        # Pour stocker le mapping domaine -> ID
         self.domain_to_id = {}
+        self.train_subjects = []
+        self.val_subjects = []
 
     def get_pet_body_files(self, files: List[str]):
         """Filtre les fichiers PET et body mask selon la nomenclature os."""
         pet_files = [f for f in files if f.startswith('PET') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
         body_files = [f for f in files if f.startswith('body') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
         
-        # On retourne None si un fichier manque pour éviter de crash au setup
         pet_file = pet_files[0] if len(pet_files) > 0 else None
         body_file = body_files[0] if len(body_files) > 0 else None
         
         return pet_file, body_file
 
-    def _prepare_subjects(self, split: str) -> List[tio.Subject]:
-        """Parcourt l'arborescence : split / domain_n / subject / files."""
-        split_path = os.path.join(self.root_dir, split)
-        if not os.path.exists(split_path):
-            print(f"Attention: Le dossier {split_path} n'existe pas.")
-            return []
-
-        # Récupération des dossiers de domaines (domain_1, domain_2...)
-        domain_names = sorted([d for d in os.listdir(split_path) if os.path.isdir(os.path.join(split_path, d))])
-        
-        # Création du mapping d'ID domaine (basé sur le dossier train pour cohérence)
-        if split == 'train':
-            self.domain_to_id = {name: i for i, name in enumerate(domain_names)}
-            print(f"Mapping Domaines: {self.domain_to_id}")
-
+    def _create_tio_subjects(self, subj_names: List[str], domain_path: str, domain_name: str, domain_id: int) -> List[tio.Subject]:
+        """Fonction utilitaire pour charger une liste de sujets en objets TorchIO."""
         tio_subjects = []
-        for domain_name in domain_names:
-            domain_id = self.domain_to_id.get(domain_name, -1) # -1 si domaine inconnu au test
-            domain_path = os.path.join(split_path, domain_name)
+        for subj_name in subj_names:
+            subj_path = os.path.join(domain_path, subj_name)
+            files = os.listdir(subj_path)
             
-            # Listing des sujets dans ce domaine
-            subjects_in_domain = sorted([s for s in os.listdir(domain_path) if os.path.isdir(os.path.join(domain_path, s))])
+            pet_file, body_file = self.get_pet_body_files(files)
             
-            for subj_name in subjects_in_domain:
-                subj_path = os.path.join(domain_path, subj_name)
-                files = os.listdir(subj_path)
-                
-                pet_file, body_file = self.get_pet_body_files(files)
-                
-                if pet_file and body_file:
-                    subject = tio.Subject(
-                        source=tio.Image(os.path.join(subj_path, pet_file), type=tio.INTENSITY),
-                        sampling_map=tio.Image(os.path.join(subj_path, body_file), type=tio.LABEL),
-                        domain_id=torch.tensor(domain_id).long(), # Label pour le classifieur
-                        subject_name=subj_name,
-                        domain_name=domain_name
-                    )
-                    tio_subjects.append(subject)
-        
+            if pet_file and body_file:
+                subject = tio.Subject(
+                    source=tio.Image(os.path.join(subj_path, pet_file), type=tio.INTENSITY),
+                    sampling_map=tio.Image(os.path.join(subj_path, body_file), type=tio.LABEL),
+                    domain_id=torch.tensor(domain_id).long(),
+                    subject_name=subj_name,
+                    domain_name=domain_name
+                )
+                tio_subjects.append(subject)
         return tio_subjects
 
     def setup(self, stage=None):
-        self.train_subjects = self._prepare_subjects('train')
-        self.val_subjects = self._prepare_subjects('test') 
+        if not os.path.exists(self.root_dir):
+            raise FileNotFoundError(f"Le dossier racine {self.root_dir} n'existe pas.")
+
+        # 1. Lister et trier les domaines
+        domain_names = sorted([d for d in os.listdir(self.root_dir) if os.path.isdir(os.path.join(self.root_dir, d))])
+        self.domain_to_id = {name: i for i, name in enumerate(domain_names)}
+        print(f"Mapping Domaines: {self.domain_to_id}")
+
+        self.train_subjects = []
+        self.val_subjects = []
         
-        np.random.shuffle(self.train_subjects) # Mélange avant split
+        rng = np.random.RandomState(self.seed) # Générateur aléatoire isolé
+
+        for i, domain_name in enumerate(domain_names):
+            domain_id = self.domain_to_id[domain_name]
+            domain_path = os.path.join(self.root_dir, domain_name)
             
-        print(f"[TorchIO] {len(self.train_subjects)} Train, {len(self.val_subjects)} Val (Test set).")
+            # Lister et mélanger les sujets du domaine
+            subjects_in_domain = sorted([s for s in os.listdir(domain_path) if os.path.isdir(os.path.join(domain_path, s))])
+            rng.shuffle(subjects_in_domain)
+            total_subj = len(subjects_in_domain)
+
+            # 2. Déterminer la configuration de split pour CE domaine
+            if isinstance(self.split_config, list):
+                if len(self.split_config) != len(domain_names):
+                    raise ValueError(f"La liste split_config ({len(self.split_config)}) doit correspondre au nombre de domaines ({len(domain_names)}).")
+                current_config = self.split_config[i]
+            else:
+                current_config = self.split_config
+
+            # 3. Calculer les index de coupure (train_count et test_count)
+            if isinstance(current_config, float):
+                # Cas 1 : Pourcentage
+                train_count = int(total_subj * current_config)
+                test_count = total_subj - train_count
+            elif isinstance(current_config, (tuple, list)) and len(current_config) == 2:
+                # Cas 2 : Nombre exact (train, test)
+                train_count = current_config[0]
+                test_count = current_config[1]
+                
+                # Sécurité si on demande plus de données qu'il n'y en a
+                if train_count + test_count > total_subj:
+                    print(f"⚠️ Avertissement : Le domaine {domain_name} n'a que {total_subj} patients. " 
+                          f"Impossible d'extraire {train_count} train et {test_count} test. Plafonnement appliqué.")
+                    train_count = min(train_count, total_subj)
+                    test_count = min(test_count, total_subj - train_count)
+            else:
+                raise TypeError(f"Format de split_config invalide pour le domaine {domain_name}: {current_config}")
+
+            # 4. Découpage
+            train_names = subjects_in_domain[:train_count]
+            val_names = subjects_in_domain[train_count:train_count + test_count]
+
+            print(f"Domaine {domain_name:12} -> Train: {len(train_names):3d}, Test: {len(val_names):3d} (Total: {total_subj})")
+
+            # 5. Création des objets TorchIO
+            self.train_subjects.extend(self._create_tio_subjects(train_names, domain_path, domain_name, domain_id))
+            self.val_subjects.extend(self._create_tio_subjects(val_names, domain_path, domain_name, domain_id))
+
+        # Mélange global final des listes de sujets
+        rng.shuffle(self.train_subjects)
+        rng.shuffle(self.val_subjects)
+            
+        print(f"\n[TorchIO] Total Global : {len(self.train_subjects)} Train, {len(self.val_subjects)} Val (Test set).")
         
-        # On définit les transformations
         self.transform = tio.Compose([
             Float32Lambda(),
             tio.ToCanonical(),
             tio.RandomFlip(axes=(0, 1, 2), p=0.5),
         ])
-        
 
     def _create_dataloader(self, subjects: List[tio.Subject], shuffle_subjects: bool, shuffle_patches: bool, is_validation: bool = False):
-        """Méthode utilitaire pour créer les DataLoaders (train et val)"""
         if not subjects:
             return None
         
         dataset = tio.SubjectsDataset(subjects, transform=self.transform)
         
-        # Le sampler reste le même pour les deux versions
         sampler = tio.LabelSampler(
             patch_size=self.patch_size,
             label_name='sampling_map',
             label_probabilities={
-                0: 0.05,  # 5% de chance de prendre un patch centré sur l'air
-                1: 0.95   # 95% de chance de prendre un patch centré sur le patient
+                0: 0.05, 
+                1: 0.95
             }
         )
         
-        # Paramètres spécifiques à la validation
         max_length = 1000 if is_validation else self.queue_max_length
         samples_per_volume = 32 if is_validation else self.samples_per_volume
         num_workers = 4 if is_validation else self.num_workers
@@ -827,11 +883,10 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
             shuffle_patches=shuffle_patches
         )
 
-        # TorchIO recommande num_workers=0 pour le SubjectsLoader si la Queue est utilisée
         return tio.SubjectsLoader(
-            patches_queue,
-            batch_size=self.batch_size,
-            num_workers=0,
+            patches_queue, 
+            batch_size=self.batch_size, 
+            num_workers=0, 
             pin_memory=True
         )
 
@@ -843,13 +898,12 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
     
     def test_dataloader(self):
         if self.val_subjects:
-            # Pour le test, on charge le volume entier (batch_size=1)
             test_dataset = tio.SubjectsDataset(self.val_subjects, transform=tio.Compose([Float32Lambda(), tio.ToCanonical()]))
             return tio.SubjectsLoader(
-                test_dataset,
-                batch_size=1,
-                num_workers=multiprocessing.cpu_count() // 2,
-                pin_memory=True,
+                test_dataset, 
+                batch_size=1, 
+                num_workers=multiprocessing.cpu_count() // 2, 
+                pin_memory=True, 
                 shuffle=False
             )
-        return None        
+        return None      
