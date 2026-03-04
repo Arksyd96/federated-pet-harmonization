@@ -1,0 +1,84 @@
+SEED: 101
+WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
+
+project_name: federated-pet
+dir_name: runs/unlearning-harmonization-vae
+name: Unlearning Harmonization with StyleVAE (3 Domains)
+
+datamodule:
+    root_dir:           ./data/PET-EARL/foundation-dataset
+    split_config: 
+    - [60, 15]
+    - [60, 15]
+    - [60, 15]
+    batch_size:         64
+    patch_size:         [5, 64, 64]
+    num_workers:        16
+    queue_max_length:   9000
+    samples_per_volume: 350
+
+
+vae:
+    in_channels:          5
+    out_channels:         5
+    hidden_channels:      [64, 128, 256, 512]
+    kernel_sizes:         [3, 3, 3, 3]
+    strides:              [1, 2, 2, 2]
+    latent_channels:      8
+    style_channels:       256
+    style_embedding_dim:  256      # aligné sur style_channels (pas d'upscaling)
+    num_residual_blocks:  2
+    spatial_dims:         2
+    normalization:
+    - group
+    - {num_groups: 32, affine: true}
+    activation:
+    - swish
+    - {}
+    dropout:              0.0
+    use_residual_block:   true
+    learnable_interpolation: true
+    attention_type:       none   
+
+
+pipeline:
+    num_domains:           3
+    classifier_hidden_dim: 256
+    warmup_epochs:         15       # stage 1 : apprendre la tâche + classifieurs
+    beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
+    kl_content_weight:     1.0e-6   # régularisation KL sur z_content spatial
+    kl_style_weight:       1.0e-6   # régularisation KL sur z_style 1D
+    lr_vae:                1.0e-5   # LR reconstruction
+    lr_classifiers:        1.0e-4   # LR classifieurs
+    lr_unlearn:            3.0e-5   # LR confusion (plus faible : désapprentissage doux)
+    weight_decay:          1.0e-6
+    suv_global_log_max:    6.0
+
+
+model_checkpoint:
+    monitor:   "val/rec_loss"
+    mode:      "min"
+    save_top_k: 1
+    save_last:  true
+    verbose:    true
+
+trainer:
+    precision:           32
+    accelerator:         gpu
+    devices:             1
+    log_every_n_steps:   1
+    min_epochs:          50
+    max_epochs:          300
+    check_val_every_n_epoch: 1
+    num_sanity_val_steps: 0
+    
+    limit_val_batches: 80
+
+    # Non compatible avec optimisation manuelle (multi-optimiseurs)
+    # gradient_clip_val: 1.0
+    # gradient_clip_algorithm: "norm"
+    
+
+    
+
+    

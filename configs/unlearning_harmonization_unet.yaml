@@ -9,9 +9,9 @@ name: Unlearning Harmonization with UNet (3 Domains)
 datamodule:
     root_dir: ./data/PET-EARL/foundation-dataset
     split_config: 
-    - [0, 50]
-    - [0, 50]
-    - [0, 50]
+    - [60, 15]
+    - [60, 15]
+    - [60, 15]
     batch_size: 64
     patch_size: [5, 64, 64]
     num_workers: 16
@@ -72,8 +72,8 @@ pipeline:
     beta_confusion: 1.0       # Démarrer modéré, augmenter si le classifieur reste trop bon
     level_weights: null  # Uniforme pour commencer
     lr_main: 1.e-4
-    lr_dm: 1.e-4
-    lr_conf: 1.e-5            # Ordre de grandeur en dessous de lr_main
+    lr_dm: 3.e-5
+    lr_conf: 3.e-5            # Ordre de grandeur en dessous de lr_main
     # weight_decay: 1.e-5
     suv_global_log_max: 6.0
 

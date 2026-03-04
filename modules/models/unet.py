@@ -718,7 +718,7 @@ class UNetWithIntermediateFeatures(UNet):
 class UnlearningUNet(LightningModule):
     def __init__(
         self,
-        model: UNetWithIntermediateFeatures,
+        model: nn.Module,
         domain_classifier: nn.Module,
         feature_extractor: nn.Module,
         num_domains: int = 3,
