@@ -68,21 +68,37 @@ domain_classifier:
 # Pipeline UnlearningUNet
 pipeline:
     num_domains: 3
-    warmup_epochs: 0
-    beta_confusion: 1.0       # Démarrer modéré, augmenter si le classifieur reste trop bon
+    warmup_epochs: 1
+
+    # Valeur de départ de beta
+    beta_confusion: 0.5
+    # Valeur max que beta atteint en fin d'entraînement (scheduler cosine)
+    beta_max: 8.0
+    k_conf_steps: 2
+
+    # lr_dm décroît jusqu'à lr_dm * lr_dm_min_factor
+    lr_dm_min_factor: 0.05
+
+    # Poids du terme domain_acc dans le score composite de sauvegarde
+    lambda_composite: 0.1
+
+    # Nécessaire pour le scheduler (doit correspondre à trainer.max_epochs)
+    max_epochs: 200
+
     level_weights: null  # Uniforme pour commencer
     lr_main: 1.e-4
-    lr_dm: 3.e-5
-    lr_conf: 3.e-5            # Ordre de grandeur en dessous de lr_main
-    # weight_decay: 1.e-5
+    lr_dm: 1.e-4
+    lr_conf: 1.e-5            # Ordre de grandeur en dessous de lr_main
+    weight_decay: 1.e-5
     suv_global_log_max: 6.0
 
 model_checkpoint:
-    monitor: val/task_loss
+    monitor: val/composite_score
     every_n_epochs: 1
     save_last: true
     save_top_k: 1
     mode: min
+    verbose: true
 
 trainer:
     precision: 32

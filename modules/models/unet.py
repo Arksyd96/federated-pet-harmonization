@@ -1,4 +1,5 @@
 from typing import *
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -715,6 +716,13 @@ class UNetWithIntermediateFeatures(UNet):
         return y, encoder_features
     
 
+class ConfusionLoss(nn.Module):
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        p    = F.softmax(logits, dim=1)          # (B, N_classes)
+        logp = torch.log(p + 1e-8)               # stabilité numérique
+        return -logp.mean() 
+    
+
 class UnlearningUNet(LightningModule):
     def __init__(
         self,
@@ -724,13 +732,18 @@ class UnlearningUNet(LightningModule):
         num_domains: int = 3,
         warmup_epochs: int = 10,
         beta_confusion: float = 1.0,
+        beta_max: float = 5.0,            # valeur max de beta en fin de stage 2
+        lr_dm_min_factor: float = 0.05,   # lr_dm décroît jusqu'à lr_dm * ce facteur
+        lambda_composite: float = 1.0,    # poids du terme domain_acc dans le score composite
+        k_conf_steps : int = 1,           # nombre de steps de confusion par step principal
+        max_epochs: int = 200,            # nécessaire pour le scheduler
         level_weights: Optional[List[float]] = None,
         lr_main: float = 1e-4,
         lr_dm: float = 1e-4,
         lr_conf: float = 1e-5,  # plus faible : on désapprend doucement
         weight_decay: float = 1e-5,
         suv_global_log_max: float = 6.0,
-        loss_fn=F.l1_loss,
+        recon_loss_fn=F.l1_loss,
     ):
         super().__init__()
 
@@ -739,12 +752,18 @@ class UnlearningUNet(LightningModule):
         self.feature_extractor = feature_extractor
         self.num_domains = num_domains
         self.warmup_epochs = warmup_epochs
-        self.beta = beta_confusion
+        self.beta     = beta_confusion    # valeur courante (mise à jour par scheduler)
+        self.beta_max = beta_max
+        self.k_conf_steps = k_conf_steps
+        self.lr_dm_min_factor = lr_dm_min_factor
+        self.lambda_composite = lambda_composite
+        self.max_epochs       = max_epochs
+        self.confusion_loss   = ConfusionLoss()
         self.level_weights = level_weights
         self.lrs = {"main": lr_main, "dm": lr_dm, "conf": lr_conf}
         self.weight_decay = weight_decay
         self.suv_global_log_max = suv_global_log_max
-        self.loss_fn = loss_fn
+        self.loss_fn = recon_loss_fn
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
 
         # Optimisation manuelle obligatoire (multi-optimiseurs adversariaux)
@@ -832,6 +851,51 @@ class UnlearningUNet(LightningModule):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y, _ = self.model.forward_with_features(x, t=None)
         return y
+    
+    def _stage2_progress(self) -> float:
+        """
+        0 = début du stage 2, 1 = fin de l'entraînement.
+        """
+        t = max(0, self.current_epoch - self.warmup_epochs)
+        T = max(1, self.max_epochs - self.warmup_epochs)
+        return min(t / T, 1.0)
+    
+    def _scheduled_beta(self) -> float:
+        """
+        monte de beta_init vers beta_max selon une courbe cosine.
+            beta(t) = beta_init + (beta_max - beta_init) * (1 - cos(π*t)) / 2
+        """
+        p = self._stage2_progress()
+        beta_init = self.hparams.beta_confusion
+        return beta_init + (self.beta_max - beta_init) * (1 - math.cos(math.pi * p)) / 2
+    
+    def _scheduled_lr_dm(self) -> float:
+        """
+        lr_dm : décroît de lr_dm_init vers lr_dm_init * lr_dm_min_factor
+        selon une courbe cosine.
+            lr_dm(t) = lr_min + (lr_init - lr_min) * (1 + cos(π*t)) / 2
+        """
+        p      = self._stage2_progress()
+        lr_init = self.lrs["dm"]
+        lr_min  = lr_init * self.lr_dm_min_factor
+        return lr_min + (lr_init - lr_min) * (1 + math.cos(math.pi * p)) / 2
+    
+    def on_train_epoch_start(self):
+        if self.current_epoch < self.warmup_epochs:
+            return
+
+        # Mise à jour de beta
+        self.beta = self._scheduled_beta()
+
+        # Mise à jour du LR du classifieur de domaine directement dans l'optimiseur
+        _, opt_dm, _ = self.optimizers()
+        new_lr_dm = self._scheduled_lr_dm()
+        for pg in opt_dm.param_groups:
+            pg["lr"] = new_lr_dm
+
+        # Log des valeurs schedulées (pratique pour vérifier dans WandB)
+        self.log("train/beta_confusion", self.beta,  on_step=False, on_epoch=True)
+        self.log("train/lr_dm",          new_lr_dm,  on_step=False, on_epoch=True)
 
     # ------------------------------------------------------------------
     # configure_optimizers
@@ -875,7 +939,6 @@ class UnlearningUNet(LightningModule):
         x = self._normalize(suv_source)  # [-1, 1]
         # x_input, x_target = self._apply_patch_mask(x, mask_ratio=0.1, patch_size=8)
 
-        self.warmup_epochs = 1 # Temporary : on fait du stage 2 direct pour tester le pipeline complet
         is_stage_1 = self.current_epoch < self.warmup_epochs
         bs = x.shape[0]
 
@@ -952,21 +1015,15 @@ class UnlearningUNet(LightningModule):
             for p in self.feature_extractor.parameters():
                 p.requires_grad = True
 
-            feature_map_conf = self.feature_extractor(x)
-            logits_conf = self.domain_classifier(feature_map_conf)
-            
-            # loss_conf = self.beta * self._confusion_loss(logits_conf)
-            n_classes = logits_conf.shape[1]
-            uniform_target = torch.full_like(logits_conf, 1.0 / n_classes)
-            loss_conf = self.beta * F.kl_div(
-                F.log_softmax(logits_conf, dim=1),
-                uniform_target,
-                reduction='batchmean'
-            )
+            for _ in range(self.k_conf_steps):
+                feature_map_conf = self.feature_extractor(x)
+                logits_conf      = self.domain_classifier(feature_map_conf)
+                loss_conf        = self.beta * self.confusion_loss(logits_conf)
 
-            opt_conf.zero_grad()
-            self.manual_backward(loss_conf)
-            opt_conf.step()
+                opt_conf.zero_grad()
+                self.manual_backward(loss_conf)
+                torch.nn.utils.clip_grad_norm_(self.feature_extractor.parameters(), max_norm=1.0)
+                opt_conf.step()
 
             # Logs
             self._log_dict({
@@ -1019,12 +1076,19 @@ class UnlearningUNet(LightningModule):
         preds = logits.argmax(dim=1)
         acc = (preds == domain_labels).float().mean()
 
+        # Score composite : bon modèle = faible reconstruction + classifieur confus
+        # domain_acc_excess = combien le classifieur performe au-dessus du hasard
+        chance_level       = 1.0 / self.num_domains
+        domain_acc_excess  = (acc - chance_level).clamp(min=0.0)
+        composite_score    = task_loss + self.lambda_composite * domain_acc_excess
+
         self._log_dict({
             "val/task_loss":     task_loss,
             "val/domain_loss":   loss_dm,
             "val/confusion_loss": loss_conf,
             "val/ssim":          ssim_score,
             "val/domain_acc":    acc,   # indicateur clé : doit tendre vers 1/N en stage 2
+            "val/composite_score": composite_score,
         }, bs)
 
         # Visualisation (premier batch uniquement)
