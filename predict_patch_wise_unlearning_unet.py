@@ -31,9 +31,6 @@ def get_start_indices(dim_size, patch_size, stride):
 
 
 def process_subject(model, batch, device, filename, curr_idx, length_loader):
-    # Récupération des paramètres du modèle
-    SUV_LOG_MAX = model.hparams.suv_global_log_max
-
     print('Treating subject: {} ({}/{})'.format(batch['subject_name'][0], curr_idx, length_loader))
 
     # --- 1. Préparation des Tenseurs ---
@@ -53,7 +50,7 @@ def process_subject(model, batch, device, filename, curr_idx, length_loader):
     z_patch_size = 5
     y_patch_size = 64
     x_patch_size = 64
-    overlap = 2  # recouvrement de 1 voxel sur x et y
+    overlap = 6  # recouvrement de 1 voxel sur x et y
     
     z_starts = get_start_indices(d_dim, z_patch_size, z_patch_size - 3)
     y_starts = get_start_indices(h_dim, y_patch_size, y_patch_size - overlap)
@@ -95,15 +92,14 @@ def process_subject(model, batch, device, filename, curr_idx, length_loader):
     pbar.close()
 
     # --- 4. Normalisation finale et Sauvegarde ---
-    final_prediction = output_volume / count_map
+    count_map     = count_map.clamp(min=1.0)
+    final_prediction = (output_volume / count_map).cpu()
 
-    # Post-processing pour format Nifti
-    final_prediction = final_prediction.cpu()
-    final_prediction = final_prediction.squeeze().permute(2, 1, 0)  # (W, H, D) -> Permute pour match ITK
+    # Permutation pour correspondre à l'orientation SimpleITK (W, H, D)
+    final_prediction = final_prediction.squeeze().permute(2, 1, 0).numpy()
+    final_prediction = np.flip(final_prediction, axis=2)    # Flip Z
+    final_prediction = np.flip(final_prediction, axis=1)    # Flip Y
 
-    final_prediction = final_prediction.numpy()
-    final_prediction = np.flip(final_prediction, axis=2) # Flip Z
-    final_prediction = np.flip(final_prediction, axis=1) # Flip Y (Correction orientation)
 
     # Création image SimpleITK
     output_sitk = sitk.GetImageFromArray(final_prediction)

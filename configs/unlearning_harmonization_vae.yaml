@@ -8,9 +8,9 @@ name: Unlearning Harmonization with StyleVAE (3 Domains)
 datamodule:
     root_dir:           ./data/PET-EARL/foundation-dataset
     split_config: 
-    - [60, 15]
-    - [60, 15]
-    - [60, 15]
+    - [60, 5]
+    - [60, 5]
+    - [60, 5]
     batch_size:         64
     patch_size:         [5, 64, 64]
     num_workers:        16
@@ -19,6 +19,8 @@ datamodule:
 
 
 vae:
+    input_shape:          [64, 64]   # (H, W) pour FFTHighPassFilter
+    fft_sigma:            7.5        # sigma du filtre gaussien passe-haut
     in_channels:          5
     out_channels:         5
     hidden_channels:      [64, 128, 256, 512]
@@ -39,26 +41,35 @@ vae:
     use_residual_block:   true
     learnable_interpolation: true
     attention_type:       none   
+    use_contour_skip:     false
 
 
 pipeline:
     num_domains:           3
     classifier_hidden_dim: 256
-    warmup_epochs:         15       # stage 1 : apprendre la tâche + classifieurs
-    beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
+    warmup_epochs:         3        # stage 1 : apprendre la tâche + classifieurs
+
+    beta_confusion:        0.5      # poids confusion loss (désapprentissage z_content)
     kl_content_weight:     1.0e-6   # régularisation KL sur z_content spatial
     kl_style_weight:       1.0e-6   # régularisation KL sur z_style 1D
-    lr_vae:                1.0e-5   # LR reconstruction
+    beta_max:              8.0      # valeur max de beta en fin d'entraînement
+    lr_classifiers_min_factor: 0.05     # lr_classifiers → lr * 0.05 en fin de stage 2
+    max_epochs:            50
+
+    lr_vae:                1.0e-4   # LR reconstruction
     lr_classifiers:        1.0e-4   # LR classifieurs
-    lr_unlearn:            3.0e-5   # LR confusion (plus faible : désapprentissage doux)
+    lr_unlearn:            1.0e-6   # LR confusion (plus faible : désapprentissage doux)
+    k_style_steps:         2        # nombre d'itérations de mise à jour du style par étape d'entraînement
+
     weight_decay:          1.0e-6
     suv_global_log_max:    6.0
 
 
 model_checkpoint:
-    monitor:   "val/rec_loss"
+    monitor:   "val/composite_score"
+    filename:  "epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/style_acc:.3f}-content={val/content_acc:.3f}"
     mode:      "min"
-    save_top_k: 1
+    save_top_k: 3
     save_last:  true
     verbose:    true
 
@@ -67,8 +78,8 @@ trainer:
     accelerator:         gpu
     devices:             1
     log_every_n_steps:   1
-    min_epochs:          50
-    max_epochs:          300
+    min_epochs:          20
+    max_epochs:          50
     check_val_every_n_epoch: 1
     num_sanity_val_steps: 0
     

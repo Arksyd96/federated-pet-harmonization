@@ -18,6 +18,7 @@ import os
 import argparse
 import logging
 from datetime import datetime
+import re
 
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -29,7 +30,22 @@ from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+_EARL_RE = re.compile(r'EARL[_ ]?\d', re.IGNORECASE)
+
 # ----------------------- Utilities ------------------------
+
+def _resolve_modality(dicom_modality_tag: str, series_description: str) -> str | None:
+    earl_match = _EARL_RE.search(series_description or '')
+    if earl_match:
+        digit = re.search(r'\d', earl_match.group()).group()
+        return f'EARL{digit}'
+    tag = (dicom_modality_tag or '').strip().upper()
+    if tag == 'PT':
+        return 'PET'
+    if tag == 'CT':
+        return 'CT'
+    return None
+
 def parse_dicom_time(time_str):
     """Parse un temps DICOM (HHMMSS.frac) en datetime.time. Retourne None si invalide."""
     if not time_str:
@@ -175,72 +191,132 @@ def compute_suv_image(sitk_image: sitk.Image, ds: pydicom.Dataset) -> tuple:
     return suv_image, metadata
 
 
-def process_series_folder(series_path: str, out_subject_path: str, modality: str):
-    try:
-        series_IDs = sitk.ImageSeriesReader.GetGDCMSeriesIDs(series_path) or []
-    except Exception as e:
-        series_IDs = []
+def process_series_folder(filenames: list[str], out_subject_path: str, modality: str, series_description: str):
+    """
+    Traite une série DICOM identifiée par sa liste de fichiers.
 
-    if not series_IDs:
-        logging.warning(f'No DICOM series found in folder: {series_path}')
+    Paramètres
+    ----------
+    filenames         : liste ordonnée de chemins DICOM (même SeriesInstanceUID)
+    out_subject_path  : dossier de sortie du sujet
+    modality          : 'CT', 'PET' ou 'EARL'
+    series_description: SeriesDescription DICOM (utilisé dans le nom de fichier)
+    """
+    if not filenames:
         return
-    
-    for series_id in series_IDs:
-        filenames = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(series_path, series_id)
-        try:
-            ds = pydicom.dcmread(filenames[0], stop_before_pixels=True)
-        except Exception as e:
-            logging.error(f'Failed to read DICOM file: {filenames[0]}. Error: {str(e)}')
-            continue
 
-        sdesc = getattr(ds, 'SeriesDescription', '')
-        suid = getattr(ds, 'SeriesInstanceUID', series_id)
+    # Nom de fichier de sortie : modality + SeriesDescription nettoyée
+    safe_desc = re.sub(r'[^\w\-]', '_', series_description or 'unknown').strip('_')
+    out_name  = f"{modality}_{safe_desc}.nii.gz"
+    out_path  = os.path.join(out_subject_path, out_name)
 
-        out_name = f"{modality}_{series_path.split(os.sep)[-1]}.nii.gz"
-        out_path = os.path.join(out_subject_path, out_name)
+    try:
+        ds = pydicom.dcmread(filenames[0], stop_before_pixels=True)
+    except Exception as e:
+        logging.error(f'Failed to read DICOM file: {filenames[0]}. Error: {e}')
+        return
 
-        # read the image via simpleITK
-        reader = sitk.ImageSeriesReader()
-        reader.SetFileNames(filenames)
+    reader = sitk.ImageSeriesReader()
+    reader.SetFileNames(filenames)
+    try:
         image = reader.Execute()
+    except Exception as e:
+        logging.error(f'Failed to load series ({modality} / {series_description}): {e}')
+        return
 
-        # compute SUV for PET and EARL images
-        if modality == 'PET' or modality == 'EARL':
-            suv_image, meta = compute_suv_image(image, ds)
-            if suv_image is not None:
-                save_image_nifti(suv_image, out_path, extra_metadata=meta)
-            else:
-                logging.warning(f'-- SUV computation failed for {modality} series: {series_id}.')
-        
-        else: # for CT
-            save_image_nifti(image, out_path, extra_metadata={
-                'Modality': modality,
-                'SeriesDescription': sdesc
-            })
+    if modality in ('PET', 'EARL1', 'EARL2'):
+        suv_image, meta = compute_suv_image(image, ds)
+        if suv_image is not None:
+            save_image_nifti(suv_image, out_path, extra_metadata=meta)
+        else:
+            logging.warning(f'SUV computation failed for {modality} series: {series_description}')
+    else:
+        save_image_nifti(image, out_path, extra_metadata={
+            'Modality': modality,
+            'SeriesDescription': series_description,
+        })
+
 
 
 def process_subject(subject_path: str, out_subject_path: str):
-    immediate_subdirs = [p for p in os.listdir(subject_path)]
+    """
+    Découvre récursivement tous les fichiers DICOM d'un sujet, les regroupe
+    par SeriesInstanceUID, détermine la modalité depuis les tags DICOM
+    (Modality + SeriesDescription), et lance le traitement de chaque série.
 
-    if all(sd.lower().endswith('.dcm') for sd in immediate_subdirs):
-        process_series_folder(subject_path, out_subject_path, modality=None)
+    Structure de dossiers supportée (à n'importe quelle profondeur) :
+        subject/modality_folder/study_folder/file.dcm
+        subject/modality_folder/file.dcm
+        subject/file.dcm
+    """
+    # ── 1. Collecte récursive de tous les fichiers DICOM ─────────────────────
+    # On accepte .dcm et les fichiers sans extension (certains exports DICOM
+    # n'ajoutent pas d'extension).
+    dicom_files = []
+    for dirpath, _, filenames in os.walk(subject_path):
+        for fname in filenames:
+            fpath = os.path.join(dirpath, fname)
+            if fname.lower().endswith('.dcm') or not os.path.splitext(fname)[1]:
+                dicom_files.append(fpath)
+
+    if not dicom_files:
+        logging.warning(f'No DICOM files found under: {subject_path}')
         return
 
-    for subdir in immediate_subdirs:
-        modality = None
-        if subdir.lower().startswith('ct'): modality = 'CT'
-        if subdir.lower().startswith('tep'): modality = 'PET'
-        if subdir.lower().startswith('tep') and 'earl' in subdir.lower(): modality = 'EARL'
+    # ── 2. Groupement par SeriesInstanceUID ───────────────────────────────────
+    # On lit uniquement les métadonnées (stop_before_pixels) pour être rapide.
+    series_map: dict[str, dict] = {}   # uid → {files, modality_tag, series_desc}
+
+    for fpath in dicom_files:
+        try:
+            ds = pydicom.dcmread(fpath, stop_before_pixels=True)
+        except Exception:
+            continue  # fichier non DICOM ou corrompu — on passe
+
+        uid   = getattr(ds, 'SeriesInstanceUID', None)
+        if uid is None:
+            continue  # impossible de grouper sans UID
+
+        uid = str(uid)
+        if uid not in series_map:
+            series_map[uid] = {
+                'files':        [],
+                'modality_tag': getattr(ds, 'Modality', ''),
+                'series_desc':  getattr(ds, 'SeriesDescription', ''),
+            }
+        series_map[uid]['files'].append(fpath)
+
+    if not series_map:
+        logging.warning(f'No valid DICOM series found under: {subject_path}')
+        return
+
+    # ── 3. Traitement de chaque série ─────────────────────────────────────────
+    for uid, info in series_map.items():
+        modality = _resolve_modality(info['modality_tag'], info['series_desc'])
+
         if modality is None:
-            logging.warning(f'Skipping unknown modality folder: {subdir}')
+            logging.warning(
+                f'Skipping series (unrecognised modality): '
+                f'Modality={info["modality_tag"]!r}  '
+                f'SeriesDescription={info["series_desc"]!r}'
+            )
             continue
 
-        series_path = os.path.join(subject_path, subdir)
-        if not os.path.isdir(series_path):
-            continue
+        # SimpleITK attend les fichiers triés par position
+        filenames_sorted = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(
+            os.path.dirname(info['files'][0]), uid
+        )
+        # Fallback si GetGDCMSeriesFileNames ne trouve rien (fichiers dans
+        # plusieurs sous-dossiers) : tri lexicographique sur le nom de fichier
+        if not filenames_sorted:
+            filenames_sorted = sorted(info['files'])
 
-        process_series_folder(series_path, out_subject_path, modality=modality)
-    return
+        process_series_folder(
+            filenames      = filenames_sorted,
+            out_subject_path = out_subject_path,
+            modality       = modality,
+            series_description = info['series_desc'],
+        )
 
 
 def process_subjects_directory(root_path: str, out_root: str, num_workers: int = 1):

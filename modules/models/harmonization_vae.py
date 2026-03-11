@@ -1,36 +1,16 @@
-"""
-DisentangledHarmonizationVAE
-============================
-VAE disentanglé pour l'harmonisation d'images PET multi-sites.
-
-Blocs utilisés : BasicBlock, UnetResBlock, UnetBasicBlock, BasicDown, BasicUp,
-                 SequentialEmb — exactement comme dans unet.py / base.py.
-Aucun module importé depuis autoencoders.py.
-
-Architecture :
-  ContentStyleEncoder   ─── même patron que l'encodeur UNet (input_conv + encoder_blocks +
-                             middle_block) + deux têtes :
-                             • content_head  → posterior spatial (z_content)
-                                              successifs jusqu'à 1×1, puis Linear
-  ContourSkipEncoder    ─── même structure que ContentStyleEncoder (sans têtes KL),
-                             entrée = image filtrée par Sobel (poids fixes)
-                             → liste de skips de même shape que ceux du content encoder
-  StyleEmbedder         ─── MLP : z_style 1D → style_emb (même rôle que time_emb dans UNet)
-  StyleConditionedDecoder── même patron que le décodeur UNet, style_emb joue le rôle
-                             de l'embedding temporel (scale-shift norm dans chaque bloc)
-
-Inférence (harmonisation) :
-  x_source → z_content_source (mode)
-  x_ref    → z_style_ref (mode) → style_emb_ref
-  → Decoder(z_content_source, style_emb_ref, skips_source_content+contour)
-  → image source avec le style de x_ref
-"""
-
 from typing import Dict, List, Optional, Tuple, Union
+import math
+import contextlib
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchio as tio
+import numpy as np
+import wandb
+from pytorch_lightning import LightningModule
+from torchmetrics.image import StructuralSimilarityIndexMeasure
+from torchvision.utils import make_grid
 
 from monai.networks.blocks import UnetOutBlock
 from modules.models.base import (
@@ -42,7 +22,10 @@ from modules.models.base import (
     SequentialEmb,
     save_add,
 )
+
 from modules.models.attention import Attention, zero_module
+from modules.models.domain_classifier import DomainClassifier
+from modules.models.fft import FFTHighPassFilter
 
 
 # =============================================================================
@@ -93,7 +76,7 @@ def kl_loss_1d(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         mu.pow(2) + logvar.exp() - 1.0 - logvar,
         dim=1,
     )
-
+    
 
 # =============================================================================
 # ContentStyleEncoder
@@ -131,6 +114,8 @@ class ContentStyleEncoder(nn.Module):
 
     def __init__(
         self,
+        input_shape: Tuple[int, int],
+        fft_sigma: float = 7.5,
         in_channels: int = 5,
         hidden_channels: List[int] = [64, 128, 256, 512],
         kernel_sizes: List[int] = [3, 3, 3, 3],
@@ -157,9 +142,12 @@ class ContentStyleEncoder(nn.Module):
         )
         ConvBlock = UnetResBlock if use_residual_block else UnetBasicBlock
 
+        # ── FFT Filter ────────────────────────────────────────────────────────
+        self.fft_filter = FFTHighPassFilter(input_shape, sigma=fft_sigma)
+
         # ── In-Convolution ────────────────────────────────────────────────────
         self.input_conv = BasicBlock(
-            spatial_dims, in_channels, hidden_channels[0],
+            spatial_dims, in_channels * 2, hidden_channels[0],
             kernel_size=kernel_sizes[0], stride=strides[0],
         )
 
@@ -234,22 +222,12 @@ class ContentStyleEncoder(nn.Module):
         )
 
         # ── Content head : spatial posterior ─────────────────────────────────
-        # Même pattern que VariationalAutoencoder.out_enc
         self.content_head = nn.Sequential(
             BasicBlock(spatial_dims, hidden_channels[-1], 2 * latent_channels, 3),
             BasicBlock(spatial_dims, 2 * latent_channels, 2 * latent_channels, 1),
         )
 
-        # ── Style head : 1D posterior via projection de canaux + GlobalAvgPool ───
-        # 1. BasicBlock(hidden_channels[-1] → 2*style_channels, kernel=1) : réduit les canaux
-        #    sans toucher à la résolution spatiale
-        # 2. AdaptiveAvgPool2d(1) : agrégation spatiale globale → (B, 2*style_channels, 1, 1)
-        #    Force z_style à n'encoder que de l'information GLOBALE (biais de scanner)
-        #    et non de l'information locale (anatomie) — cohérent avec la sémantique du style
-        # 3. Flatten → (B, 2*style_channels) → chunk → mu_style, logvar_style
-        self.style_head = BasicBlock(
-            spatial_dims, hidden_channels[-1], 2 * style_channels, kernel_size=1,
-        )
+        self.style_head    = BasicBlock(spatial_dims, hidden_channels[-1], 2 * style_channels, kernel_size=1,)
         self.style_pool    = nn.AdaptiveAvgPool2d(1)
         self.style_flatten = nn.Flatten()
 
@@ -263,15 +241,11 @@ class ContentStyleEncoder(nn.Module):
         logvar_contentontent  : (B, latent_channels, H', W')
         mu_styletyle    : (B, style_channels)
         logvar_styletyle    : (B, style_channels)
-
-        Note : les skips NE sont PAS retournés — ils porteraient le biais de
-        scanner vers le décodeur. Seul le ContourSkipEncoder (image Sobel, sans
-        biais machine) fournit les skip connections au décodeur.
         """
         # ── Encodeur ─────────────────────────────────────────────────────────
-        # Les activations intermédiaires ne sont PAS stockées comme skips :
-        # elles porteraient le biais de scanner directement vers le décodeur.
-        h = self.input_conv(x)
+        fft_x = self.fft_filter(x)
+        h = self.input_conv(torch.cat([x, fft_x], dim=1))  # concat image + FFT filtrée en entrée
+        
         for block in self.encoder_blocks:
             h = block(h, None)
 
@@ -449,30 +423,15 @@ class StyleEmbedder(nn.Module):
 
 class StyleConditionedDecoder(nn.Module):
     """
-    Décodeur conditionné par z_style via scale-shift norm.
-
-    Structure identique au décodeur UNet :
-        latent_to_features : UnetResBlock(latent_channels → hidden_channels[-1], emb=style_emb)
-        decoder_blocks : pour i in [1, depth-1] (reverse en forward) :
-                     (num_residual_blocks+1) × SequentialEmb(ConvBlock+Attn+[BasicUp])
-                     le ConvBlock prend en_ch = hidden_channels[i] + hidden_channels[skip_level]
-                     (la concaténation avec content_skip + contour_skip est faite
-                      avant chaque bloc dans forward(), exactement comme dans UNet)
-        output_conv : zero_module(UnetOutBlock)
-
-    L'embedding style_emb joue le rôle de time_emb :
-        → embedding_channels=style_embedding_dim dans chaque ConvBlock
-        → scale-shift appliqué via local_embedder dans UnetResBlock/UnetBasicBlock
-
     Parameters
     ----------
     latent_channels : int       canaux de z_content en entrée
     out_channels    : int       canaux de l'image reconstruite
-    hidden_channels         : List[int] doit être identique à ContentStyleEncoder.hidden_channels
+    hidden_channels : List[int] doit être identique à ContentStyleEncoder.hidden_channels
     kernel_sizes    : List[int]
     strides         : List[int]
-    style_embedding_dim   : int       = tembedding_channels du décodeur (sortie de StyleEmbedder)
-    num_residual_blocks  : int       doit être identique à ContentStyleEncoder.num_residual_blocks
+    style_embedding_dim : int = tembedding_channels du décodeur (sortie de StyleEmbedder)
+    num_residual_blocks : int doit être identique à ContentStyleEncoder.num_residual_blocks
     spatial_dims, normalization, activation, dropout, use_residual_block,
     learnable_interpolation, attention_type
     """
@@ -493,11 +452,13 @@ class StyleConditionedDecoder(nn.Module):
         use_residual_block: bool = True,
         learnable_interpolation: bool = True,
         attention_type: Union[str, List[str]] = 'none',
+        use_contour_skip: bool = True
     ):
         super().__init__()
 
         self.depth = len(hidden_channels)
         self.num_residual_blocks = num_residual_blocks
+        self.use_contour_skip = use_contour_skip
 
         attention_type = (
             attention_type if isinstance(attention_type, list)
@@ -506,7 +467,6 @@ class StyleConditionedDecoder(nn.Module):
         ConvBlock = UnetResBlock if use_residual_block else UnetBasicBlock
 
         # ── latent_to_features : z_content → hidden_channels[-1] ───────────────────
-        # style_emb comme condition dès l'entrée du décodeur
         self.latent_to_features = UnetResBlock(
             spatial_dims=spatial_dims,
             in_channels=latent_channels,
@@ -525,12 +485,12 @@ class StyleConditionedDecoder(nn.Module):
         for i in range(1, self.depth):
             for k in range(num_residual_blocks + 1):
                 out_ch_k = hidden_channels[i - 1 if k == 0 else i]
+                skip_ch = hidden_channels[i - 1 if k == 0 else i] if use_contour_skip else 0
+                
                 seq = [
                     ConvBlock(
                         spatial_dims=spatial_dims,
-                        # hidden_channels[i] : canaux de h après la concaténation skip
-                        # hidden_channels[...]: canaux du skip
-                        in_channels=hidden_channels[i] + hidden_channels[i - 1 if k == 0 else i],
+                        in_channels=hidden_channels[i] + skip_ch,
                         out_channels=out_ch_k,
                         kernel_size=kernel_sizes[i],
                         stride=1,
@@ -597,14 +557,16 @@ class StyleConditionedDecoder(nn.Module):
         h = self.latent_to_features(z_content, emb=style_emb)
 
         # Décodeur (reverse, identique à UNet.forward)
-        # Seuls les contour_skips sont utilisés — pas de biais machine
-        skips = list(contour_skips)  # copie pour ne pas muter l'original
-        for i in range(len(self.decoder_blocks), 0, -1):
-            h = torch.cat([h, skips.pop()], dim=1)
-            h = self.decoder_blocks[i - 1](h, style_emb)
+        if self.use_contour_skip and contour_skips is not None:
+            skips = list(contour_skips)
+            for i in range(len(self.decoder_blocks), 0, -1):
+                h = torch.cat([h, skips.pop()], dim=1)
+                h = self.decoder_blocks[i - 1](h, style_emb)
+        else:
+            for i in range(len(self.decoder_blocks), 0, -1):
+                h = self.decoder_blocks[i - 1](h, style_emb)
 
         return self.output_conv(h)
-
 
 # =============================================================================
 # DisentangledHarmonizationVAE — assemblage complet
@@ -649,6 +611,8 @@ class DisentangledHarmonizationVAE(nn.Module):
 
     def __init__(
         self,
+        input_shape: Tuple[int, int],
+        fft_sigma: float = 7.5,
         in_channels: int = 5,
         out_channels: int = 5,
         hidden_channels: List[int] = [64, 128, 256, 512],
@@ -665,8 +629,11 @@ class DisentangledHarmonizationVAE(nn.Module):
         use_residual_block: bool = True,
         learnable_interpolation: bool = True,
         attention_type: Union[str, List[str]] = 'none',
+        use_contour_skip: bool = True
     ):
         super().__init__()
+        
+        self.use_contour_skip = use_contour_skip
 
         shared_kwargs = dict(
             hidden_channels=hidden_channels,
@@ -683,6 +650,8 @@ class DisentangledHarmonizationVAE(nn.Module):
         )
 
         self.content_style_encoder = ContentStyleEncoder(
+            input_shape=input_shape,
+            fft_sigma=fft_sigma,
             in_channels=in_channels,
             latent_channels=latent_channels,
             style_channels=style_channels,
@@ -692,7 +661,7 @@ class DisentangledHarmonizationVAE(nn.Module):
         self.contour_encoder = ContourSkipEncoder(
             in_channels=in_channels,
             **shared_kwargs,
-        )
+        ) if use_contour_skip else None
 
         self.style_embedder = StyleEmbedder(
             style_channels=style_channels,
@@ -703,6 +672,7 @@ class DisentangledHarmonizationVAE(nn.Module):
             latent_channels=latent_channels,
             out_channels=out_channels,
             style_embedding_dim=style_embedding_dim,
+            use_contour_skip=use_contour_skip,
             **shared_kwargs,
         )
 
@@ -712,21 +682,13 @@ class DisentangledHarmonizationVAE(nn.Module):
         """Retourne (mu_contentontent, logvar_contentontent, mu_styletyle, logvar_styletyle)."""
         return self.content_style_encoder(x)
 
-    def decode(
-        self,
-        z_content: torch.Tensor,
-        z_style: torch.Tensor,
-        x_for_contour: torch.Tensor,
-    ) -> torch.Tensor:
+    def decode(self, z_content: torch.Tensor, z_style: torch.Tensor, x_for_contour: torch.Tensor) -> torch.Tensor:
         """Décode z_content conditionné par z_style, guidé par les contours de x_for_contour."""
         style_emb     = self.style_embedder(z_style)
         contour_skips = self.contour_encoder(x_for_contour)
         return self.decoder(z_content, style_emb, contour_skips)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        sample_posterior: bool = True,
+    def forward(self, x: torch.Tensor, sample_posterior: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward standard (entraînement).
@@ -740,12 +702,13 @@ class DisentangledHarmonizationVAE(nn.Module):
         logvar_styletyle   : (B, style_channels)
         """
         mu_content, logvar_content, mu_style, logvar_style = self.content_style_encoder(x)
-
+        
         z_content = reparameterize(mu_content, logvar_content) if sample_posterior else mu_content
         z_style   = reparameterize(mu_style, logvar_style) if sample_posterior else mu_style
 
         style_emb     = self.style_embedder(z_style)
-        contour_skips = self.contour_encoder(x)
+
+        contour_skips = self.contour_encoder(x) if self.use_contour_skip else None
         x_hat         = self.decoder(z_content, style_emb, contour_skips)
 
         return x_hat, mu_content, logvar_content, mu_style, logvar_style
@@ -755,21 +718,23 @@ class DisentangledHarmonizationVAE(nn.Module):
         self,
         x_source: torch.Tensor,
         x_style_ref: Optional[torch.Tensor] = None,
+        z_style_fixed: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Inférence : harmonise x_source avec le style de x_style_ref.
-
-        Si x_style_ref est None → style neutre (z_style = 0).
-
         Parameters
         ----------
-        x_source    : image à harmoniser (B, C, H, W)
-        x_style_ref : image de référence de style. Si None → style neutre.
+        x_source      : (B, C, H, W) image à harmoniser, normalisée dans [-1, 1]
+        x_style_ref   : (B, C, H, W) image de référence de style (optionnel)
+        z_style_fixed : (1, style_channels) ou (B, style_channels)
+                        z_style précalculé et fixe — broadcasté sur le batch si nécessaire
         """
-        mu_content, _, mu_style, _ = self.content_style_encoder(x_source)
-        z_content = mu_content  # mode du posterior content
+        mu_content, _, _, _ = self.content_style_encoder(x_source)
+        z_content = mu_content
 
-        if x_style_ref is not None:
+        if z_style_fixed is not None:
+            # Broadcast sur le batch si z_style_fixed est (1, D)
+            z_style = z_style_fixed.expand(x_source.shape[0], -1)
+        elif x_style_ref is not None:
             _, _, mu_style, _ = self.content_style_encoder(x_style_ref)
             z_style = mu_style
         else:
@@ -779,11 +744,9 @@ class DisentangledHarmonizationVAE(nn.Module):
             )
 
         style_emb     = self.style_embedder(z_style)
-        contour_skips = self.contour_encoder(x_source)
+        contour_skips = self.contour_encoder(x_source) if self.use_contour_skip else None
         return self.decoder(z_content, style_emb, contour_skips)
-    
-    
-    
+
     
 """
 UnlearningVAE — Lightning module
@@ -814,25 +777,6 @@ Mécanisme de désapprentissage (Dinsdale) :
   opt_classifiers : style_classifier + content_classifier
   opt_unlearn     : content_style_encoder uniquement
 """
-
-from typing import Dict, List, Optional, Tuple, Union
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torchio as tio
-import wandb
-from pytorch_lightning import LightningModule
-from torchmetrics.image import StructuralSimilarityIndexMeasure
-from torchvision.utils import make_grid
-
-from modules.models.harmonization_vae import (
-    DisentangledHarmonizationVAE,
-    kl_loss_spatial,
-    kl_loss_1d,
-    reparameterize,
-)
-
 
 # =============================================================================
 # Classifieurs de domaine internes
@@ -910,11 +854,15 @@ class UnlearningVAE(LightningModule):
         classifier_hidden_dim: int = 256,
         warmup_epochs: int = 10,
         beta_confusion: float = 1.0,
+        beta_max: float = 5.0,
+        lr_classifiers_min_factor: float = 0.1,
+        max_epochs: int = 300,
         kl_content_weight: float = 1e-4,
         kl_style_weight: float = 1e-4,
         lr_vae: float = 1e-4,
         lr_classifiers: float = 1e-4,
         lr_unlearn: float = 1e-5,
+        k_style_steps: int = 2,
         weight_decay: float = 1e-5,
         suv_global_log_max: float = 6.0,
     ):
@@ -924,9 +872,13 @@ class UnlearningVAE(LightningModule):
         self.num_domains        = num_domains
         self.warmup_epochs      = warmup_epochs
         self.beta_confusion     = beta_confusion
+        self.beta_max           = beta_max
+        self.lr_classifiers_min_factor = lr_classifiers_min_factor
+        self.max_epochs         = max_epochs
         self.kl_content_weight  = kl_content_weight
         self.kl_style_weight    = kl_style_weight
         self.lrs                = {"vae": lr_vae, "classifiers": lr_classifiers, "unlearn": lr_unlearn}
+        self.k_style_steps      = k_style_steps
         self.weight_decay       = weight_decay
         self.suv_global_log_max = suv_global_log_max
 
@@ -950,7 +902,7 @@ class UnlearningVAE(LightningModule):
 
         # Optimisation manuelle obligatoire (multi-optimiseurs adversariaux)
         self.automatic_optimization = False
-
+    
         self.save_hyperparameters(ignore=["vae"])
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -985,15 +937,60 @@ class UnlearningVAE(LightningModule):
         log = 0.5 * (x_norm.clamp(-1, 1) + 1.0) * self.suv_global_log_max
         return torch.expm1(log)
 
-    def _confusion_loss(self, logits: torch.Tensor) -> torch.Tensor:
+    def _kl_confusion_loss(self, logits: torch.Tensor) -> torch.Tensor:
         """KL(pred || uniforme) — pousse le classifieur vers l'incertitude maximale."""
         uniform = torch.full_like(logits, 1.0 / self.num_domains)
         return F.kl_div(F.log_softmax(logits, dim=1), uniform, reduction="batchmean")
+    
+    def _confusion_loss(self, logits):
+        p    = F.softmax(logits, dim=1)
+        logp = torch.log(p + 1e-8)
+        return -logp.mean()
 
     def _log_dict(self, d: Dict[str, torch.Tensor], batch_size: int):
         for key, value in d.items():
             self.log(key, value, prog_bar=True, sync_dist=True,
                      on_step=True, on_epoch=True, batch_size=batch_size)
+            
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # scheduler
+    # ──────────────────────────────────────────────────────────────────────────
+    
+    def _stage2_progress(self) -> float:
+        """t ∈ [0, 1] : progression dans le stage 2."""
+        t = max(0, self.current_epoch - self.warmup_epochs)
+        T = max(1, self.max_epochs - self.warmup_epochs)
+        return min(t / T, 1.0)
+
+    def _scheduled_beta(self) -> float:
+        """beta : monte de beta_confusion vers beta_max (cosine)."""
+        p = self._stage2_progress()
+        b0 = self.hparams.beta_confusion
+        return b0 + (self.beta_max - b0) * (1 - math.cos(math.pi * p)) / 2
+
+    def _scheduled_lr_classifiers(self) -> float:
+        """lr_classifiers : descend vers lr * lr_classifiers_min_factor (cosine)."""
+        p       = self._stage2_progress()
+        lr_init = self.lrs["classifiers"]
+        lr_min  = lr_init * self.lr_classifiers_min_factor
+        return lr_min + (lr_init - lr_min) * (1 + math.cos(math.pi * p)) / 2
+
+    def on_train_epoch_start(self):
+        """Met à jour beta et lr_classifiers au début de chaque époque du stage 2."""
+        if self.current_epoch < self.warmup_epochs:
+            return
+
+        self.beta_confusion = self._scheduled_beta()
+
+        _, opt_classifiers, _ = self.optimizers()
+        new_lr = self._scheduled_lr_classifiers()
+        for pg in opt_classifiers.param_groups:
+            pg["lr"] = new_lr
+
+        self.log("debug/beta_confusion", self.beta_confusion, on_step=False, on_epoch=True)
+        self.log("debug/lr_classifiers", new_lr,              on_step=False, on_epoch=True)        
+        
 
     # ──────────────────────────────────────────────────────────────────────────
     # configure_optimizers
@@ -1007,8 +1004,13 @@ class UnlearningVAE(LightningModule):
             weight_decay=self.weight_decay,
         )
         # Discrimination de site : classifieurs seuls
-        opt_classifiers = torch.optim.AdamW(
-            self._classifier_parameters(),
+        opt_style_clf = torch.optim.AdamW(
+            self.style_classifier.parameters(),
+            lr=self.lrs["classifiers"],
+            weight_decay=self.weight_decay,
+        )
+        opt_content_clf = torch.optim.AdamW(
+            self.content_classifier.parameters(),
             lr=self.lrs["classifiers"],
             weight_decay=self.weight_decay,
         )
@@ -1018,7 +1020,7 @@ class UnlearningVAE(LightningModule):
             lr=self.lrs["unlearn"],
             weight_decay=self.weight_decay,
         )
-        return [opt_vae, opt_classifiers, opt_unlearn]
+        return [opt_vae, opt_style_clf, opt_content_clf, opt_unlearn]
 
     # ──────────────────────────────────────────────────────────────────────────
     # Forward
@@ -1033,7 +1035,7 @@ class UnlearningVAE(LightningModule):
     # ──────────────────────────────────────────────────────────────────────────
 
     def training_step(self, batch, batch_idx):
-        opt_vae, opt_classifiers, opt_unlearn = self.optimizers()
+        opt_vae, opt_style_clf, opt_content_clf, opt_unlearn = self.optimizers()
 
         # ── Données ──────────────────────────────────────────────────────────
         suv_source    = batch["source"][tio.DATA].float()
@@ -1048,11 +1050,8 @@ class UnlearningVAE(LightningModule):
 
         # ══════════════════════════════════════════════════════════════════════
         # STAGE 1 — Warmup
-        # But : apprendre simultanément la tâche de reconstruction ET les deux
-        # classifieurs de domaine, pour que le stage 2 parte d'une bonne base.
         # ══════════════════════════════════════════════════════════════════════
         if is_stage_1:
-            # Forward VAE complet
             x_hat, mu_content, logvar_content, mu_style, logvar_style = self.vae(
                 x, sample_posterior=True
             )
@@ -1069,39 +1068,41 @@ class UnlearningVAE(LightningModule):
             )
 
             # Classifieurs — graphe complet (pas de detach), les deux apprennent
-            z_content = reparameterize(mu_content, logvar_content)
-            z_style   = reparameterize(mu_style, logvar_style)
+            # z_content = reparameterize(mu_content, logvar_content)
+            # z_style   = reparameterize(mu_style, logvar_style)
 
-            logits_style   = self.style_classifier(z_style)
-            logits_content = self.content_classifier(z_content)
+            logits_style   = self.style_classifier(mu_style)
+            logits_content = self.content_classifier(mu_content)
 
             loss_dm_style   = F.cross_entropy(logits_style, domain_labels)
             loss_dm_content = F.cross_entropy(logits_content, domain_labels)
             loss_classifiers = loss_dm_style + loss_dm_content
 
-            total_loss =  loss_classifiers # + loss_vae
+            total_loss = loss_classifiers + loss_vae
 
             opt_vae.zero_grad()
-            opt_classifiers.zero_grad()
+            opt_style_clf.zero_grad()
+            opt_content_clf.zero_grad()
             self.manual_backward(total_loss)
             opt_vae.step()
-            opt_classifiers.step()
+            opt_style_clf.step()
+            opt_content_clf.step()
+            
 
             self._log_dict({
-                "train/stage1_rec_loss":         loss_rec,
-                "train/stage1_kl_content":       loss_kl_content,
-                "train/stage1_kl_style":         loss_kl_style,
-                "train/stage1_dm_style":         loss_dm_style,
-                "train/stage1_dm_content":       loss_dm_content,
-                "train/stage1_total":            total_loss,
+                "train/rec_loss":         loss_rec,
+                "train/kl_content":       loss_kl_content,
+                "train/kl_style":         loss_kl_style,
+                "train/dm_style":         loss_dm_style,
+                "train/dm_content":       loss_dm_content,
+                "train/total":            total_loss,
             }, bs)
 
         # ══════════════════════════════════════════════════════════════════════
         # STAGE 2 — Unlearning (3 étapes dissociées)
         # ══════════════════════════════════════════════════════════════════════
         else:
-            # ── Étape A : tâche de reconstruction ────────────────────────────
-            # Mise à jour du VAE complet — reconstruction fidèle + régularisation KL.
+            # feature_map = self.iffn.forward(x)
             x_hat, mu_content, logvar_content, mu_style, logvar_style = self.vae(
                 x, sample_posterior=True
             )
@@ -1130,23 +1131,23 @@ class UnlearningVAE(LightningModule):
                 z_content_det = reparameterize(mu_c_det, lv_c_det)
                 z_style_det   = reparameterize(mu_s_det, lv_s_det)
 
-            logits_style_det   = self.style_classifier(z_style_det)
+            for _ in range(self.k_style_steps):
+                logits_style_det   = self.style_classifier(z_style_det)
+                loss_dm_style      = F.cross_entropy(logits_style_det, domain_labels)
+                opt_style_clf.zero_grad()
+                self.manual_backward(loss_dm_style)
+                torch.nn.utils.clip_grad_norm_(self.style_classifier.parameters(), max_norm=1.0)
+                opt_style_clf.step()
+            
+            
             logits_content_det = self.content_classifier(z_content_det)
-
-            loss_dm_style   = F.cross_entropy(logits_style_det,   domain_labels)
             loss_dm_content = F.cross_entropy(logits_content_det, domain_labels)
-            loss_classifiers = loss_dm_style + loss_dm_content
-
-            opt_classifiers.zero_grad()
-            self.manual_backward(loss_classifiers)
-            opt_classifiers.step()
+            opt_content_clf.zero_grad()
+            self.manual_backward(loss_dm_content)
+            torch.nn.utils.clip_grad_norm_(self.content_classifier.parameters(), max_norm=1.0)
+            opt_content_clf.step()
 
             # ── Étape C : confusion loss (encodeur seul) ─────────────────────
-            # Nouveau forward propre sur l'encodeur — le décodeur et le
-            # ContourSkipEncoder ne sont PAS mis à jour ici.
-            # On pousse z_content à être non-discriminant (KL → uniforme).
-            # z_style n'est PAS concerné par la confusion loss — on veut
-            # qu'il reste discriminant.
             self.vae.content_style_encoder.train()
             for p in self.vae.content_style_encoder.parameters():
                 p.requires_grad = True
@@ -1159,16 +1160,17 @@ class UnlearningVAE(LightningModule):
 
             opt_unlearn.zero_grad()
             self.manual_backward(loss_confusion)
+            torch.nn.utils.clip_grad_norm_(self._encoder_parameters(), max_norm=1.0)
             opt_unlearn.step()
 
             # ── Logs stage 2 ─────────────────────────────────────────────────
             self._log_dict({
-                "train/stage2_rec_loss":     loss_rec,
-                "train/stage2_kl_content":   loss_kl_content,
-                "train/stage2_kl_style":     loss_kl_style,
-                "train/stage2_dm_style":     loss_dm_style,
-                "train/stage2_dm_content":   loss_dm_content,
-                "train/stage2_confusion":    loss_confusion,
+                "train/rec_loss":     loss_rec,
+                "train/kl_content":   loss_kl_content,
+                "train/kl_style":     loss_kl_style,
+                "train/dm_style":     loss_dm_style,
+                "train/dm_content":   loss_dm_content,
+                "train/confusion":    loss_confusion,
             }, bs)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1215,6 +1217,13 @@ class UnlearningVAE(LightningModule):
         x_01     = (x.clamp(-1, 1) + 1.0) / 2.0
         x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
         ssim_score = self.ssim(x_hat_01, x_01)
+        
+        # Score composite : bonne reconstruction + classifieur confus sur z_content
+        # domain_acc_excess = combien content_acc dépasse le niveau du hasard
+        chance_level      = 1.0 / self.num_domains
+        content_acc_excess = (content_acc - chance_level).clamp(min=0.0)
+        style_acc_deficit  = (1.0 - style_acc).clamp(min=0.0)   # on pénalise si style_acc chute
+        composite_score    = loss_rec + 0.1 * content_acc_excess + 0.1 * style_acc_deficit
 
         self._log_dict({
             "val/rec_loss":        loss_rec,
@@ -1226,6 +1235,7 @@ class UnlearningVAE(LightningModule):
             "val/ssim":            ssim_score,
             "val/style_acc":       style_acc,    # doit rester haute
             "val/content_acc":     content_acc,  # doit tendre vers 1/num_domains
+            "val/composite_score": composite_score,
         }, bs)
 
         if batch_idx == 0:
@@ -1265,3 +1275,6 @@ class UnlearningVAE(LightningModule):
                 caption=f"Gauche : PET source | Droite : PET harmonisée (epoch {self.current_epoch})"
             )
         })
+        
+        
+        

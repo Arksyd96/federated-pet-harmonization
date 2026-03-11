@@ -16,7 +16,8 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer import Trainer
 
 from modules.data import MultiDomainUnlearningDataModule
-from modules.models.unet import SpectralUNetWithIntermediateFeatures, UnlearningUNet
+from modules.models.unet import UNetWithIntermediateFeatures, UnlearningUNet, UNet
+from modules.models.domain_classifier import DeepMultiLevelDomainClassifier, DomainClassifier
 from modules.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -60,26 +61,35 @@ def main(args):
     # 3. DataModule
     datamodule = MultiDomainUnlearningDataModule(**config.get('datamodule', {}))
 
-    unet = SpectralUNetWithIntermediateFeatures(**config.get('unet', {}))
+    # 4. Modèles
+    unet = UNet(**config.get('unet', {}))
+    feature_extractor = ImageFrequencyFusionModel(**config.get('feature_extractor', {}))
+    domain_classifier = DomainClassifier(**config.get('domain_classifier', {}))
+
     # 5. Pipeline Lightning
     if args.resume_checkpoint:
         logger.info(f"Reprise depuis : {args.resume_checkpoint}")
         pipeline = UnlearningUNet.load_from_checkpoint(
             args.resume_checkpoint,
             model=unet,
+            domain_classifier=domain_classifier,
+            feature_extractor=feature_extractor,
             strict=False,
-            **config.get('pipeline', {})
+            **config.get('pipeline', {}),
         )
     else:
         pipeline = UnlearningUNet(
             model=unet,
-            **config.get('pipeline', {})
+            domain_classifier=domain_classifier,
+            feature_extractor=feature_extractor,
+            **config.get('pipeline', {}),
         )
 
     # 6. Callbacks
     callbacks = [
         ModelCheckpoint(
             dirpath=os.path.join(save_dir, "./checkpoints"),
+            filename="{epoch:02d}",
             **config.get('model_checkpoint', {})
         )
     ]
