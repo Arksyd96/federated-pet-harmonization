@@ -12,6 +12,7 @@ from pytorch_lightning import LightningDataModule
 import nibabel as nib
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 import torchio as tio
 
@@ -908,4 +909,293 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
             )
         return None      
     
-    
+
+
+# =============================================================================
+# Dataset in-memory :
+# =============================================================================
+
+class InMemoryVolumeDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        subjects: List[dict],          
+        patch_size: Tuple[int, int, int],
+        augment: bool = False,
+        label_prob_body: float = 0.95,  # probabilité de cropper dans le corps
+    ):
+        self._subjects       = subjects
+        self.patch_size      = patch_size
+        self.augment         = augment
+        self.label_prob_body = label_prob_body
+
+        self._flip = tio.RandomFlip(axes=(0, 1, 2), p=0.5) if augment else None
+
+    def __len__(self) -> int:
+        return len(self._subjects)
+
+    def _random_label_crop(self, source: torch.Tensor, body: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        _, D, H, W = source.shape
+        pd, ph, pw = self.patch_size
+
+        # Candidats de départ valides (le patch doit tenir dans le volume)
+        d_max = max(D - pd, 0)
+        h_max = max(H - ph, 0)
+        w_max = max(W - pw, 0)
+
+        # Avec probabilité label_prob_body, on centre le crop dans le corps
+        if torch.rand(1).item() < self.label_prob_body:
+            coords = torch.nonzero(body[0], as_tuple=False)  # (N, 3)
+            if len(coords) > 0:
+                idx = torch.randint(len(coords), (1,)).item()
+                cd, ch, cw = coords[idx].tolist()
+                # Centrer le patch sur ce voxel, clampé dans les bornes
+                d0 = int(np.clip(cd - pd // 2, 0, d_max))
+                h0 = int(np.clip(ch - ph // 2, 0, h_max))
+                w0 = int(np.clip(cw - pw // 2, 0, w_max))
+            else:
+                d0 = torch.randint(0, d_max + 1, (1,)).item()
+                h0 = torch.randint(0, h_max + 1, (1,)).item()
+                w0 = torch.randint(0, w_max + 1, (1,)).item()
+        else:
+            d0 = torch.randint(0, d_max + 1, (1,)).item()
+            h0 = torch.randint(0, h_max + 1, (1,)).item()
+            w0 = torch.randint(0, w_max + 1, (1,)).item()
+
+        src_patch  = source[:, d0:d0+pd, h0:h0+ph, w0:w0+pw]
+        body_patch = body[:, d0:d0+pd, h0:h0+ph, w0:w0+pw]
+        return src_patch, body_patch
+
+    def __getitem__(self, idx: int) -> dict:
+        subj = self._subjects[idx]
+
+        source = subj["source"].clone()       # (1, D, H, W)
+        body   = subj["sampling_map"].clone() # (1, D, H, W)
+
+        # Crop guidé par le body label
+        source, body = self._random_label_crop(source, body)
+
+        # Augmentation
+        if self.augment and self._flip is not None:
+            tmp = tio.Subject(
+                source=tio.Image(tensor=source, type=tio.INTENSITY),
+                sampling_map=tio.Image(tensor=body, type=tio.LABEL),
+            )
+            tmp    = self._flip(tmp)
+            source = tmp["source"][tio.DATA]
+            body   = tmp["sampling_map"][tio.DATA]
+
+        return {
+            "source":       {tio.DATA: source},
+            "sampling_map": {tio.DATA: body},
+            "domain_id":    subj["domain_id"],
+            "subject_name": subj["subject_name"],
+            "domain_name":  subj["domain_name"],
+        }
+
+
+# =============================================================================
+# DataModule
+# =============================================================================
+
+class InMemoryUnlearningDataModule(LightningDataModule):
+    def __init__(
+        self,
+        root_dir: str,
+        split_config: SplitConfigType = 0.8,
+        batch_size: int = 4,
+        patch_size: tuple = (5, 64, 64),
+        num_workers: int = 8,
+        queue_max_length: int = 600,    # ignoré, conservé pour compatibilité YAML
+        samples_per_volume: int = 4,    # ignoré, conservé pour compatibilité YAML
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.root_dir   = root_dir
+        self.split_config = split_config
+        self.batch_size = batch_size
+        self.patch_size = tuple(patch_size)
+        self.num_workers = num_workers
+        self.seed = seed
+
+        self.domain_to_id  = {}
+        self._train_data:  List[dict] = []
+        self._val_data:    List[dict] = []
+        self._val_subjects: List[tio.Subject] = []   # pour test_dataloader
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Helpers
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def get_pet_body_files(self, files):
+        pet_files  = [f for f in files if f.startswith('PET')  and (f.endswith('.nii') or f.endswith('.nii.gz'))]
+        body_files = [f for f in files if f.startswith('body') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
+        return (pet_files[0] if pet_files else None,
+                body_files[0] if body_files else None)
+
+    def _load_subjects_into_ram(
+        self,
+        subj_names: List[str],
+        domain_path: str,
+        domain_name: str,
+        domain_id: int,
+        desc: str,
+    ) -> List[dict]:
+        """
+        Charge chaque volume en RAM via tio (ToCanonical garantit l'orientation),
+        et retourne une liste de dicts de tenseurs prêts à l'emploi.
+        """
+        transform = tio.Compose([Float32Lambda(), tio.ToCanonical()])
+        result    = []
+
+        for name in tqdm(subj_names, desc=desc, unit="vol"):
+            path = os.path.join(domain_path, name)
+            pet_file, body_file = self.get_pet_body_files(os.listdir(path))
+            if not (pet_file and body_file):
+                continue
+
+            subject = tio.Subject(
+                source=tio.Image(os.path.join(path, pet_file),  type=tio.INTENSITY),
+                sampling_map=tio.Image(os.path.join(path, body_file), type=tio.LABEL),
+                domain_id=torch.tensor(domain_id).long(),
+                subject_name=name,
+                domain_name=domain_name,
+            )
+            loaded = transform(subject)
+
+            result.append({
+                "source":       loaded["source"][tio.DATA].float(),       # (1, D, H, W)
+                "sampling_map": loaded["sampling_map"][tio.DATA].float(), # (1, D, H, W)
+                "domain_id":    loaded["domain_id"],
+                "subject_name": loaded["subject_name"],
+                "domain_name":  loaded["domain_name"],
+            })
+
+        return result
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # setup
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def setup(self, stage=None):
+        if not os.path.exists(self.root_dir):
+            raise FileNotFoundError(f"Dossier racine introuvable : {self.root_dir}")
+
+        domain_names = sorted([
+            d for d in os.listdir(self.root_dir)
+            if os.path.isdir(os.path.join(self.root_dir, d))
+        ])
+        self.domain_to_id = {name: i for i, name in enumerate(domain_names)}
+        print(f"Mapping domaines : {self.domain_to_id}\n")
+
+        rng = np.random.RandomState(self.seed)
+
+        for i, domain_name in enumerate(domain_names):
+            domain_id   = self.domain_to_id[domain_name]
+            domain_path = os.path.join(self.root_dir, domain_name)
+
+            subjects_in_domain = sorted([
+                s for s in os.listdir(domain_path)
+                if os.path.isdir(os.path.join(domain_path, s))
+            ])
+            rng.shuffle(subjects_in_domain)
+            total_subj = len(subjects_in_domain)
+
+            current_config = (
+                self.split_config[i]
+                if isinstance(self.split_config, list)
+                else self.split_config
+            )
+
+            if isinstance(current_config, float):
+                train_count = int(total_subj * current_config)
+                test_count  = total_subj - train_count
+            elif isinstance(current_config, (tuple, list)) and len(current_config) == 2:
+                train_count, test_count = current_config
+                if train_count + test_count > total_subj:
+                    print(f"⚠️  {domain_name} : seulement {total_subj} sujets, plafonnement.")
+                    train_count = min(train_count, total_subj)
+                    test_count  = min(test_count, total_subj - train_count)
+            else:
+                raise TypeError(f"split_config invalide pour {domain_name} : {current_config}")
+
+            train_names = subjects_in_domain[:train_count]
+            val_names   = subjects_in_domain[train_count:train_count + test_count]
+            print(f"Domaine {domain_name:12} → Train: {len(train_names):3d}, Val: {len(val_names):3d} (Total: {total_subj})")
+
+            self._train_data.extend(self._load_subjects_into_ram(
+                train_names, domain_path, domain_name, domain_id,
+                desc=f"  [RAM] {domain_name} train",
+            ))
+            val_data = self._load_subjects_into_ram(
+                val_names, domain_path, domain_name, domain_id,
+                desc=f"  [RAM] {domain_name} val  ",
+            )
+            self._val_data.extend(val_data)
+
+        rng.shuffle(self._train_data)
+        rng.shuffle(self._val_data)
+
+        # Reconstruire des tio.Subject pour test_dataloader (volumes entiers)
+        self._val_subjects = [
+            tio.Subject(
+                source=tio.Image(tensor=d["source"], type=tio.INTENSITY),
+                sampling_map=tio.Image(tensor=d["sampling_map"], type=tio.LABEL),
+                domain_id=d["domain_id"],
+                subject_name=d["subject_name"],
+                domain_name=d["domain_name"],
+            )
+            for d in self._val_data
+        ]
+
+        print(
+            f"\n[RAM] Chargement terminé — "
+            f"{len(self._train_data)} volumes train, "
+            f"{len(self._val_data)} volumes val en mémoire."
+        )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # DataLoaders
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def train_dataloader(self):
+        dataset = InMemoryVolumeDataset(
+            self._train_data,
+            patch_size=self.patch_size,
+            augment=True,
+        )
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+        )
+
+    def val_dataloader(self):
+        dataset = InMemoryVolumeDataset(
+            self._val_data,
+            patch_size=self.patch_size,
+            augment=False,
+        )
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=min(4, self.num_workers),
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+        )
+
+    def test_dataloader(self):
+        """Volumes entiers en mémoire pour l'inférence patch-wise."""
+        if not self._val_subjects:
+            return None
+        test_dataset = tio.SubjectsDataset(self._val_subjects, transform=None)
+        return tio.SubjectsLoader(
+            test_dataset,
+            batch_size=1,
+            num_workers=multiprocessing.cpu_count() // 2,
+            pin_memory=True,
+            shuffle=False,
+        )

@@ -21,7 +21,6 @@ from modules.models.base import (
 )
 from modules.models.attention import Attention, zero_module
 from torchmetrics.image import StructuralSimilarityIndexMeasure
-from modules.models.fft import FFTHighPassFilter
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(
@@ -621,306 +620,150 @@ class TranslationUNet(LightningModule):
                 "frequency": 1,
             },
         }
-        
 
-class CascadeDomainClassifier(nn.Module):
-    """
-    Parameters
-    ----------
-    feature_channels : List[int]
-        Canaux de chaque feature capturée (shallow → deep).
-        Exemple pour hid_chs=[64,128,256,512] : [64, 128, 256, 512, 512]
-    cascade_strides : List[int]
-        Stride entre chaque paire de features consécutives.
-        Calculé automatiquement dans UnlearningUNet depuis les strides du UNet.
-        Exemple : [1, 2, 2, 1] pour strides=[1,2,2,2] et depth=4.
-    num_domains : int
-    hidden_dim : int  — doit être divisible par 32 (GroupNorm)
-    """
-
-    def __init__(
-        self,
-        feature_channels: List[int],
-        cascade_strides: List[int],
-        num_domains: int,
-        hidden_dim: int = 256,
-    ):
-        super().__init__()
-
-        assert len(cascade_strides) == len(feature_channels) - 1, (
-            "cascade_strides doit avoir len(feature_channels) - 1 éléments."
-        )
-
-        self.cascade_strides = cascade_strides # for debugging/visualization
-        n_groups = 32   # hidden_dim doit être divisible par 32
-
-        # Projection initiale : feature[0] → hidden_dim (pas de changement spatial)
-        self.init_proj = nn.Sequential(
-            nn.Conv2d(feature_channels[0], hidden_dim, kernel_size=1),
-            nn.GroupNorm(n_groups, hidden_dim),
-            nn.SiLU(),
-        )
-
-        # Pour chaque transition : un downsampler optionnel + un bloc de fusion
-        self.downsamplers = nn.ModuleList()
-        self.merge_blocks  = nn.ModuleList()
-
-        for i, stride in enumerate(cascade_strides):
-            # Convolution stridée sur h si résolution à réduire (comme BasicDown)
-            if stride > 1:
-                self.downsamplers.append(
-                    nn.Sequential(
-                        nn.Conv2d(hidden_dim, hidden_dim, kernel_size=stride, stride=stride),
-                        nn.GroupNorm(n_groups, hidden_dim),
-                        nn.SiLU(),
-                    )
-                )
-            else:
-                self.downsamplers.append(nn.Identity())
-
-            # Fusion : cat(h_downsampled, feature[i+1]) → hidden_dim
-            self.merge_blocks.append(
-                nn.Sequential(
-                    nn.Conv2d(hidden_dim + feature_channels[i + 1], hidden_dim,
-                              kernel_size=3, padding=1),
-                    nn.GroupNorm(n_groups, hidden_dim),
-                    nn.SiLU(),
-                )
-            )
-
-        # Classifieur final
-        self.classifier = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),    # global spatial pooling uniquement ici
-            nn.Flatten(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, num_domains),
-        )
-
-    def forward(self, features: List[torch.Tensor]) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        features : List[Tensor] shallow → deep, chacun (B, C_i, H_i, W_i)
-
-        Returns
-        -------
-        logits : (B, num_domains)
-        """
-        h = self.init_proj(features[0])
-
-        for i, (downsampler, merge_block) in enumerate(
-            zip(self.downsamplers, self.merge_blocks)
-        ):
-            h = downsampler(h)                              # réduction spatiale si stride > 1
-            h = merge_block(torch.cat([h, features[i + 1]], dim=1))   # fusion
-
-        return self.classifier(h)
-
-
-# =============================================================================
-# 2. UNetWithIntermediateFeatures
-# =============================================================================
-
-class SpectralUNetWithIntermediateFeatures(UNet):
-    def __init__(
-        self,
-        input_shape: Tuple[int, int] = (64, 64),
-        fft_sigma: float = 7.5,
-        in_ch: int = 5,
-        out_ch: int = 5,
-        spatial_dims: int = 2,
-        hid_chs: List[int] = [64, 128, 256, 512],
+class UNetWithIntermediateFeatures(UNet):
+    def __init__(self, 
+        in_ch: int = 1,
+        out_ch: int = 1,
+        spatial_dims: int = 3,
+        hid_chs: List[int] = [256, 256, 512, 1024],
         kernel_sizes: List[int] = [3, 3, 3, 3],
         strides: List[int] = [1, 2, 2, 2],
-        temb_channels: Optional[int] = None,
+        temb_channels: int = 128,
+        max_period: int = 1000,
         scale_shift_norm: bool = True,
-        act_name: Tuple[str, dict] = ('swish', {}),
-        norm_name: Tuple[str, dict] = ('group', {'num_groups': 32, 'affine': True}),
+        act_name: Tuple[str, Dict] = ('swish', {}),
+        norm_name: Tuple[str, Dict] = ('group', {'num_groups': 32, 'affine': True}),
         cond_embedder: Optional[nn.Module] = None,
+        deep_supervision: bool = False,
         use_res_block: bool = True,
+        estimate_variance: bool = False,
+        use_self_conditioning: bool = False,
         dropout: float = 0.0,
         learnable_interpolation: bool = True,
         use_attention: Union[str, List[str]] = 'none',
-        num_res_blocks: int = 2
-    ):
-        # On passe deep_supervision=False et estimate_variance=False
-        # use_self_conditioning=False : retiré du décodeur
-        super().__init__(
-            in_ch=in_ch,
-            out_ch=out_ch,
-            spatial_dims=spatial_dims,
-            hid_chs=hid_chs,
-            kernel_sizes=kernel_sizes,
-            strides=strides,
-            temb_channels=temb_channels,
-            max_period=None,  # Pas d'embedding temporel
-            scale_shift_norm=scale_shift_norm,
-            act_name=act_name,
-            norm_name=norm_name,
-            cond_embedder=cond_embedder,
-            deep_supervision=False,
-            use_res_block=use_res_block,
-            estimate_variance=False,
-            use_self_conditioning=False,
-            dropout=dropout,
-            learnable_interpolation=learnable_interpolation,
-            use_attention=use_attention,
-            num_res_blocks=num_res_blocks,
-        )
+        num_res_blocks: int = 2,
+        **kwargs):
+        super().__init__(in_ch, out_ch, spatial_dims, hid_chs, kernel_sizes, strides,
+                         temb_channels, max_period, scale_shift_norm, act_name, norm_name,
+                         cond_embedder, deep_supervision, use_res_block, estimate_variance,
+                         use_self_conditioning, dropout, learnable_interpolation,
+                         use_attention, num_res_blocks, **kwargs)
 
-        # Exposé pour que UnlearningUNet construise le classifieur cascade
-        self.hid_chs = hid_chs
-        self.strides  = strides
-
-        # ── Remplacement de in_conv : accepte in_ch * 2 (x + fft_x) ─────────
-        self.in_conv = BasicBlock(
-            spatial_dims, in_ch * 2, hid_chs[0],
-            kernel_size=kernel_sizes[0], stride=strides[0],
-        )
-
-        # ── Filtre FFT fixe (pas de paramètres appris) ────────────────────────
-        self.fft_filter = FFTHighPassFilter(input_shape=input_shape, sigma=fft_sigma)
-
-        # ── Indices des features à capturer (skip connections) ────────────────
-        self._feature_indices: List[int] = []
+        self._feature_indices: List[int] = []  
         cursor = 0
         for i in range(1, self.depth):
+            # Index du dernier res block de ce niveau
             last_res_idx = cursor + self.num_res_blocks - 1
             self._feature_indices.append(last_res_idx)
             cursor += self.num_res_blocks
             if i < self.depth - 1:
-                cursor += 1     # BasicDown compte dans l'index
-
-    def forward(
-        self,
-        x_t: torch.Tensor,
-        t: Optional[torch.Tensor] = None,
-        condition: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        y, _ = self.forward_with_features(x_t, t=t, condition=condition)
-        return y
+                cursor += 1  # BasicDown compte aussi
 
     def forward_with_features(
         self,
         x_t: torch.Tensor,
         t: Optional[torch.Tensor] = None,
         condition: Optional[torch.Tensor] = None,
+        self_cond: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-        """
-        Returns
-        -------
-        y               : (B, out_ch, H, W) reconstruction
-        encoder_features: List[Tensor] — [in_conv_out, last_res_lvl1, ..., latent]
-                          Ce sont exactement les tenseurs utilisés comme
-                          skip connections par le décodeur.
-        """
-        # ── FFT concat ───────────────────────────────────────────────────────
-        fft_x   = self.fft_filter(x_t)                      # (B, C, H, W), pas de grad
-        x_input = torch.cat([x_t, fft_x], dim=1)            # (B, 2C, H, W)
+        # --- Embeddings (time + condition) ---
+        if t is None:   time_emb = None
+        else:           time_emb = self.time_embedder(t)
 
-        # ── Embeddings ───────────────────────────────────────────────────────
-        time_emb = None if (t is None or self.time_embedder is None) \
-                   else self.time_embedder(t)
-        cond_emb = None if (condition is None or self.cond_embedder is None) \
-                   else self.cond_embedder(condition)
+        if (condition is None) or (self.cond_embedder is None):
+            cond_emb = None
+        else:
+            cond_emb = self.cond_embedder(condition)
+
         emb = save_add(time_emb, cond_emb)
 
-        # ── Encodeur ─────────────────────────────────────────────────────────
-        x = [self.in_conv(x_input)]
-        encoder_features: List[torch.Tensor] = [x[0]]      # in_conv output
+        # --- Self-conditioning ---
+        if self.use_self_conditioning:
+            self_cond = torch.zeros_like(x_t) if self_cond is None else x_t
+            x_t = torch.cat([x_t, self_cond], dim=1)
+
+        # --- Encodeur ---
+        x = [self.in_conv(x_t)]
+        encoder_features: List[torch.Tensor] = [x[0]]  # level_0
 
         for i in range(len(self.in_blocks)):
             feat = self.in_blocks[i](x[i], emb)
             x.append(feat)
+            # On capture la feature si c'est la fin d'un niveau
             if i in self._feature_indices:
                 encoder_features.append(feat)
 
-        # ── Middle (espace latent) ────────────────────────────────────────────
+        # --- Middle block (espace latent) ---
         h = self.middle_block(x[-1], emb)
-        encoder_features.append(h)                          # latent
+        encoder_features.append(h)  # latent = dernier élément
 
-        # ── Décodeur simplifié ────────────────────────────────────────────────
+        # --- Décodeur (identique à forward()) ---
+        y_ver = []
         for i in range(len(self.out_blocks), 0, -1):
             h = torch.cat([h, x.pop()], dim=1)
+            depth, j = i // (self.num_res_blocks + 1), i % (self.num_res_blocks + 1) - 1
+            (
+                y_ver.append(self.outc_ver[depth - 1](h))
+                if (len(self.outc_ver) >= depth > 0) and (j == 0)
+                else None
+            )
             h = self.out_blocks[i - 1](h, emb)
 
         y = self.outc(h)
         return y, encoder_features
+    
 
-
-# =============================================================================
-# 3. UnlearningUNet
-# =============================================================================
 
 class UnlearningUNet(LightningModule):
     def __init__(
         self,
-        model: SpectralUNetWithIntermediateFeatures,
+        model: nn.Module,
+        domain_classifier: nn.Module,
+        feature_extractor: nn.Module,
         num_domains: int = 3,
-        classifier_hidden_dim: int = 256,
-        warmup_epochs: int = 10,
-        beta_confusion: float = 0.5,
-        beta_max: float = 8.0,
-        lr_dm_min_factor: float = 0.05,
-        lambda_composite: float = 0.1,
-        k_conf_steps: int = 1,
-        max_epochs: int = 200,
+        warmup_epochs: int = 5,
+        beta_confusion: float = 1.0,
+        beta_max: float = 5.0,            # valeur max de beta en fin de stage 2
+        lr_dm_min_factor: float = 0.05,   # lr_dm décroît jusqu'à lr_dm * ce facteur
+        lambda_composite: float = 1.0,    # poids du terme domain_acc dans le score composite
+        k_conf_steps : int = 1,           # nombre de steps de confusion par step principal
+        max_epochs: int = 15,            # nécessaire pour le scheduler
         lr_main: float = 1e-4,
         lr_dm: float = 1e-4,
-        lr_conf: float = 1e-5,
+        lr_conf: float = 1e-5,  # plus faible : on désapprend doucement
         weight_decay: float = 1e-5,
         suv_global_log_max: float = 6.0,
+        recon_loss_fn=F.l1_loss,
     ):
         super().__init__()
 
         self.model              = model
+        self.domain_classifier  = domain_classifier
+        self.feature_extractor  = feature_extractor
         self.num_domains        = num_domains
         self.warmup_epochs      = warmup_epochs
-        self.beta               = beta_confusion
+        self.beta               = beta_confusion    # valeur courante (mise à jour par scheduler)
         self.beta_max           = beta_max
+        self.k_conf_steps       = k_conf_steps
         self.lr_dm_min_factor   = lr_dm_min_factor
         self.lambda_composite   = lambda_composite
-        self.k_conf_steps       = k_conf_steps
         self.max_epochs         = max_epochs
         self.lrs                = {"main": lr_main, "dm": lr_dm, "conf": lr_conf}
         self.weight_decay       = weight_decay
         self.suv_global_log_max = suv_global_log_max
-
-        # ── Construction automatique du CascadeDomainClassifier ──────────────
-        # feature_channels : [hid_chs[0], hid_chs[1], ..., hid_chs[-1], hid_chs[-1]]
-        #   = in_conv output + un par niveau encodeur + latent (middle_block)
-        hid_chs  = model.hid_chs
-        strides  = model.strides
-        depth    = model.depth
-
-        feature_channels = list(hid_chs) + [hid_chs[-1]]
-
-        # cascade_strides : stride entre features[i] et features[i+1]
-        # features[i] est capturé AVANT le BasicDown de niveau i, donc la
-        # réduction spatiale se produit entre features[i] et features[i+1].
-        # → cascade_strides = [1] + strides[1:depth-1] + [1]
-        #   [1]              : in_conv → last_res_lvl1 (même résolution)
-        #   strides[1:depth-1] : transitions entre niveaux
-        #   [1]              : last_res_lvlN → latent (même résolution)
-        cascade_strides = [1] + list(strides[1:depth - 1]) + [1]
-
-        self.domain_classifier = CascadeDomainClassifier(
-            feature_channels=feature_channels,
-            cascade_strides=cascade_strides,
-            num_domains=num_domains,
-            hidden_dim=classifier_hidden_dim,
-        )
-
+        self.loss_fn            = recon_loss_fn
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
+
+        # Optimisation manuelle obligatoire (multi-optimiseurs adversariaux)
         self.automatic_optimization = False
 
-        self.save_hyperparameters(ignore=["model"])
+        self.save_hyperparameters(ignore=["model", "domain_classifier", "loss_fn", "feature_extractor"])
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Confusion loss (Dinsdale) — inline
-    # ──────────────────────────────────────────────────────────────────────────
-
+    # ------------------------------------------------------------------
+    # Utilitaires
+    # ------------------------------------------------------------------
+    
     def _confusion_loss(self, logits: torch.Tensor) -> torch.Tensor:
         """
         Loss de Dinsdale : -mean(log(softmax(logits))).
@@ -929,280 +772,290 @@ class UnlearningUNet(LightningModule):
         p = F.softmax(logits, dim=1)
         return -torch.log(p + 1e-8).mean()
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Groupes de paramètres
-    # ──────────────────────────────────────────────────────────────────────────
+    def _apply_patch_mask(
+        self,
+        x: torch.Tensor,
+        mask_ratio: float = 0.15,
+        patch_size: int = 8,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        B, C, H, W = x.shape
+        x_masked = x.clone()
 
-    def _encoder_parameters(self) -> List[nn.Parameter]:
-        return (
-            list(self.model.in_conv.parameters())
-            + list(self.model.in_blocks.parameters())
-            + list(self.model.middle_block.parameters())
-        )
+        n_patches_h = H // patch_size
+        n_patches_w = W // patch_size
+        n_patches_total = n_patches_h * n_patches_w
+        n_masked = max(1, int(n_patches_total * mask_ratio))
 
-    def _freeze_encoder(self):
-        for m in [self.model.in_conv, self.model.in_blocks, self.model.middle_block]:
-            m.eval()
-            for p in m.parameters():
-                p.requires_grad = False
+        for b in range(B):
+            # Tirage aléatoire des indices de patches à masquer
+            indices = torch.randperm(n_patches_total, device=x.device)[:n_masked]
+            for idx in indices:
+                ph = (idx // n_patches_w) * patch_size
+                pw = (idx %  n_patches_w) * patch_size
+                x_masked[b, :, ph:ph + patch_size, pw:pw + patch_size] = 0.0
 
-    def _unfreeze_encoder(self):
-        for m in [self.model.in_conv, self.model.in_blocks, self.model.middle_block]:
-            m.train()
-            for p in m.parameters():
-                p.requires_grad = True
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Forward encodeur seul (étapes B et C — pas de décodeur)
-    # ──────────────────────────────────────────────────────────────────────────
-
-    def _encode_features(self, x: torch.Tensor) -> List[torch.Tensor]:
-        """
-        Produit les mêmes encoder_features que forward_with_features,
-        sans passer par le décodeur. Utilisé aux étapes B et C.
-        """
-        fft_x   = self.model.fft_filter(x)
-        x_input = torch.cat([x, fft_x], dim=1)
-
-        enc_x    = [self.model.in_conv(x_input)]
-        features = [enc_x[0]]
-
-        for i in range(len(self.model.in_blocks)):
-            feat = self.model.in_blocks[i](enc_x[i], None)
-            enc_x.append(feat)
-            if i in self.model._feature_indices:
-                features.append(feat)
-
-        h = self.model.middle_block(enc_x[-1], None)
-        features.append(h)
-        return features
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Utilitaires
-    # ──────────────────────────────────────────────────────────────────────────
+        return x_masked, x
 
     def _normalize(self, suv: torch.Tensor) -> torch.Tensor:
+        """SUV → espace log normalisé [-1, 1]."""
         log = torch.log1p(suv)
         return 2.0 * (log.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
-
+    
     def _denormalize(self, norm_log: torch.Tensor) -> torch.Tensor:
+        """Espace log normalisé [-1, 1] → SUV."""
         log = 0.5 * (norm_log.clamp(-1, 1) + 1.0) * self.suv_global_log_max
         return torch.expm1(log)
-
-    def _log_dict(self, d: dict, batch_size: int):
-        for k, v in d.items():
-            self.log(k, v, prog_bar=True, sync_dist=True,
-                     on_step=True, on_epoch=True, batch_size=batch_size)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x, t=None)
+    
 
     # ──────────────────────────────────────────────────────────────────────────
     # Schedulers cosine
     # ──────────────────────────────────────────────────────────────────────────
-
+    
     def _stage2_progress(self) -> float:
         t = max(0, self.current_epoch - self.warmup_epochs)
         T = max(1, self.max_epochs - self.warmup_epochs)
         return min(t / T, 1.0)
-
+    
     def _scheduled_beta(self) -> float:
-        p         = self._stage2_progress()
+        p = self._stage2_progress()
         beta_init = self.hparams.beta_confusion
         return beta_init + (self.beta_max - beta_init) * (1 - math.cos(math.pi * p)) / 2
-
+    
     def _scheduled_lr_dm(self) -> float:
-        p       = self._stage2_progress()
+        p      = self._stage2_progress()
         lr_init = self.lrs["dm"]
         lr_min  = lr_init * self.lr_dm_min_factor
         return lr_min + (lr_init - lr_min) * (1 + math.cos(math.pi * p)) / 2
-
+    
     def on_train_epoch_start(self):
         if self.current_epoch < self.warmup_epochs:
             return
 
+        # Mise à jour de beta
         self.beta = self._scheduled_beta()
 
+        # Mise à jour du LR du classifieur de domaine directement dans l'optimiseur
         _, opt_dm, _ = self.optimizers()
         new_lr_dm = self._scheduled_lr_dm()
         for pg in opt_dm.param_groups:
             pg["lr"] = new_lr_dm
 
-        self.log("debug/beta", self.beta,     on_step=False, on_epoch=True)
-        self.log("debug/lr_dm", new_lr_dm,    on_step=False, on_epoch=True)
+        # Log des valeurs schedulées (pratique pour vérifier dans WandB)
+        self.log("train/beta_confusion", self.beta,  on_step=False, on_epoch=True)
+        self.log("train/lr_dm",          new_lr_dm,  on_step=False, on_epoch=True)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     # configure_optimizers
-    # ──────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
 
     def configure_optimizers(self):
+        # opt_main : encodeur + décodeur complet (tâche principale)
         opt_main = torch.optim.AdamW(
-            list(self.model.parameters()),
-            lr=self.lrs["main"],
-            weight_decay=self.weight_decay,
+            list(self.model.parameters()) + list(self.feature_extractor.parameters()),
+            lr=self.lrs["main"]
         )
+
+        # opt_dm : classifieurs de domaine seulement
         opt_dm = torch.optim.AdamW(
-            list(self.domain_classifier.parameters()),
-            lr=self.lrs["dm"],
-            weight_decay=self.weight_decay,
+            self.domain_classifier.parameters(),
+            lr=self.lrs["dm"]
         )
+
+        # opt_conf : encodeur seulement (désapprentissage)
         opt_conf = torch.optim.AdamW(
-            self._encoder_parameters(),
-            lr=self.lrs["conf"],
-            weight_decay=self.weight_decay,
+            self.feature_extractor.parameters(),
+            lr=self.lrs["conf"]
         )
+
         return [opt_main, opt_dm, opt_conf]
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     # training_step
-    # ──────────────────────────────────────────────────────────────────────────
-
+    # ------------------------------------------------------------------
     def training_step(self, batch, batch_idx):
         opt_main, opt_dm, opt_conf = self.optimizers()
 
-        suv_source    = batch["source"][tio.DATA].float()
-        domain_labels = batch["domain_id"]
+        # --- Données ---
+        suv_source = batch["source"][tio.DATA].float()
+        domain_labels = batch["domain_id"]  # LongTensor [B], valeurs dans {0, 1, 2}
 
         if suv_source.ndim == 5:
-            suv_source = suv_source.squeeze(1)
+            suv_source = suv_source.squeeze(1)  # (B,1,D,H,W) → (B,D,H,W)
 
-        x          = self._normalize(suv_source)
+        x          = self._normalize(suv_source)  # [-1, 1]
         bs         = x.shape[0]
         is_stage_1 = self.current_epoch < self.warmup_epochs
+        
 
-        # ══════════════════════════════════════════════════════════════════════
+        # ==============================================================
         # STAGE 1 — Warmup
-        # ══════════════════════════════════════════════════════════════════════
+        # ==============================================================
         if is_stage_1:
-            reconstruction, enc_features = self.model.forward_with_features(x, t=None)
-            task_loss = F.l1_loss(reconstruction, x)
+            # Forward complet (tâche + features)
+            feature_map = self.feature_extractor(x)  # [B, C, H', W']
+            reconstruction = self.model.forward(feature_map, t=None)
+            
+            task_loss = self.loss_fn(reconstruction, x)
 
-            logits_dm = self.domain_classifier(enc_features)
-            loss_dm   = F.cross_entropy(logits_dm, domain_labels)
+            logits = self.domain_classifier(feature_map)
+            loss_dm = F.cross_entropy(logits, domain_labels) 
 
+            total_loss = loss_dm + task_loss  # on peut aussi pondérer si besoin
+
+            # Update encodeur + décodeur + classifieurs
             opt_main.zero_grad()
             opt_dm.zero_grad()
-            self.manual_backward(task_loss + loss_dm)
+            self.manual_backward(total_loss)
             opt_main.step()
             opt_dm.step()
 
+            # Logs
             self._log_dict({
                 "train/task_loss":   task_loss,
-                "train/domain_loss": loss_dm,
+                "train/domain_loss": loss_dm
             }, bs)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # STAGE 2 — Unlearning
-        # ══════════════════════════════════════════════════════════════════════
+        # ==============================================================
+        # STAGE 2 — Unlearning Adversarial
+        # ==============================================================
         else:
-            # ── Étape A : reconstruction ──────────────────────────────────────
-            reconstruction, _ = self.model.forward_with_features(x, t=None)
-            task_loss = F.l1_loss(reconstruction, x)
+            feature_map = self.feature_extractor(x)  # [B, C, H', W']
+            reconstruction = self.model.forward(feature_map, t=None)
+            
+            task_loss = self.loss_fn(reconstruction, x)
 
             opt_main.zero_grad()
             self.manual_backward(task_loss)
             opt_main.step()
 
-            # ── Étape B : classifieur sur encodeur gelé ───────────────────────
-            self._freeze_encoder()
-            with torch.no_grad():
-                enc_features_det = self._encode_features(x)
+            # Étape B : mise à jour classifieur (encodeur GELÉ)
+            self.feature_extractor.eval()
+            for p in self.feature_extractor.parameters():
+                p.requires_grad = False
 
-            logits_dm = self.domain_classifier(enc_features_det)
+            with torch.no_grad():
+                detached_feature_map = self.feature_extractor(x)
+
+            logits_dm = self.domain_classifier(detached_feature_map)
             loss_dm   = F.cross_entropy(logits_dm, domain_labels)
 
             opt_dm.zero_grad()
             self.manual_backward(loss_dm)
-            torch.nn.utils.clip_grad_norm_(
-                self.domain_classifier.parameters(), max_norm=1.0
-            )
+            torch.nn.utils.clip_grad_norm_(self.domain_classifier.parameters(), max_norm=1.0)
             opt_dm.step()
 
-            # ── Étape C : confusion loss sur encodeur seul ────────────────────
-            self._unfreeze_encoder()
+            # ----------------------------------------------------------
+            # Étape C : confusion loss (encodeur seul)
+            # ----------------------------------------------------------
+            self.feature_extractor.train()
+            for p in self.feature_extractor.parameters():
+                p.requires_grad = True
+
             for _ in range(self.k_conf_steps):
-                enc_features_conf = self._encode_features(x)
-                logits_conf       = self.domain_classifier(enc_features_conf)
-                loss_conf         = self.beta * self._confusion_loss(logits_conf)
+                feature_map_conf = self.feature_extractor(x)
+                logits_conf      = self.domain_classifier(feature_map_conf)
+                loss_conf        = self.beta * self._confusion_loss(logits_conf)
 
                 opt_conf.zero_grad()
                 self.manual_backward(loss_conf)
-                torch.nn.utils.clip_grad_norm_(
-                    self._encoder_parameters(), max_norm=1.0
-                )
+                torch.nn.utils.clip_grad_norm_(self.feature_extractor.parameters(), max_norm=1.0)
                 opt_conf.step()
 
+            # Logs
             self._log_dict({
                 "train/task_loss":      task_loss,
                 "train/domain_loss":    loss_dm,
                 "train/confusion_loss": loss_conf,
             }, bs)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     # validation_step
-    # ──────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
 
     def validation_step(self, batch, batch_idx):
-        suv_source    = batch["source"][tio.DATA].float()
+        suv_source = batch["source"][tio.DATA].float()
         domain_labels = batch["domain_id"]
 
         if suv_source.ndim == 5:
             suv_source = suv_source.squeeze(1)
 
-        x  = self._normalize(suv_source)
+        x = self._normalize(suv_source)
         bs = x.shape[0]
 
-        reconstruction, enc_features = self.model.forward_with_features(x, t=None)
-        task_loss = F.l1_loss(reconstruction, x)
+        # Forward complet (tâche + features)
+        feature_map = self.feature_extractor(x)  # [B, C, H', W']
+        reconstruction = self.model.forward(feature_map, t=None)
+        
+        task_loss = self.loss_fn(reconstruction, x)
 
-        logits_dm = self.domain_classifier(enc_features)
-        loss_dm   = F.cross_entropy(logits_dm, domain_labels)
-        loss_conf = self._confusion_loss(logits_dm)
-
-        acc               = (logits_dm.argmax(dim=1) == domain_labels).float().mean()
-        chance_level      = 1.0 / self.num_domains
-        domain_acc_excess = (acc - chance_level).clamp(min=0.0)
-        composite_score   = task_loss + self.lambda_composite * domain_acc_excess
-
+        logits = self.domain_classifier(feature_map)
+        loss_dm = F.cross_entropy(logits, domain_labels)
+        loss_conf = self._confusion_loss(logits)
+        
+        # SSIM
         x_01 = (x.clamp(-1, 1) + 1.0) / 2.0
         r_01 = (reconstruction.clamp(-1, 1) + 1.0) / 2.0
         ssim_score = self.ssim(r_01, x_01)
+
+        # Accuracy du classifieur (doit descendre en stage 2)
+        # On prend la prédiction du niveau le plus profond (le latent)
+        # preds = logits[-1].argmax(dim=1)
+        preds = logits.argmax(dim=1)
+        acc = (preds == domain_labels).float().mean()
+
+        # Score composite : bon modèle = faible reconstruction + classifieur confus
+        # domain_acc_excess = combien le classifieur performe au-dessus du hasard
+        chance_level       = 1.0 / self.num_domains
+        domain_acc_excess  = (acc - chance_level).clamp(min=0.0)
+        composite_score    = task_loss + self.lambda_composite * domain_acc_excess
 
         self._log_dict({
             "val/task_loss":       task_loss,
             "val/domain_loss":     loss_dm,
             "val/confusion_loss":  loss_conf,
             "val/ssim":            ssim_score,
-            "val/domain_acc":      acc,
+            "val/domain_acc":      acc, 
             "val/composite_score": composite_score,
         }, bs)
 
+        # Visualisation (premier batch uniquement)
         if batch_idx == 0:
             self._log_images(x, reconstruction, suv_source)
 
         return task_loss
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Logging images
-    # ──────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Utilitaires de log
+    # ------------------------------------------------------------------
+
+    def _log_dict(self, d: dict, batch_size: int):
+        for k, v in d.items():
+            self.log(k, v, prog_bar=True, sync_dist=True, on_step=True,
+                     on_epoch=True, batch_size=batch_size)
 
     def _log_images(self, x_norm, recon_norm, suv_source):
+        """Log WandB : slice centrale de source vs reconstruction."""
         if self.trainer.global_rank != 0:
             return
 
-        suv_pred = self._denormalize(recon_norm)
-        mid      = suv_source.shape[1] // 2
+        # Dénormalisation vers SUV pour l'affichage
+        log_pred = 0.5 * (recon_norm.clamp(-1, 1) + 1.0) * self.suv_global_log_max
+        suv_pred = torch.expm1(log_pred)
 
+        mid = suv_source.shape[1] // 2
         src_slice  = suv_source[:, mid:mid+1, :, :]
         pred_slice = suv_pred[:, mid:mid+1, :, :]
 
         display_max = max(5.0, src_slice.max().item(), pred_slice.max().item())
-        imgs = (torch.cat([src_slice, pred_slice], dim=3) / display_max).clamp(0, 1)
+        imgs = torch.cat([src_slice, pred_slice], dim=3)
+        imgs = (imgs / display_max).clamp(0, 1)
 
         grid = make_grid(imgs, nrow=1, padding=2)
         wandb.log({
             "Validation/Reconstruction": wandb.Image(
                 grid.permute(1, 2, 0).cpu().numpy(),
-                caption=f"Left: PET input | Right: harmonisée (epoch {self.current_epoch})"
+                caption="Left: PET input | Right: PET harmonisée"
             )
         })
+
+

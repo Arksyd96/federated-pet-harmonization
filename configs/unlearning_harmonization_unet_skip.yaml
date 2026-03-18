@@ -2,15 +2,15 @@ SEED: 101
 WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 project_name: federated-pet
-dir_name: runs/unlearning-harmonization-unet-skip-unlearning
+dir_name: runs/unlearning-harmonization-unet-skip
 name: Unlearning Harmonization UNet + FFT + CascadeDomainClassifier
 
 datamodule:
     root_dir: ./data/PET-EARL/foundation-dataset
     split_config:
-        - [50, 15]
-        - [50, 15]
-        - [50, 15]
+        - [60, 15]
+        - [60, 15]
+        - [60, 15]
     batch_size: 64
     patch_size: [5, 64, 64]
     num_workers: 16
@@ -29,7 +29,7 @@ unet:
     strides: [1, 2, 2, 2]
     temb_channels: null
     use_res_block: true
-    dropout: 0.05
+    dropout: 0.
     learnable_interpolation: true
     use_attention: none
     num_res_blocks: 1
@@ -45,17 +45,18 @@ unet:
 pipeline:
     num_domains: 3
     classifier_hidden_dim: 256
-    warmup_epochs: 5
+    warmup_epochs: 2
 
     # Poids de confusion loss — monte de beta_confusion vers beta_max (cosine)
     beta_confusion: 0.5
     beta_max: 8.0
-    lr_dm_min_factor: 0.05
+
+    lr_dm_min_factor: 0.25
     k_conf_steps: 1
     lambda_composite: 0.1
 
     # Doit correspondre à trainer.max_epochs
-    max_epochs: 50
+    max_epochs: 7
 
     lr_main: 1.0e-4
     lr_dm: 1.0e-4
@@ -84,8 +85,8 @@ trainer:
     accelerator: gpu
     devices: 1
     log_every_n_steps: 1
-    min_epochs: 10
-    max_epochs: 50
+    min_epochs: 2
+    max_epochs: 7
     check_val_every_n_epoch: 1
     num_sanity_val_steps: 0
     limit_val_batches: 100

@@ -1,6 +1,4 @@
 import resource
-
-from modules.models.iffn import ImageFrequencyFusionModel
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
 
@@ -15,9 +13,10 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer import Trainer
 
-from modules.data import MultiDomainUnlearningDataModule
-from modules.models.unet import UNetWithIntermediateFeatures, UnlearningUNet, UNet
-from modules.models.domain_classifier import DeepMultiLevelDomainClassifier, DomainClassifier
+from modules.data import MultiDomainUnlearningDataModule, InMemoryUnlearningDataModule
+from modules.models.unet import UnlearningUNet, UNet
+from modules.models.domain_classifier import DomainClassifier
+from modules.models.iffn import ImageFrequencyFusionModel
 from modules.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -89,7 +88,6 @@ def main(args):
     callbacks = [
         ModelCheckpoint(
             dirpath=os.path.join(save_dir, "./checkpoints"),
-            filename="{epoch:02d}",
             **config.get('model_checkpoint', {})
         )
     ]

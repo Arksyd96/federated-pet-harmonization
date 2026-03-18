@@ -16,7 +16,7 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer import Trainer
 
 from modules.data import MultiDomainUnlearningDataModule
-from modules.models.unet import SpectralUNetWithIntermediateFeatures, UnlearningUNet
+from modules.models.unet_v2_skip import SpectralUNetWithIntermediateFeatures, UnlearningUNet
 from modules.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
