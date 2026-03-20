@@ -724,14 +724,14 @@ class UnlearningUNet(LightningModule):
         num_domains: int = 3,
         warmup_epochs: int = 5,
         beta_confusion: float = 1.0,
-        beta_max: float = 5.0,            # valeur max de beta en fin de stage 2
-        lr_dm_min_factor: float = 0.05,   # lr_dm décroît jusqu'à lr_dm * ce facteur
         lambda_composite: float = 1.0,    # poids du terme domain_acc dans le score composite
         k_conf_steps : int = 1,           # nombre de steps de confusion par step principal
         max_epochs: int = 15,            # nécessaire pour le scheduler
         lr_main: float = 1e-4,
         lr_dm: float = 1e-4,
-        lr_conf: float = 1e-5,  # plus faible : on désapprend doucement
+        lr_dm_final: float = 1e-6, 
+        lr_conf: float = 1e-5,  
+        lr_conf_final: float = 1e-6, 
         weight_decay: float = 1e-5,
         suv_global_log_max: float = 6.0,
         recon_loss_fn=F.l1_loss,
@@ -743,13 +743,16 @@ class UnlearningUNet(LightningModule):
         self.feature_extractor  = feature_extractor
         self.num_domains        = num_domains
         self.warmup_epochs      = warmup_epochs
-        self.beta               = beta_confusion    # valeur courante (mise à jour par scheduler)
-        self.beta_max           = beta_max
+        self.beta               = beta_confusion 
         self.k_conf_steps       = k_conf_steps
-        self.lr_dm_min_factor   = lr_dm_min_factor
         self.lambda_composite   = lambda_composite
         self.max_epochs         = max_epochs
-        self.lrs                = {"main": lr_main, "dm": lr_dm, "conf": lr_conf}
+        self.lrs                = {
+            'main': lr_main, 
+            'dm':   lr_dm,      'dm_final': lr_dm_final,
+            'conf': lr_conf,    'conf_final': lr_conf_final
+        }
+        
         self.weight_decay       = weight_decay
         self.suv_global_log_max = suv_global_log_max
         self.loss_fn            = recon_loss_fn
@@ -806,6 +809,18 @@ class UnlearningUNet(LightningModule):
         log = 0.5 * (norm_log.clamp(-1, 1) + 1.0) * self.suv_global_log_max
         return torch.expm1(log)
     
+    def _is_warmup(self) -> bool:
+        """
+        warmup_epochs : int   → nombre d'époques entières de warmup
+                        float → fraction d'une époque (ex: 0.1 = 10% des itérations)
+        """
+        if isinstance(self.warmup_epochs, float):
+            iters_per_epoch = self.trainer.num_training_batches
+            warmup_iters    = int(self.warmup_epochs * iters_per_epoch)
+            return self.global_step < warmup_iters
+        else:
+            return self.current_epoch < self.warmup_epochs
+    
 
     # ──────────────────────────────────────────────────────────────────────────
     # Schedulers cosine
@@ -816,33 +831,28 @@ class UnlearningUNet(LightningModule):
         T = max(1, self.max_epochs - self.warmup_epochs)
         return min(t / T, 1.0)
     
-    def _scheduled_beta(self) -> float:
+    def _cosine_lr(self, lr_init: float, lr_final: float) -> float:
         p = self._stage2_progress()
-        beta_init = self.hparams.beta_confusion
-        return beta_init + (self.beta_max - beta_init) * (1 - math.cos(math.pi * p)) / 2
-    
-    def _scheduled_lr_dm(self) -> float:
-        p      = self._stage2_progress()
-        lr_init = self.lrs["dm"]
-        lr_min  = lr_init * self.lr_dm_min_factor
-        return lr_min + (lr_init - lr_min) * (1 + math.cos(math.pi * p)) / 2
-    
+        return lr_final + (lr_init - lr_final) * (1 + math.cos(math.pi * p)) / 2
+        
     def on_train_epoch_start(self):
-        if self.current_epoch < self.warmup_epochs:
+        if self._is_warmup():
             return
 
-        # Mise à jour de beta
-        self.beta = self._scheduled_beta()
-
         # Mise à jour du LR du classifieur de domaine directement dans l'optimiseur
-        _, opt_dm, _ = self.optimizers()
-        new_lr_dm = self._scheduled_lr_dm()
+        _, opt_dm, opt_conf = self.optimizers()
+        
+        new_lr_dm = self._cosine_lr(self.lrs["dm"], self.lrs["dm_final"])
         for pg in opt_dm.param_groups:
             pg["lr"] = new_lr_dm
 
+        new_lr_conf = self._cosine_lr(self.lrs["conf"], self.lrs["conf_final"])
+        for pg in opt_conf.param_groups:
+            pg["lr"] = new_lr_conf
+
         # Log des valeurs schedulées (pratique pour vérifier dans WandB)
-        self.log("train/beta_confusion", self.beta,  on_step=False, on_epoch=True)
-        self.log("train/lr_dm",          new_lr_dm,  on_step=False, on_epoch=True)
+        self.log("debug/lr_dm",   new_lr_dm,   on_step=False, on_epoch=True)
+        self.log("debug/lr_conf", new_lr_conf, on_step=False, on_epoch=True)
 
     # ------------------------------------------------------------------
     # configure_optimizers
@@ -884,7 +894,7 @@ class UnlearningUNet(LightningModule):
 
         x          = self._normalize(suv_source)  # [-1, 1]
         bs         = x.shape[0]
-        is_stage_1 = self.current_epoch < self.warmup_epochs
+        is_stage_1 = self._is_warmup()
         
 
         # ==============================================================

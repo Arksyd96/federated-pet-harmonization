@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 from scipy.ndimage import gaussian_filter
 
 from modules.data import MultiDomainUnlearningDataModule
-from modules.models.unet import UnlearningUNet, SpectralUNetWithIntermediateFeatures
+from modules.models.unet_v2_skip import UnlearningUNet, SpectralUNetWithIntermediateFeatures
 from modules.utils import set_seed
 
 
@@ -69,9 +69,9 @@ def process_subject(model, batch, device, filename, curr_idx, length_loader):
     y_patch_size = 64
     x_patch_size = 64
 
-    z_starts = get_uniform_starts(d_dim, z_patch_size, min_overlap_ratio=0.4)
-    y_starts = get_uniform_starts(h_dim, y_patch_size, min_overlap_ratio=0.1)
-    x_starts = get_uniform_starts(w_dim, x_patch_size, min_overlap_ratio=0.1)
+    z_starts = get_uniform_starts(d_dim, z_patch_size, min_overlap_ratio=0.6)
+    y_starts = get_uniform_starts(h_dim, y_patch_size, min_overlap_ratio=0.2)
+    x_starts = get_uniform_starts(w_dim, x_patch_size, min_overlap_ratio=0.2)
 
     total_patches = len(z_starts) * len(y_starts) * len(x_starts)
     print(
@@ -79,7 +79,7 @@ def process_subject(model, batch, device, filename, curr_idx, length_loader):
         f"Patches: {len(z_starts)}x{len(y_starts)}x{len(x_starts)} = {total_patches}"
     )
 
-    gauss_w = make_gaussian_weight_map((z_patch_size, y_patch_size, x_patch_size), sigma_ratio=2.5).to(device)
+    gauss_w = make_gaussian_weight_map((z_patch_size, y_patch_size, x_patch_size), sigma_ratio=1.0).to(device)
 
     # --- 3. Boucle d'inférence ---
     pbar = tqdm(total=total_patches, desc="Inférence par patch")
@@ -123,7 +123,7 @@ def process_subject(model, batch, device, filename, curr_idx, length_loader):
     final_prediction = final_prediction.squeeze().permute(2, 1, 0).numpy()
     final_prediction = np.flip(final_prediction, axis=2)    # Flip Z
     final_prediction = np.flip(final_prediction, axis=1)    # Flip Y
-    final_prediction = gaussian_filter(final_prediction, sigma=0.75)  # Lissage léger pour atténuer les artefacts de patchs
+    final_prediction = gaussian_filter(final_prediction, sigma=1.)  # Lissage léger pour atténuer les artefacts de patchs
 
     # --- 5. Sauvegarde ---
     output_sitk = sitk.GetImageFromArray(final_prediction)

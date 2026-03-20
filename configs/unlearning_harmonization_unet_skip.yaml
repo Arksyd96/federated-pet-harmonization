@@ -8,9 +8,10 @@ name: Unlearning Harmonization UNet + FFT + CascadeDomainClassifier
 datamodule:
     root_dir: ./data/PET-EARL/foundation-dataset
     split_config:
-        - [60, 15]
-        - [60, 15]
-        - [60, 15]
+    - [0, 0]
+    - [0, 0]
+    - [0, 5]
+    - [0, 0]
     batch_size: 64
     patch_size: [5, 64, 64]
     num_workers: 16
@@ -45,23 +46,23 @@ unet:
 pipeline:
     num_domains: 3
     classifier_hidden_dim: 256
-    warmup_epochs: 2
+    warmup_epochs: 0.2 # fraction of an epoch
 
     # Poids de confusion loss — monte de beta_confusion vers beta_max (cosine)
-    beta_confusion: 0.5
-    beta_max: 8.0
+    beta_confusion: 0.8
+    beta_max: 1.0
 
-    lr_dm_min_factor: 0.25
-    k_conf_steps: 1
+    lr_dm_min_factor: 0.5
+    k_conf_steps: 2
     lambda_composite: 0.1
 
     # Doit correspondre à trainer.max_epochs
-    max_epochs: 7
+    max_epochs: 5
 
     lr_main: 1.0e-4
-    lr_dm: 1.0e-4
-    lr_conf: 1.0e-6
-    weight_decay: 1.0e-6
+    lr_dm: 5.0e-5
+    lr_conf: 1.0e-5
+    weight_decay: 1.0e-7
     suv_global_log_max: 6.0
 
 # =============================================================================
@@ -85,11 +86,12 @@ trainer:
     accelerator: gpu
     devices: 1
     log_every_n_steps: 1
-    min_epochs: 2
-    max_epochs: 7
+    min_epochs: 1
+    max_epochs: 5
     check_val_every_n_epoch: 1
     num_sanity_val_steps: 0
-    limit_val_batches: 100
+    limit_train_batches: 400
+    limit_val_batches: 80
     # gradient_clip_val et gradient_clip_algorithm incompatibles
     # avec optimisation manuelle (multi-optimiseurs) — clip_grad_norm_
     # est appliqué manuellement dans training_step

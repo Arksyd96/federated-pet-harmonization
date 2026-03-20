@@ -1006,6 +1006,18 @@ class UnlearningUNet(LightningModule):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x, t=None)
+    
+    def _is_warmup(self) -> bool:
+        """
+        warmup_epochs : int   → nombre d'époques entières de warmup
+                        float → fraction d'une époque (ex: 0.1 = 10% des itérations)
+        """
+        if isinstance(self.warmup_epochs, float):
+            iters_per_epoch = self.trainer.num_training_batches
+            warmup_iters    = int(self.warmup_epochs * iters_per_epoch)
+            return self.global_step < warmup_iters
+        else:
+            return self.current_epoch < self.warmup_epochs
 
     # ──────────────────────────────────────────────────────────────────────────
     # Schedulers cosine
@@ -1028,7 +1040,7 @@ class UnlearningUNet(LightningModule):
         return lr_min + (lr_init - lr_min) * (1 + math.cos(math.pi * p)) / 2
 
     def on_train_epoch_start(self):
-        if self.current_epoch < self.warmup_epochs:
+        if self._is_warmup():
             return
 
         self.beta = self._scheduled_beta()
@@ -1078,7 +1090,7 @@ class UnlearningUNet(LightningModule):
 
         x          = self._normalize(suv_source)
         bs         = x.shape[0]
-        is_stage_1 = self.current_epoch < self.warmup_epochs
+        is_stage_1 = self._is_warmup()
 
         # ══════════════════════════════════════════════════════════════════════
         # STAGE 1 — Warmup
