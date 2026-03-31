@@ -3,20 +3,19 @@ WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 project_name: federated-pet
 dir_name: runs/unlearning-harmonization-vae
-name: Unlearning Harmonization with StyleVAE (3 Domains)
+name: Unlearning Harmonization with StyleVAE+AdaIN (3 Domains)
 
 datamodule:
     root_dir:           ./data/PET-EARL/foundation-dataset
     split_config: 
-    - [60, 5]
-    - [60, 5]
-    - [60, 5]
+    - [60, 15]
+    - [60, 15]
+    - [60, 15]
     batch_size:         64
     patch_size:         [5, 64, 64]
     num_workers:        16
     queue_max_length:   9000
     samples_per_volume: 350
-
 
 vae:
     input_shape:          [64, 64]   # (H, W) pour FFTHighPassFilter
@@ -47,49 +46,48 @@ vae:
 pipeline:
     num_domains:           3
     classifier_hidden_dim: 256
-    warmup_epochs:         3        # stage 1 : apprendre la tâche + classifieurs
+    warmup_epochs:         0.5      # stage 1 : apprendre la tâche + classifieurs
 
-    beta_confusion:        0.5      # poids confusion loss (désapprentissage z_content)
-    kl_content_weight:     1.0e-6   # régularisation KL sur z_content spatial
-    kl_style_weight:       1.0e-6   # régularisation KL sur z_style 1D
-    beta_max:              8.0      # valeur max de beta en fin d'entraînement
-    lr_classifiers_min_factor: 0.05     # lr_classifiers → lr * 0.05 en fin de stage 2
+    beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
+    kl_content_weight:     5.0e-7   # régularisation KL sur z_content spatial
+    kl_style_weight:       5.0e-7   # régularisation KL sur z_style 1D
     max_epochs:            50
 
     lr_vae:                1.0e-4   # LR reconstruction
     lr_classifiers:        1.0e-4   # LR classifieurs
+    lr_classifiers_final:  1.0e-6   # LR classifieurs (plus faible : désapprentissage doux)
     lr_unlearn:            1.0e-6   # LR confusion (plus faible : désapprentissage doux)
-    k_style_steps:         2        # nombre d'itérations de mise à jour du style par étape d'entraînement
+    lr_unlearn_final:      5.0e-6
+    k_style_steps:         1        # nombre d'itérations de mise à jour du style par étape d'entraînement
 
     weight_decay:          1.0e-6
     suv_global_log_max:    6.0
 
 
 model_checkpoint:
-    monitor:   "val/composite_score"
-    filename:  "epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/style_acc:.3f}-content={val/content_acc:.3f}"
-    mode:      "min"
+    monitor: val/composite_score
+    every_n_epochs: 1
+    save_last: true
     save_top_k: 3
-    save_last:  true
-    verbose:    true
+    mode: min
+    verbose: true
+    filename: "epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/style_acc:.3f}-content={val/content_acc:.3f}"
+    auto_insert_metric_name: false
 
 trainer:
     precision:           32
     accelerator:         gpu
     devices:             1
     log_every_n_steps:   1
-    min_epochs:          20
-    max_epochs:          50
+    min_epochs:          10
+    max_epochs:          120
     check_val_every_n_epoch: 1
     num_sanity_val_steps: 0
-    
-    limit_val_batches: 80
+    limit_train_batches: 400
+    limit_val_batches:   80
 
     # Non compatible avec optimisation manuelle (multi-optimiseurs)
     # gradient_clip_val: 1.0
     # gradient_clip_algorithm: "norm"
-    
-
-    
 
     

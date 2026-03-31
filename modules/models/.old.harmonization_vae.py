@@ -24,7 +24,7 @@ from modules.models.base import (
 )
 
 from modules.models.attention import Attention, zero_module
-from modules.models.fft import FFTHighPassFilter, LearnableFFTHighPassFilter
+from modules.models.fft import FFTHighPassFilter
 
 
 # =============================================================================
@@ -75,7 +75,7 @@ def kl_loss_1d(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         mu.pow(2) + logvar.exp() - 1.0 - logvar,
         dim=1,
     )
-
+    
 
 # =============================================================================
 # ContentStyleEncoder
@@ -113,9 +113,7 @@ class ContentStyleEncoder(nn.Module):
         ConvBlock = UnetResBlock if use_residual_block else UnetBasicBlock
 
         # ── FFT Filter ────────────────────────────────────────────────────────
-        self.fft_filter = LearnableFFTHighPassFilter(
-            input_shape, in_channels=in_channels, sigma=fft_sigma
-        )
+        self.fft_filter = FFTHighPassFilter(input_shape, sigma=fft_sigma)
 
         # ── In-Convolution ────────────────────────────────────────────────────
         self.input_conv = BasicBlock(
@@ -198,7 +196,6 @@ class ContentStyleEncoder(nn.Module):
             BasicBlock(spatial_dims, hidden_channels[-1], 2 * latent_channels, 3),
             BasicBlock(spatial_dims, 2 * latent_channels, 2 * latent_channels, 1),
         )
-        self.content_in = nn.InstanceNorm2d(latent_channels, affine=False)
 
         self.style_head    = BasicBlock(spatial_dims, hidden_channels[-1], 2 * style_channels, kernel_size=1,)
         self.style_pool    = nn.AdaptiveAvgPool2d(1)
@@ -228,8 +225,6 @@ class ContentStyleEncoder(nn.Module):
         # ── Content head ─────────────────────────────────────────────────────
         moments_c = self.content_head(h)
         mu_content, logvar_content = moments_c.chunk(2, dim=1)
-        mu_content     = self.content_in(mu_content)      # supprime les stats de style
-        logvar_content = self.content_in(logvar_content)  # cohérence
 
         # ── Style head ───────────────────────────────────────────────────────
         s = self.style_head(h)       # (B, 2*style_channels, H', W')
@@ -396,81 +391,6 @@ class StyleEmbedder(nn.Module):
 # StyleConditionedDecoder
 # =============================================================================
 
-class AdaINResBlock(nn.Module):
-    """
-    ResBlock avec Adaptive Instance Normalization.
- 
-    Pour chaque normalisation :
-      1. InstanceNorm2d normalise z_content → mu=0, sigma=1 par canal et par instance
-      2. Deux projections linéaires depuis style_emb prédisent gamma et beta
-      3. output = (1 + gamma) * normalized + beta
-         (gamma centré sur 0 → comportement neutre au départ)
- 
-    Parameters
-    ----------
-    in_channels  : int
-    out_channels : int
-    style_dim    : int  — dimension de style_emb (= style_embedding_dim)
-    dropout      : float
-    """
- 
-    def __init__(
-        self,
-        in_channels:  int,
-        out_channels: int,
-        style_dim:    int,
-        dropout:      float = 0.0,
-    ):
-        super().__init__()
- 
-        self.conv1 = nn.Conv2d(in_channels,  out_channels, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.norm1 = nn.InstanceNorm2d(out_channels, affine=False)
-        self.norm2 = nn.InstanceNorm2d(out_channels, affine=False)
-        self.act   = nn.SiLU()
-        self.drop  = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
- 
-        # Projections style → (gamma, beta) pour chaque normalisation
-        # gamma centré sur 0 (on ajoute 1 dans _adain) → neutre au départ
-        self.adain1 = nn.Linear(style_dim, out_channels * 2)
-        self.adain2 = nn.Linear(style_dim, out_channels * 2)
- 
-        # Init : gamma=0, beta=0 → identité au départ
-        nn.init.zeros_(self.adain1.weight)
-        nn.init.zeros_(self.adain1.bias)
-        nn.init.zeros_(self.adain2.weight)
-        nn.init.zeros_(self.adain2.bias)
- 
-        # Skip connection si changement de canaux
-        self.skip = (
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-            if in_channels != out_channels else nn.Identity()
-        )
- 
-    def _adain(
-        self,
-        x:         torch.Tensor,   # (B, C, H, W) déjà normalisé par InstanceNorm
-        style_emb: torch.Tensor,   # (B, style_dim)
-        proj:      nn.Linear,
-    ) -> torch.Tensor:
-        params        = proj(style_emb)                             # (B, 2*C)
-        gamma, beta   = params.chunk(2, dim=1)                      # (B, C) chacun
-        gamma         = gamma.unsqueeze(-1).unsqueeze(-1)           # (B, C, 1, 1)
-        beta          = beta.unsqueeze(-1).unsqueeze(-1)
-        return (1.0 + gamma) * x + beta                             # modulation affine
- 
-    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
-        h = self.conv1(x)
-        h = self._adain(self.norm1(h), emb, self.adain1)
-        h = self.act(h)
-        h = self.drop(h)
- 
-        h = self.conv2(h)
-        h = self._adain(self.norm2(h), emb, self.adain2)
-        h = self.act(h)
- 
-        return h + self.skip(x)
-
 class StyleConditionedDecoder(nn.Module):
     """
     Parameters
@@ -485,24 +405,24 @@ class StyleConditionedDecoder(nn.Module):
     spatial_dims, normalization, activation, dropout, use_residual_block,
     learnable_interpolation, attention_type
     """
-    
+
     def __init__(
         self,
-        latent_channels:    int = 8,
-        out_channels:       int = 5,
-        hidden_channels:    List[int] = [64, 128, 256, 512],
-        kernel_sizes:       List[int] = [3, 3, 3, 3],
-        strides:            List[int] = [1, 2, 2, 2],
-        style_embedding_dim: int = 256,
+        latent_channels: int = 8,
+        out_channels: int = 5,
+        hidden_channels: List[int] = [64, 128, 256, 512],
+        kernel_sizes: List[int] = [3, 3, 3, 3],
+        strides: List[int] = [1, 2, 2, 2],
+        style_embedding_dim: int = 512,
         num_residual_blocks: int = 1,
-        spatial_dims:       int = 2,
-        normalization:      Tuple = ('group', {'num_groups': 32, 'affine': True}),
-        activation:         Tuple = ('swish', {}),
-        dropout:            float = 0.0,
-        use_residual_block: bool = True,        # conservé pour compatibilité YAML
+        spatial_dims: int = 2,
+        normalization: Tuple = ('group', {'num_groups': 32, 'affine': True}),
+        activation: Tuple = ('swish', {}),
+        dropout: float = 0.0,
+        use_residual_block: bool = True,
         learnable_interpolation: bool = True,
-        attention_type:     Union[str, List[str]] = 'none',
-        use_contour_skip:   bool = False,
+        attention_type: Union[str, List[str]] = 'none',
+        use_contour_skip: bool = True
     ):
         super().__init__()
 
@@ -514,75 +434,71 @@ class StyleConditionedDecoder(nn.Module):
             attention_type if isinstance(attention_type, list)
             else [attention_type] * self.depth
         )
-        
-        # ── latent_to_features : z_content → hidden_channels[-1] via AdaIN ──
-        self.latent_to_features = AdaINResBlock(
+        ConvBlock = UnetResBlock if use_residual_block else UnetBasicBlock
+
+        # ── latent_to_features : z_content → hidden_channels[-1] ───────────────────
+        self.latent_to_features = UnetResBlock(
+            spatial_dims=spatial_dims,
             in_channels=latent_channels,
             out_channels=hidden_channels[-1],
-            style_dim=style_embedding_dim,
+            kernel_size=3,
+            stride=1,
+            norm_name=normalization,
+            act_name=activation,
             dropout=dropout,
+            emb_channels=style_embedding_dim,
+            scale_shift_norm=True,
         )
-        
-        # ConvBlock = UnetResBlock if use_residual_block else UnetBasicBlock
-        # ConvBlock = AdaINResBlock
 
-        # ── Blocs décodeur — trois listes parallèles ─────────────────────────
-        # adain_blocks[j]  : AdaINResBlock
-        # attn_blocks[j]   : Attention (ou None si attention_type == 'none')
-        # up_blocks[j]     : BasicUp  (ou None si pas d'upsample à ce bloc)
-        #
-        # Index j parcourt les mêmes cases que l'ancienne decoder_block_list.
-        adain_blocks = []
-        attn_blocks  = []
-        up_blocks    = []
- 
+        # ── Decoder blocks (identiques à UNet) ────────────────────────────────
+        decoder_block_list = []
         for i in range(1, self.depth):
             for k in range(num_residual_blocks + 1):
                 out_ch_k = hidden_channels[i - 1 if k == 0 else i]
-                skip_ch  = hidden_channels[i - 1 if k == 0 else i] if use_contour_skip else 0
-                in_ch_k  = hidden_channels[i] + skip_ch
- 
-                # AdaIN remplace le ConvBlock
-                adain_blocks.append(AdaINResBlock(
-                    in_channels=in_ch_k,
-                    out_channels=out_ch_k,
-                    style_dim=style_embedding_dim,
-                    dropout=dropout,
-                ))
- 
-                # Attention (inchangée)
-                attn_blocks.append(Attention(
-                    spatial_dims=spatial_dims,
-                    in_channels=out_ch_k,
-                    out_channels=out_ch_k,
-                    num_heads=8,
-                    ch_per_head=max(1, out_ch_k // 8),
-                    depth=1,
-                    norm_name=normalization,
-                    dropout=dropout,
-                    emb_dim=None,                   # Attention sans conditioning
-                    attention_type=attention_type[i],
-                ))
- 
-                # BasicUp sur le premier bloc de chaque niveau (sauf le plus profond)
-                if (i > 1) and (k == 0):
-                    up_blocks.append(BasicUp(
+                skip_ch = hidden_channels[i - 1 if k == 0 else i] if use_contour_skip else 0
+                
+                seq = [
+                    ConvBlock(
+                        spatial_dims=spatial_dims,
+                        in_channels=hidden_channels[i] + skip_ch,
+                        out_channels=out_ch_k,
+                        kernel_size=kernel_sizes[i],
+                        stride=1,
+                        norm_name=normalization,
+                        act_name=activation,
+                        dropout=dropout,
+                        emb_channels=style_embedding_dim,
+                        scale_shift_norm=True,
+                    ),
+                    Attention(
                         spatial_dims=spatial_dims,
                         in_channels=out_ch_k,
                         out_channels=out_ch_k,
-                        kernel_size=strides[i],
-                        stride=strides[i],
-                        learnable_interpolation=learnable_interpolation,
-                    ))
-                else:
-                    up_blocks.append(None)
- 
-        self.adain_blocks = nn.ModuleList(adain_blocks)
-        self.attn_blocks  = nn.ModuleList(attn_blocks)
-        # BasicUp peut être None — on stocke séparément les vrais modules
-        self._up_blocks_raw = up_blocks
-        self.up_blocks = nn.ModuleList([b for b in up_blocks if b is not None])
- 
+                        num_heads=8,
+                        ch_per_head=out_ch_k // 8,
+                        depth=1,
+                        norm_name=normalization,
+                        dropout=dropout,
+                        emb_dim=style_embedding_dim,
+                        attention_type=attention_type[i],
+                    ),
+                ]
+                # Upsample sur le premier bloc de chaque niveau (sauf le plus proche du latent)
+                if (i > 1) and (k == 0):
+                    seq.append(
+                        BasicUp(
+                            spatial_dims=spatial_dims,
+                            in_channels=out_ch_k,
+                            out_channels=out_ch_k,
+                            kernel_size=strides[i],
+                            stride=strides[i],
+                            learnable_interpolation=learnable_interpolation,
+                        )
+                    )
+                decoder_block_list.append(SequentialEmb(*seq))
+
+        self.decoder_blocks = nn.ModuleList(decoder_block_list)
+
         # ── Out-Convolution ───────────────────────────────────────────────────
         self.output_conv = zero_module(
             UnetOutBlock(spatial_dims, hidden_channels[0], out_channels, dropout=None)
@@ -609,28 +525,17 @@ class StyleConditionedDecoder(nn.Module):
         """
         # latent_to_features : z_content → h (B, hidden_channels[-1], H', W')
         h = self.latent_to_features(z_content, emb=style_emb)
-        
-        skips  = list(contour_skips) if (self.use_contour_skip and contour_skips) else None
-        up_idx = 0  # pointeur dans self.up_blocks
 
-        for j in range(len(self.adain_blocks) - 1, -1, -1):
-            # Skip connection contour (optionnel)
-            if skips is not None:
+        # Décodeur (reverse, identique à UNet.forward)
+        if self.use_contour_skip and contour_skips is not None:
+            skips = list(contour_skips)
+            for i in range(len(self.decoder_blocks), 0, -1):
                 h = torch.cat([h, skips.pop()], dim=1)
- 
-            # AdaIN block
-            h = self.adain_blocks[j](h, style_emb)
- 
-            # Attention (passée sans emb — purement spatiale)
-            h = self.attn_blocks[j](h, None)
- 
-            # Upsample si présent à cet index
-            if self._up_blocks_raw[j] is not None:
-                real_up_idx = sum(
-                    1 for b in self._up_blocks_raw[:j] if b is not None
-                )
-                h = self.up_blocks[real_up_idx](h)
- 
+                h = self.decoder_blocks[i - 1](h, style_emb)
+        else:
+            for i in range(len(self.decoder_blocks), 0, -1):
+                h = self.decoder_blocks[i - 1](h, style_emb)
+
         return self.output_conv(h)
 
 # =============================================================================
@@ -761,10 +666,10 @@ class DisentangledHarmonizationVAE(nn.Module):
         Returns
         -------
         x_hat      : (B, out_channels, H, W)
-        mu_content : (B, latent_channels, H', W')
-        logvar_content : (B, latent_channels, H', W')
-        mu_style   : (B, style_channels)
-        logvar_style : (B, style_channels)
+        mu_contentontent : (B, latent_channels, H', W')
+        logvar_contentontent : (B, latent_channels, H', W')
+        mu_styletyle   : (B, style_channels)
+        logvar_styletyle   : (B, style_channels)
         """
         mu_content, logvar_content, mu_style, logvar_style = self.content_style_encoder(x)
         
@@ -919,14 +824,14 @@ class UnlearningVAE(LightningModule):
         classifier_hidden_dim: int = 256,
         warmup_epochs: int = 10,
         beta_confusion: float = 1.0,
+        beta_max: float = 5.0,
+        lr_classifiers_min_factor: float = 0.1,
         max_epochs: int = 300,
         kl_content_weight: float = 1e-4,
         kl_style_weight: float = 1e-4,
         lr_vae: float = 1e-4,
         lr_classifiers: float = 1e-4,
         lr_unlearn: float = 1e-5,
-        lr_classifiers_final: float = 1e-5,
-        lr_unlearn_final: float = 1e-7,
         k_style_steps: int = 2,
         weight_decay: float = 1e-5,
         suv_global_log_max: float = 6.0,
@@ -937,12 +842,12 @@ class UnlearningVAE(LightningModule):
         self.num_domains        = num_domains
         self.warmup_epochs      = warmup_epochs
         self.beta_confusion     = beta_confusion
+        self.beta_max           = beta_max
+        self.lr_classifiers_min_factor = lr_classifiers_min_factor
         self.max_epochs         = max_epochs
         self.kl_content_weight  = kl_content_weight
         self.kl_style_weight    = kl_style_weight
         self.lrs                = {"vae": lr_vae, "classifiers": lr_classifiers, "unlearn": lr_unlearn}
-        self.lr_classifiers_final = lr_classifiers_final
-        self.lr_unlearn_final   = lr_unlearn_final
         self.k_style_steps      = k_style_steps
         self.weight_decay       = weight_decay
         self.suv_global_log_max = suv_global_log_max
@@ -1027,10 +932,12 @@ class UnlearningVAE(LightningModule):
         t = max(0, self.current_epoch - self.warmup_epochs)
         T = max(1, self.max_epochs - self.warmup_epochs)
         return min(t / T, 1.0)
-    
-    def _cosine_lr(self, lr_init: float, lr_final: float) -> float:
+
+    def _scheduled_beta(self) -> float:
+        """beta : monte de beta_confusion vers beta_max (cosine)."""
         p = self._stage2_progress()
-        return lr_final + (lr_init - lr_final) * (1 + math.cos(math.pi * p)) / 2
+        b0 = self.hparams.beta_confusion
+        return b0 + (self.beta_max - b0) * (1 - math.cos(math.pi * p)) / 2
 
     def _scheduled_lr_classifiers(self) -> float:
         """lr_classifiers : descend vers lr * lr_classifiers_min_factor (cosine)."""
@@ -1038,31 +945,21 @@ class UnlearningVAE(LightningModule):
         lr_init = self.lrs["classifiers"]
         lr_min  = lr_init * self.lr_classifiers_min_factor
         return lr_min + (lr_init - lr_min) * (1 + math.cos(math.pi * p)) / 2
-    
-    def _is_warmup(self) -> bool:
-        if isinstance(self.warmup_epochs, float):
-            iters_per_epoch = self.trainer.num_training_batches
-            return self.global_step < int(self.warmup_epochs * iters_per_epoch)
-        return self.current_epoch < self.warmup_epochs
 
     def on_train_epoch_start(self):
         """Met à jour beta et lr_classifiers au début de chaque époque du stage 2."""
-        if self._is_warmup():
+        if self.current_epoch < self.warmup_epochs:
             return
 
-        _, opt_style_clf, opt_content_clf, opt_unlearn = self.optimizers()
-        
-        new_lr_clf = self._cosine_lr(self.lrs["classifiers"], self.hparams.lr_classifiers_final)
-        for opt in [opt_style_clf, opt_content_clf]:
-            for pg in opt.param_groups:
-                pg["lr"] = new_lr_clf
+        self.beta_confusion = self._scheduled_beta()
 
-        new_lr_unlearn = self._cosine_lr(self.lrs["unlearn"], self.hparams.lr_unlearn_final)
-        for pg in opt_unlearn.param_groups:
-            pg["lr"] = new_lr_unlearn
+        _, opt_classifiers, _ = self.optimizers()
+        new_lr = self._scheduled_lr_classifiers()
+        for pg in opt_classifiers.param_groups:
+            pg["lr"] = new_lr
 
-        self.log("debug/lr_classifiers", new_lr_clf,    on_step=False, on_epoch=True)
-        self.log("debug/lr_unlearn",     new_lr_unlearn, on_step=False, on_epoch=True)      
+        self.log("debug/beta_confusion", self.beta_confusion, on_step=False, on_epoch=True)
+        self.log("debug/lr_classifiers", new_lr,              on_step=False, on_epoch=True)        
         
 
     # ──────────────────────────────────────────────────────────────────────────

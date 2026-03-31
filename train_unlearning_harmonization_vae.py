@@ -81,9 +81,8 @@ def main(args):
     # ── Callbacks ─────────────────────────────────────────────────────────────
     callbacks = [
         ModelCheckpoint(
-            dirpath=os.path.join(save_dir, "checkpoints"),
-            filename="{epoch:02d}-{val/rec_loss:.4f}",
-            **config.get("model_checkpoint", {}),
+            dirpath=os.path.join(save_dir, "./checkpoints"),
+            **config.get('model_checkpoint', {})
         )
     ]
 
@@ -92,22 +91,18 @@ def main(args):
 
     # ── Trainer ───────────────────────────────────────────────────────────────
     trainer = Trainer(
-        logger=wb_logger if not config.get("DEBUG") else False,
+        logger=wb_logger if not config.get('DEBUG') else False,
         default_root_dir=save_dir,
         callbacks=callbacks,
-        **config.get("trainer", {}),
+        **config.get('trainer', {})
     )
 
     # ── Lancement ─────────────────────────────────────────────────────────────
     logger.info("Lancement de l'entraînement UnlearningVAE 🚀")
-    logger.info(f"  Stage 1 (warmup) : {config['pipeline'].get('warmup_epochs', 15)} époques")
-    logger.info(f"  Stage 2 (unlearn): {config['trainer'].get('max_epochs', 100) - config['pipeline'].get('warmup_epochs', 15)} époques")
+    logger.info(f"  Stage 1 (warmup) : {config['pipeline'].get('warmup_epochs')} époques")
+    logger.info(f"  Stage 2 (unlearn): {config['trainer'].get('max_epochs') - config['pipeline'].get('warmup_epochs')} époques")
 
-    trainer.fit(
-        pipeline,
-        datamodule=datamodule,
-        ckpt_path=config.get("ckpt_path", None),
-    )
+    trainer.fit(pipeline, datamodule=datamodule)
 
 
 if __name__ == "__main__":
