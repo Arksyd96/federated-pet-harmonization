@@ -7,6 +7,7 @@ import torchio as tio
 import SimpleITK as sitk
 from tqdm import tqdm
 from omegaconf import OmegaConf
+from scipy.ndimage import gaussian_filter
 
 from modules.data import MultiDomainUnlearningDataModule, Float32Lambda
 from modules.models.harmonization_vae import DisentangledHarmonizationVAE, UnlearningVAE
@@ -151,9 +152,7 @@ def process_subject(model, batch, device, filename, curr_idx, length_loader, z_s
         f"Style: {style_mode}"
     )
 
-    gauss_w = make_gaussian_weight_map(
-        (z_patch_size, y_patch_size, x_patch_size), sigma_ratio=0.75
-    ).to(device)
+    gauss_w = make_gaussian_weight_map((z_patch_size, y_patch_size, x_patch_size), sigma_ratio=1.0).to(device)
 
     # --- 3. Boucle d'inférence ---
     pbar = tqdm(total=total_patches, desc="Inférence par patch")
@@ -177,8 +176,10 @@ def process_subject(model, batch, device, filename, curr_idx, length_loader, z_s
                     patch_pred_norm = vae.harmonize(
                         patch_norm,
                         x_style_ref=None,
-                        z_style_fixed=z_style_fixed,   # None → style neutre
+                        z_style_fixed=z_style_fixed, # None → style neutre
+                        style_dropout_p=0.05
                     )
+                    # patch_pred_norm, *_ = vae.forward(patch_norm)
                     patch_pred = model._denormalize(patch_pred_norm).squeeze(0)  # (D, H, W)
 
                     output_volume[
@@ -201,6 +202,7 @@ def process_subject(model, batch, device, filename, curr_idx, length_loader, z_s
     final_prediction = final_prediction.squeeze().permute(2, 1, 0).numpy()
     final_prediction = np.flip(final_prediction, axis=2)    # Flip Z
     final_prediction = np.flip(final_prediction, axis=1)    # Flip Y
+    final_prediction = gaussian_filter(final_prediction, sigma=1.)  # Lissage léger pour atténuer les artefacts de patchs
 
     # --- 5. Sauvegarde ---
     output_sitk = sitk.GetImageFromArray(final_prediction)

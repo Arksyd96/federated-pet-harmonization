@@ -151,7 +151,7 @@ def process_single_subject(args):
         f for f in os.listdir(subject_path) 
         if (f.startswith('PET') or f.startswith('EARL') or f.startswith('predicted') or f.startswith('harmonized'))
         and (f.endswith('.nii') or f.endswith('.nii.gz'))
-        and 'skip' in f.lower()
+        and 'vae' in f.lower()
         and 'MIP' not in f
     ]
 
@@ -191,7 +191,7 @@ def process_single_subject(args):
         remaining_cols = [c for c in df.columns if c not in first_cols]
         df = df[first_cols + remaining_cols]
         
-        suffix = '_sphere_radiomics_skip.csv' if use_sphere else '_radiomics.csv'
+        suffix = '_sphere_radiomics_vae.csv' if use_sphere else '_radiomics_vae.csv'
         output_file = os.path.join(subject_path, mask_filename.split('.')[0] + suffix)
         df.to_csv(output_file, index=False)
     else:

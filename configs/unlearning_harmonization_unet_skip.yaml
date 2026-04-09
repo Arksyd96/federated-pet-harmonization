@@ -8,9 +8,9 @@ name: Unlearning Harmonization UNet + FFT + CascadeDomainClassifier
 datamodule:
     root_dir: ./data/PET-EARL/foundation-dataset
     split_config:
-    - [60, 15]
-    - [60, 15]
-    - [60, 15]
+    - [0, 50]
+    - [0, 50]
+    - [0, 50]
     batch_size: 64
     patch_size: [5, 64, 64]
     num_workers: 16
