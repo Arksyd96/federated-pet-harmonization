@@ -50,14 +50,16 @@ def main(args):
             project=config.get('project_name'),
             name=config.get('name'),
             save_dir=save_dir,
-            config=config
+            config=config,
+            offline=True
         )
     else:
         save_dir = "./runs/temporary/"
         logger.info("Mode DEBUG activé : Aucune sauvegarde sur disque.")
 
     # 3. DataModule & Modèles
-    datamodule = MultiTargetPETDataModule(**config.get('datamodule', {}))
+    # datamodule = MultiTargetPETDataModule(**config.get('datamodule', {}))
+    datamodule = SingleTargetPETDataModule(**config.get('datamodule', {}))
 
     model = None
     if args.resume_checkpoint:

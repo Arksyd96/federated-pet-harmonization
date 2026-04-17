@@ -4,14 +4,14 @@ WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 # modules state
 project_name: federated-pet
-dir_name: runs/2d-to-3d-pet-earl-translation-unet-dsr12-a100
-name: Traduction PET EARL1/2 5x64x64 DSR 12p A100 (UNet)
+dir_name: runs/2d-to-3d-pet-earl-translation-unet-dsr10-nantes
+name: Traduction PET EARL2 5x64x64 DSR 10p Nantes (UNet)
 
 datamodule:
-    root_dir: ./data/PET-EARL/foundation-dataset/test/domain_a100
+    root_dir: ./data/Nantes_dataset_Nifti/
     batch_size: 64
     # train_ratio: 1.0 # No DSR
-    train_ratio: 0 # for DSR with N subjects only
+    train_ratio: 10 # for DSR with N subjects only
     patch_size: [5, 64, 64]
     num_workers: 16 
     queue_max_length: 9000
@@ -68,7 +68,7 @@ diffuser:
 # UNet regression style related modules
 translation_model:
     in_ch: 5          
-    out_ch: 10         
+    out_ch: 5         
     spatial_dims: 2 
     hid_chs: [64, 128, 256, 512]
     kernel_sizes: [3, 3, 3, 3]

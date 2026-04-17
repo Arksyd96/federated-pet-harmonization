@@ -1,0 +1,102 @@
+SEED: 101
+WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
+
+project_name: federated-pet
+dir_name: runs/stargan-v2-pet
+name: "StarGAN v2 — Harmonisation PET multi-sites (3 domaines)"
+
+
+datamodule:
+    root_dir: ./data/PET-EARL/foundation-dataset
+    split_config:
+        - [60, 15]           # Site 1: 60 train, 5 val
+        - [60, 15]           # Site 2: 60 train, 5 val
+        - [60, 15]           # Site 3: 60 train, 5 val
+    batch_size: 64           # Need inter-domain diversity in each batch
+    patch_size: [5, 64, 64] # 2D patches: 5 channels, 64×64 pixels
+    num_workers: 16
+    queue_max_length: 6000
+    samples_per_volume: 200
+
+
+style_encoder:
+    input_shape:     [64, 64]       # Patch spatial dimensions
+    in_channels:     5              # PET image channels
+    style_dim:       128             # Output style code dimension
+    hidden_channels: [64, 128, 256, 512]  # CNN hidden layers
+    fft_sigma:       7.5            # Gaussian sigma for FFT high-pass filter
+
+generator:
+    in_channels: 5                           # Input channels
+    out_channels: 5                           # Output channels
+    spatial_dims: 2                         # 2D patches
+    hidden_channels: [64, 128, 256, 512]         # Hidden channels per level
+    kernel_sizes: [3, 3, 3, 3]              # Kernel sizes per level
+    strides: [1, 2, 2, 2]                # Downsampling strides
+    style_embedding_dim: 128                # IMPORTANT: style embedding dimension
+    num_residual_blocks: 2                   # Residual blocks per level
+    dropout: 0.05                           # Dropout rate
+    learnable_interpolation: true           # Learnable upsampling
+    attention_type: none                     # Attention type
+
+
+discriminator:
+    in_channels:     5                      # Input channels
+    hidden_channels: [64, 128, 256, 512]   # Hidden layers
+
+
+pipeline:
+    num_domains:          3                 # Number of PET scanner sites
+
+    style_dim:            128                # Must match: style_encoder.style_dim
+    style_embedding_dim:  128               # Must match: generator.style_embedding_dim
+
+    warmup_epochs: 1                        # Warmup stage duration
+
+    lambda_sty:  1.0                        # Style reconstruction loss: E(G(x,s)) ≈ s
+    lambda_cyc:  1.0                        # Cycle consistency loss: G(G(x,s_t),s_s) ≈ x
+    lambda_rec:  1.0                        # Reconstruction loss: G(x,E(x)) ≈ x
+    lambda_r1:   1.0                        # R1 gradient penalty (discriminator stabilization)
+
+    r1_every:    16                         # Compute R1 penalty every N steps (memory efficient)
+    lr_G:         1.0e-4                    # Generator learning rate
+    lr_D:         1.0e-4                    # Discriminator learning rate
+    weight_decay: 1.0e-5                    # L2 regularization
+
+    suv_global_log_max: 6.0                 # Clinical normalization constant
+
+
+model_checkpoint:
+    monitor:    "val/composite_score"       # Metric to monitor
+    mode:       "min"                       # Minimize composite score
+    save_top_k: 3                           # Keep top 3 checkpoints
+    save_last:  true                        # Also save last checkpoint
+    verbose:    true
+    filename:   "epoch={epoch:03d}-rec={val/rec_loss:.4f}-sty={val/sty_recon:.4f}"
+    auto_insert_metric_name: false
+
+
+trainer:
+    precision:   32                         # Full 32-bit floating point
+
+    accelerator: gpu                        # Use GPU
+    devices:     1                          # Use 1 GPU
+
+    log_every_n_steps: 1                    # Log every step
+    enable_progress_bar: true
+
+    min_epochs:  10                         # Minimum epochs to train
+    max_epochs:  50                         # Maximum epochs to train
+
+    check_val_every_n_epoch: 1              # Validate every epoch
+    num_sanity_val_steps: 0                 # Skip sanity check
+    limit_val_batches: 80                   # Use 80 validation batches per epoch
+    limit_train_batches: 400                # Use all training batches
+
+    # gradient_clip_val: 1.0                  # Clip gradients to max norm 1.0
+    # gradient_clip_algorithm: "norm"
+
+    enable_checkpointing: true
+
+    deterministic: false                    # Allow non-deterministic ops for speed
+    benchmark: true                         # Enable cuDNN benchmarking
