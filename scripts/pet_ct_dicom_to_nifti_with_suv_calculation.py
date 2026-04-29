@@ -138,7 +138,8 @@ def compute_suv_image(sitk_image: sitk.Image, ds: pydicom.Dataset) -> tuple:
     """
     metadata = {}
 
-    assert getattr(ds, 'Units', None) == 'BQML', 'DICOM PET Units is not BQML, cannot compute SUV reliably.'
+    if getattr(ds, 'Units', None) != 'BQML':
+        logging.warning('PET Units is not BQML, found: %s. SUV computation may be incorrect.', getattr(ds, 'Units', None))
 
     # TODO: If Units are not BQML, implement the conversion function based
     # on the calibration factor and other parameters.
@@ -264,17 +265,13 @@ def process_subject(subject_path: str, out_subject_path: str):
         return
 
     # ── 2. Groupement par SeriesInstanceUID ───────────────────────────────────
-    # On lit uniquement les métadonnées (stop_before_pixels) pour être rapide.
     series_map: dict[str, dict] = {}   # uid → {files, modality_tag, series_desc}
 
     for fpath in dicom_files:
-        try:
-            ds = pydicom.dcmread(fpath, stop_before_pixels=True)
-        except Exception:
-            continue  # fichier non DICOM ou corrompu — on passe
-
+        ds = pydicom.dcmread(fpath, stop_before_pixels=True)
         uid   = getattr(ds, 'SeriesInstanceUID', None)
         if uid is None:
+            logging.warning(f'Skipping file without SeriesInstanceUID: {fpath}')
             continue  # impossible de grouper sans UID
 
         uid = str(uid)
@@ -306,10 +303,21 @@ def process_subject(subject_path: str, out_subject_path: str):
         filenames_sorted = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(
             os.path.dirname(info['files'][0]), uid
         )
-        # Fallback si GetGDCMSeriesFileNames ne trouve rien (fichiers dans
-        # plusieurs sous-dossiers) : tri lexicographique sur le nom de fichier
-        if not filenames_sorted:
-            filenames_sorted = sorted(info['files'])
+
+        # Fallback si GetGDCMSeriesFileNames ne trouve rien, on tri par profondeur de slice
+        if filenames_sorted.__len__() == 0:
+            slices_with_z = []
+            for f in info['files']:
+                ds_slice = pydicom.dcmread(f, stop_before_pixels=True)
+                if hasattr(ds_slice, 'ImagePositionPatient'):
+                    z = float(ds_slice.ImagePositionPatient[2])
+                else:
+                    z = float(getattr(ds_slice, 'InstanceNumber', 0))
+                    
+                slices_with_z.append((z, f))
+
+            slices_with_z.sort(key=lambda x: x)
+            filenames_sorted = [f for z, f in slices_with_z]
 
         process_series_folder(
             filenames      = filenames_sorted,
@@ -317,7 +325,6 @@ def process_subject(subject_path: str, out_subject_path: str):
             modality       = modality,
             series_description = info['series_desc'],
         )
-
 
 def process_subjects_directory(root_path: str, out_root: str, num_workers: int = 1):
     root = os.path.abspath(root_path)

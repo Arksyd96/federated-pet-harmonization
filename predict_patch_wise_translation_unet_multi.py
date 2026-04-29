@@ -145,8 +145,8 @@ def process_subject(model, batch, device, filename, check_if_exists, curr_idx, l
     output_dir = os.path.dirname(source_path)
     output_filename = f'{filename}'
     
-    for output_sitk, suffix in zip([output_sitk_earl_1, output_sitk_earl_2], ['_EARL1.nii.gz', '_EARL2.nii.gz']):
-        output_path = os.path.join(output_dir, f'{output_filename}{suffix}')
+    for output_sitk, prefix in zip([output_sitk_earl_1, output_sitk_earl_2], ['predicted_EARL1', 'predicted_EARL2']):
+        output_path = os.path.join(output_dir, f'{prefix}{output_filename}.nii.gz')
         sitk.WriteImage(output_sitk, output_path)
         print(f'Prediction saved at: {output_path}')
 
@@ -179,7 +179,7 @@ if __name__ == "__main__":
     parser.add_argument('--config-file', '-c', type=str, required=True, help='Path to the config yaml file.')
     parser.add_argument('--ckpt-path', '-m', type=str, required=True, help='Path to the model checkpoint (.ckpt).')
     parser.add_argument('--check', action='store_true', help='Check if predictions already exist before processing.')
-    parser.add_argument('--filename', '-f', type=str, required=False, default='predicted_EARL_unet', help='Filename to process (if needed).')
+    parser.add_argument('--filename', '-f', type=str, required=False, default='', help='Filename to process (if needed).')
     args = parser.parse_args()
     
     predict_patch_wise_earl(args)

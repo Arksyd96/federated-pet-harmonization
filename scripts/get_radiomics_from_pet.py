@@ -13,9 +13,24 @@ from radiomics import featureextractor
 from scipy.ndimage import distance_transform_edt
 import re
 
+import gc
+import psutil
 
 # Configuration du logging par défaut
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+# --- NOUVELLE FONCTION DE SÉCURITÉ ---
+def check_ram_safety(num_workers, estimated_per_worker_gb=6.0):
+    """Vérifie si la RAM disponible est suffisante pour le pool de workers."""
+    available_gb = psutil.virtual_memory().available / (1024**3)
+    required_gb = num_workers * estimated_per_worker_gb
+    
+    logging.info(f"💾 RAM Dispo : {available_gb:.1f} GB | Requis estimé : {required_gb:.1f} GB")
+    
+    if required_gb > available_gb:
+        logging.error(f"⚠️ DANGER : Saturation mémoire imminente. Réduisez le nombre de workers.")
+        return False
+    return True
 
 def generate_centered_sphere(sitk_mask, radius_mm=15.0, use_barycenter=False, margin_mm=1.0, shift_mm=(0.0, 0.0, 0.0)):
     spacing = sitk_mask.GetSpacing() # (sx, sy, sz)
@@ -109,7 +124,7 @@ def parse_pred_mod(filename):
     return output_name
 
 def process_single_subject(args):
-    subject_id, root_dir, mask_filename, params_file, use_sphere, sphere_radius = args
+    subject_id, root_dir, mask_filename, params_file, use_sphere, sphere_radius, filenames, output_name = args
 
     logging.getLogger().setLevel(logging.WARNING) 
     sitk.ProcessObject.SetGlobalWarningDisplay(False)
@@ -147,28 +162,36 @@ def process_single_subject(args):
         current_mask_input = mask_path
 
     # --- Extraction PET ---
-    pet_files = [
-        f for f in os.listdir(subject_path) 
-        if (f.startswith('PET') or f.startswith('EARL') or f.startswith('predicted') or f.startswith('harmonized'))
-        and (f.endswith('.nii') or f.endswith('.nii.gz'))
-        and 'vae' in f.lower()
-        and 'MIP' not in f
-    ]
+    pet_files = []
+    if filenames:
+        for f in filenames:
+            # add nii.gz if not present
+            if not f.endswith(('.nii', '.nii.gz')):
+                f += '.nii.gz'
+            if os.path.exists(os.path.join(subject_path, f)):
+                pet_files.append(f)
+            else:
+                logging.warning(f"[{subject_id}] Fichier non trouvé : {f}")
 
     if not pet_files:
         logging.warning(f"[{subject_id}] Aucun fichier PET (PET/EARL*) trouvé.")
         return
-
+                    
     for pet_file in pet_files:
         pet_path = os.path.join(subject_path, pet_file)
-        modality = 'PET_Standard' if pet_file.startswith('PET') \
-                    else (
-                        'PET_EARL' if pet_file.startswith('EARL') 
-                        else (
-                            'PET_Harmonized' if pet_file.startswith('harmonized')
-                            else parse_pred_mod(pet_file)
-                        )
-                    )
+        
+        # Détermination robuste de la Modalité
+        if pet_file.startswith('PET'):
+            modality = 'PET_Standard'
+        elif pet_file.startswith('EARL'):
+            modality = 'PET_EARL'
+        elif pet_file.startswith('harmonized'):
+            modality = 'PET_Harmonized'
+        elif 'predicted' in pet_file.lower():
+            modality = parse_pred_mod(pet_file)
+        else:
+            # Fallback si le fichier a été trouvé via un mot-clé personnalisé
+            modality = pet_file.replace('.nii.gz', '').replace('.nii', '')
 
         # Extraction
         feature_vector = extractor.execute(pet_path, current_mask_input)
@@ -182,6 +205,9 @@ def process_single_subject(args):
             'ROI_type': 'Sphere_{}mm'.format(sphere_radius) if use_sphere else 'Original'
         })
         results.append(row)
+        
+        del feature_vector 
+        gc.collect()
 
     # --- Sauvegarde CSV Individuel (Thread-Safe) ---
     if results:
@@ -191,15 +217,22 @@ def process_single_subject(args):
         remaining_cols = [c for c in df.columns if c not in first_cols]
         df = df[first_cols + remaining_cols]
         
-        suffix = '_sphere_radiomics_vae.csv' if use_sphere else '_radiomics_vae.csv'
-        output_file = os.path.join(subject_path, mask_filename.split('.')[0] + suffix)
+        if output_name:
+            out_file_name = output_name + ('.csv' if not output_name.endswith('.csv') else '')
+        else:
+            suffix = '_sphere_radiomics.csv' if use_sphere else '_radiomics.csv'
+            out_file_name = mask_filename.split('.') + suffix
+            
+        output_file = os.path.join(subject_path, out_file_name)
         df.to_csv(output_file, index=False)
     else:
         logging.info(f"[{subject_id}] Aucun résultat d'extraction à sauvegarder.")
         return
     
 
-def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sphere_radius=20.0, num_workers=None):
+def process_subjects(
+    root_dir, mask_filename, params_file, use_sphere=False, sphere_radius=20.0, 
+    num_workers=None, filenames=None, output_name=None):
     if not os.path.exists(root_dir):
         logging.error(f"Le dossier racine n'existe pas : {root_dir}")
         return
@@ -222,6 +255,7 @@ def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sph
     
     logging.info(f"Traitement de {len(subjects)} sujets avec {num_workers} workers 🚀")
     logging.info(f"Mode Sphère : {use_sphere} | Masque : {mask_filename}")
+    
     # calcul volume de la sphere pour info avec radius par défaut
     if use_sphere:
         voxel_volume = np.prod(sitk.ReadImage(os.path.join(root_dir, subjects[0], mask_filename)).GetSpacing())
@@ -231,7 +265,7 @@ def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sph
 
     # Préparation des tâches
     tasks = [
-        (subject, root_dir, mask_filename, params_file, use_sphere, sphere_radius) 
+        (subject, root_dir, mask_filename, params_file, use_sphere, sphere_radius, filenames, output_name) 
         for subject in subjects
     ]
 
@@ -260,16 +294,20 @@ if __name__ == "__main__":
     parser.add_argument("--params", "-p", type=str, default=None, help="YAML pyradiomics params file.")
     parser.add_argument("--num-workers", "-n", type=int, default=None, help="Number of parallel workers (default: all available minus 2).")
     parser.add_argument("--debug-radiomics", "-db",action="store_true")
+    parser.add_argument("--filenames", "-k", type=str, nargs='*', default=None, help="Liste des fichiers à traiter.")
+    parser.add_argument("--output-name", "-o", type=str, default=None, help="Nom exact du fichier CSV en sortie (ex: results.csv).")
     args = parser.parse_args()
 
     if args.debug_radiomics:    logging.getLogger('radiomics').setLevel(logging.INFO)
     else:                       logging.getLogger('radiomics').setLevel(logging.ERROR)
-
+    
     process_subjects(
         args.root, 
         args.mask, 
         args.params, 
         use_sphere=args.use_sphere, 
         sphere_radius=args.sphere_radius, 
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        filenames=args.filenames,
+        output_name=args.output_name
     )

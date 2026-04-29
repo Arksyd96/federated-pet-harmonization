@@ -8,10 +8,10 @@ dir_name: runs/2d-to-3d-pet-earl-translation-unet-dsr10-nantes
 name: Traduction PET EARL2 5x64x64 DSR 10p Nantes (UNet)
 
 datamodule:
-    root_dir: ./data/Nantes_dataset_Nifti/
+    root_dir: ./data/PET-EARL/foundation-dataset/domain_a100/
     batch_size: 64
     # train_ratio: 1.0 # No DSR
-    train_ratio: 10 # for DSR with N subjects only
+    train_ratio: 0 # for DSR with N subjects only | 0 means all as validation
     patch_size: [5, 64, 64]
     num_workers: 16 
     queue_max_length: 9000
@@ -68,7 +68,7 @@ diffuser:
 # UNet regression style related modules
 translation_model:
     in_ch: 5          
-    out_ch: 5         
+    out_ch: 10         
     spatial_dims: 2 
     hid_chs: [64, 128, 256, 512]
     kernel_sizes: [3, 3, 3, 3]

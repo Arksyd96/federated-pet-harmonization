@@ -8,9 +8,11 @@ from totalsegmentator.python_api import totalsegmentator
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def find_subject_folders(root):
+def find_subject_folders(root, include_only=None):
     subs = []
     for name in sorted(os.listdir(root)):
+        if include_only and name not in include_only:
+            continue
         full = os.path.join(root, name)
         if os.path.isdir(full):
             subs.append(full)
@@ -21,7 +23,7 @@ def find_ct_file_in_folder(folder):
     for name in sorted(os.listdir(folder)):
         low = name.lower()
         if low.endswith('.nii') or low.endswith('.nii.gz'):
-            if low.startswith('ct') or 'ct' in low:
+            if low.startswith('ct'):
                 return os.path.join(folder, name)
     return None
 
@@ -63,12 +65,12 @@ def run_totalseg_on_subject(ct_file, out_folder, device='cpu', task='total', roi
         return False
 
 
-def process_dataset(root, device='cpu', task='total', roi_subset=None, overwrite=False, keep_temp=False, fast=False):
+def process_dataset(root, device='cpu', task='total', roi_subset=None, overwrite=False, keep_temp=False, fast=False, include_only=None):
     if os.path.isfile(root):
         logging.error('Input path is a file, expected folder: %s', root)
         return
     
-    subjects = find_subject_folders(root)
+    subjects = find_subject_folders(root, include_only=include_only)
     if not subjects:
         logging.error('No subject subfolders found under root: %s', root)
         return
@@ -113,6 +115,7 @@ if __name__ == '__main__':
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing organ files')
     parser.add_argument('--keep-temp', action='store_true', help='Keep TotalSegmentator output folder for debugging')
     parser.add_argument('--fast', action='store_true', help='Use fast (lower resolution) TotalSegmentator mode')
+    parser.add_argument("--include-only", type=str, nargs='*', default=None, help="List of subject IDs to include (default: all).")
     args = parser.parse_args()
 
     roi_subset = args.roi_subset.split(',') if args.roi_subset else None
@@ -123,5 +126,6 @@ if __name__ == '__main__':
         roi_subset=roi_subset, 
         overwrite=args.overwrite, 
         keep_temp=args.keep_temp, 
-        fast=args.fast
+        fast=args.fast,
+        include_only=args.include_only
     )
