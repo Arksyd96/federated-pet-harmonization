@@ -1,27 +1,3 @@
-"""
-StarGAN v2 pour harmonisation PET multi-sites.
-===============================================
-
-Architecture :
-  StyleEncoder          : CNN + FFT(x) → style_code (B, style_dim)
-                          Global Average Pooling → pas d'info spatiale/anatomique
-  Generator             : UNet existant conditionné par style via cond_embedder
-  StarGANv2Discriminator: PatchGAN avec une tête par domaine
-
-Résolution du problème patch-par-patch :
-  La signature scanner est un biais global de calibration matériel,
-  indépendant de l'anatomie locale. Un patch de foie du site A peut
-  apprendre le style d'un patch de cerveau du site B.
-  En inférence : moyenne des style codes sur N patches du volume référence
-  → un seul vecteur style appliqué uniformément à tous les patches source.
-
-Losses :
-  L_adv  : adversariale BCE + R1 gradient penalty (stabilité D)
-  L_sty  : reconstruction style — E(G(x, s_tgt)) ≈ s_tgt
-  L_cyc  : cohérence cyclique — G(G(x, s_tgt), s_src) ≈ x
-  L_rec  : auto-reconstruction warmup — G(x, E(x)) ≈ x
-"""
-
 from typing import Dict, List, Optional, Tuple, Union
 import math
 import random
@@ -134,17 +110,6 @@ class AdaINResBlock(nn.Module):
 # =============================================================================
 
 class StarGANv2Generator(nn.Module):
-    """
-    StarGAN v2 Generator for PET Harmonization with proper skip connections.
-    
-    Architecture:
-      - Input conv: x → initial features
-      - Encoder: downsampling with AdaIN blocks + skip connections
-      - Middle: AdaIN → Attention → AdaIN (fixed, no loop)
-      - Decoder: upsampling with AdaIN blocks + skip concatenation
-      - Output conv: features → x_fake
-    """
-
     def __init__(
         self,
         in_channels: int = 5,
@@ -829,7 +794,7 @@ class StarGANv2(LightningModule):
         self,
         x_source:       torch.Tensor,
         z_style_fixed:  Optional[torch.Tensor] = None,
-        x_style_ref:    Optional[torch.Tensor] = None,
+        x_style_ref:    Optional[torch.Tensor] = None, # must be a patch
     ) -> torch.Tensor:
         """
         Harmonise x_source vers un style cible.

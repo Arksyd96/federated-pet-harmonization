@@ -177,7 +177,7 @@ def process_subject(model, batch, device, filename, curr_idx, length_loader, z_s
                         patch_norm,
                         x_style_ref=None,
                         z_style_fixed=z_style_fixed, # None → style neutre
-                        style_dropout_p=0.05
+                        style_dropout_p=0.95
                     )
                     # patch_pred_norm, *_ = vae.forward(patch_norm)
                     patch_pred = model._denormalize(patch_pred_norm).squeeze(0)  # (D, H, W)

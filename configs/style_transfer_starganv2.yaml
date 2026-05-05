@@ -9,9 +9,9 @@ name: "StarGAN v2 — Harmonisation PET multi-sites (3 domaines)"
 datamodule:
     root_dir: ./data/PET-EARL/foundation-dataset
     split_config:
-        - [60, 15]           # Site 1: 60 train, 5 val
-        - [60, 15]           # Site 2: 60 train, 5 val
-        - [60, 15]           # Site 3: 60 train, 5 val
+        - [0, 50]           # Site 1: 60 train, 5 val
+        - [0, 50]           # Site 2: 60 train, 5 val
+        - [0, 50]           # Site 3: 60 train, 5 val
     batch_size: 64           # Need inter-domain diversity in each batch
     patch_size: [5, 64, 64] # 2D patches: 5 channels, 64×64 pixels
     num_workers: 16
@@ -34,14 +34,14 @@ generator:
     kernel_sizes: [3, 3, 3, 3]              # Kernel sizes per level
     strides: [1, 2, 2, 2]                # Downsampling strides
     style_embedding_dim: 128                # IMPORTANT: style embedding dimension
-    num_residual_blocks: 2                   # Residual blocks per level
+    num_residual_blocks: 2                  # Residual blocks per level
     dropout: 0.05                           # Dropout rate
     learnable_interpolation: true           # Learnable upsampling
-    attention_type: none                     # Attention type
+    attention_type: none                    # Attention type
 
 
 discriminator:
-    in_channels:     5                      # Input channels
+    in_channels:     5                     # Input channels
     hidden_channels: [64, 128, 256, 512]   # Hidden layers
 
 
