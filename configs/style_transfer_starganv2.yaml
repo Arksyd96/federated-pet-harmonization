@@ -9,9 +9,10 @@ name: "StarGAN v2 — Harmonisation PET multi-sites (3 domaines)"
 datamodule:
     root_dir: ./data/PET-EARL/foundation-dataset
     split_config:
-        - [0, 50]           # Site 1: 60 train, 5 val
-        - [0, 50]           # Site 2: 60 train, 5 val
-        - [0, 50]           # Site 3: 60 train, 5 val
+        - [0, 0]           
+        - [0, 0]           
+        - [0, 50]           
+        - [0, 0]          
     batch_size: 64           # Need inter-domain diversity in each batch
     patch_size: [5, 64, 64] # 2D patches: 5 channels, 64×64 pixels
     num_workers: 16

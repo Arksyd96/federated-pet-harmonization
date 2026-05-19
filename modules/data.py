@@ -706,14 +706,46 @@ class MultiTargetPETDataModule(BasePETDataModule):
         }
         
         
+class CropToVOI(tio.Transform):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
-import os
-import numpy as np
-import torch
-import torchio as tio
-import multiprocessing
-from typing import List, Union, Tuple
-from pytorch_lightning import LightningDataModule
+    def apply_transform(self, subject: tio.Subject) -> tio.Subject:
+        if 'voi' not in subject:
+            return subject
+        
+        # Récupération des données du masque (Shape: C, W, H, D)
+        mask_data = subject['voi'].data
+        nonzero = torch.nonzero(mask_data > 0)
+        
+        if nonzero.numel() == 0:
+            return subject  # Masque vide, on renvoie le volume entier
+        
+        # Les dimensions spatiales sont aux index 1, 2, 3 du tenseur nonzero
+        min_w, max_w = nonzero[:, 1].min().item(), nonzero[:, 1].max().item()
+        min_h, max_h = nonzero[:, 2].min().item(), nonzero[:, 2].max().item()
+        min_d, max_d = nonzero[:, 3].min().item(), nonzero[:, 3].max().item()
+        
+        # Récupération des dimensions max de l'image
+        w, h, d = subject['source'].spatial_shape
+        
+        # Calcul du nombre de voxels à supprimer sur chaque face (6-tuple requis par TorchIO)
+        crop_left = min_w
+        crop_right = w - (max_w + 1)
+        crop_top = min_h
+        crop_bottom = h - (max_h + 1)
+        crop_front = min_d
+        crop_back = d - (max_d + 1)
+        
+        # Application du recadrage physique (met à jour la matrice d'orientation affine automatiquement)
+        cropper = tio.Crop((crop_left, crop_right, crop_top, crop_bottom, crop_front, crop_back))
+        cropped_subject = cropper(subject)
+        
+        # Isolation stricte : On multiplie l'image par le masque pour éliminer le reste (ex: poumons si on veut le foie)
+        # cropped_subject['source'].data = cropped_subject['source'].data * (cropped_subject['voi'].data > 0).float()
+        
+        return cropped_subject
+
 
 # Définition des types pour plus de clarté
 SplitConfigType = Union[
@@ -737,6 +769,7 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
         num_workers: int = 8,
         queue_max_length: int = 600,      
         samples_per_volume: int = 4,
+        voi_filename: Optional[str] = None, # pour le recadrage à la VOI si besoin en inférence
         seed: int = 42 # Ajout d'une seed pour garantir la reproductibilité du split
     ):
         super().__init__()
@@ -747,7 +780,9 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.queue_max_length = queue_max_length
         self.samples_per_volume = samples_per_volume
+        self.voi_filename = voi_filename
         self.seed = seed
+        
         
         self.domain_to_id = {}
         self.train_subjects = []
@@ -773,13 +808,24 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
             pet_file, body_file = self.get_pet_body_files(files)
             
             if pet_file and body_file:
-                subject = tio.Subject(
-                    source=tio.Image(os.path.join(subj_path, pet_file), type=tio.INTENSITY),
-                    sampling_map=tio.Image(os.path.join(subj_path, body_file), type=tio.LABEL),
-                    domain_id=torch.tensor(domain_id).long(),
-                    subject_name=subj_name,
-                    domain_name=domain_name
-                )
+                # Configuration de base du sujet
+                subject_kwargs = {
+                    "source": tio.Image(os.path.join(subj_path, pet_file), type=tio.INTENSITY),
+                    "sampling_map": tio.Image(os.path.join(subj_path, body_file), type=tio.LABEL),
+                    "domain_id": torch.tensor(domain_id).long(),
+                    "subject_name": subj_name,
+                    "domain_name": domain_name
+                }
+                
+                if self.voi_filename:
+                    # Recherche exacte ou partielle du fichier spécifié
+                    matched_voi = next(f for f in files if f == self.voi_filename or f == f"{self.voi_filename}.nii.gz")
+                    if matched_voi:
+                        subject_kwargs["voi"] = tio.Image(os.path.join(subj_path, matched_voi), type=tio.LABEL)
+                    else:
+                        print(f"[{subj_name}] Masque VOI '{self.voi_filename}' introuvable.")
+                
+                subject = tio.Subject(**subject_kwargs)
                 tio_subjects.append(subject)
         return tio_subjects
 
@@ -907,7 +953,30 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
                 pin_memory=True, 
                 shuffle=False
             )
-        return None      
+        return None 
+    
+    def voi_dataloader(self):
+        if not self.voi_filename:
+            raise ValueError("Impossible d'appeler voi_dataloader sans avoir défini 'voi_filename' à l'initialisation.")
+            
+        if self.val_subjects:
+            # Construction de la pipeline de transformation dédiée à la VOI (Pas de data augmentation !)
+            voi_transform = tio.Compose([
+                Float32Lambda(), 
+                tio.ToCanonical(),
+                CropToVOI() # Application de notre cropper intelligent
+            ])
+            
+            voi_dataset = tio.SubjectsDataset(self.val_subjects, transform=voi_transform)
+            
+            return tio.SubjectsLoader(
+                voi_dataset, 
+                batch_size=1, 
+                num_workers=multiprocessing.cpu_count() // 2, 
+                pin_memory=True, 
+                shuffle=False
+            )
+        return None     
     
 
 

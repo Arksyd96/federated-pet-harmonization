@@ -10,12 +10,15 @@ from omegaconf import OmegaConf
 from scipy.ndimage import gaussian_filter
 
 from modules.data import MultiDomainUnlearningDataModule, Float32Lambda
-from modules.models.starganv2 import StarGANv2, StyleEncoder, StarGANv2Discriminator, StarGANv2Generator, StyleEmbedder
+from modules.models.starganv2 import (
+    StarGANv2, StyleEncoder, StarGANv2Discriminator,
+    StarGANv2Generator, StyleEmbedder,
+)
 from modules.utils import set_seed
 
 
 # =============================================================================
-# Utilitaires patchs (identiques aux autres scripts d'inférence)
+# Utilitaires patchs
 # =============================================================================
 
 def get_uniform_starts(dim_size: int, patch_size: int, min_overlap_ratio: float = 0.5) -> list[int]:
@@ -40,64 +43,27 @@ def make_gaussian_weight_map(
 
 
 # =============================================================================
-# Extraction du style moyen depuis un volume de référence NIfTI
+# Chargement du style pré-extrait
 # =============================================================================
 
-def extract_mean_style(
-    ref_nifti_path: str,
-    model: StarGANv2,
-    device: torch.device,
-    z_patch_size: int = 5,
-    y_patch_size: int = 64,
-    x_patch_size: int = 64,
-) -> torch.Tensor:
+def load_style(style_path: str, device: torch.device) -> torch.Tensor:
     """
-    Charge le volume de référence (Float32Lambda + ToCanonical),
-    extrait le style_code sur chaque patch valide et retourne la moyenne.
+    Charge le fichier .pt produit par extract_style_stargan.py.
 
     Returns
     -------
-    style_mean : (1, style_dim) — à passer à harmonize(z_style_fixed=...)
+    style : (1, style_dim) sur device
     """
-    print(f"Extracting mean style from reference: {ref_nifti_path}")
+    checkpoint = torch.load(style_path, map_location=device)
+    style      = checkpoint["style"].to(device)   # (1, style_dim)
 
-    transform = tio.Compose([Float32Lambda(), tio.ToCanonical()])
-    ref_subject = tio.Subject(source=tio.Image(ref_nifti_path, type=tio.INTENSITY))
-    ref_subject = transform(ref_subject)
+    print(f"Style loaded from : {style_path}")
+    print(f"  mode       : {checkpoint.get('mode', 'N/A')}")
+    print(f"  n_patients : {checkpoint.get('n_patients', 'N/A')}")
+    print(f"  style_dim  : {checkpoint.get('style_dim', style.shape[-1])}")
+    print(f"  repo_ref   : {checkpoint.get('repo_ref', 'N/A')}")
 
-    ref_tensor = ref_subject["source"][tio.DATA].float().to(device)  # (1, D, H, W)
-    _, d_dim, h_dim, w_dim = ref_tensor.shape
-
-    # Overlap minimal pour l'extraction de style — on veut juste diversité spatiale
-    z_starts = get_uniform_starts(d_dim, z_patch_size, min_overlap_ratio=0.1)
-    y_starts = get_uniform_starts(h_dim, y_patch_size, min_overlap_ratio=0.1)
-    x_starts = get_uniform_starts(w_dim, x_patch_size, min_overlap_ratio=0.1)
-
-    style_list = []
-
-    with torch.no_grad():
-        for z in z_starts:
-            for y in y_starts:
-                for x in x_starts:
-                    patch = ref_tensor[
-                        :,
-                        z:z + z_patch_size,
-                        y:y + y_patch_size,
-                        x:x + x_patch_size,
-                    ]
-                    if patch.mean() < 1e-3:
-                        continue
-
-                    patch_norm   = model._normalize(patch)
-                    style_code   = model.style_encoder(patch_norm)   # (1, style_dim)
-                    style_list.append(style_code)
-
-    if not style_list:
-        raise RuntimeError("Aucun patch valide trouvé dans le volume de référence.")
-
-    style_mean = torch.stack(style_list, dim=0).mean(dim=0)  # (1, style_dim)
-    print(f"Style extracted from {len(style_list)} patches — shape: {style_mean.shape}")
-    return style_mean
+    return style
 
 
 # =============================================================================
@@ -105,39 +71,61 @@ def extract_mean_style(
 # =============================================================================
 
 def process_subject(
-    model: StarGANv2,
+    model,
     batch: dict,
     device: torch.device,
     filename: str,
     curr_idx: int,
     length_loader: int,
     z_style_fixed: torch.Tensor,
+    voi_filename: str = None
 ):
-    print(f"Treating subject: {batch['subject_name'][0]} ({curr_idx}/{length_loader})")
+    print(f"Treating subject: {batch['subject_name']} ({curr_idx}/{length_loader})")
 
     # --- 1. Préparation du tenseur ---
     suv_source = batch["source"][tio.DATA].float().to(device)
+        
     if suv_source.ndim == 5:
-        suv_source = suv_source.squeeze(1)      # (B,1,D,H,W) → (B,D,H,W)
+        suv_source = suv_source.squeeze(1)
 
     b, d_dim, h_dim, w_dim = suv_source.shape
+    
+    # 🎯 CRUCIAL : On sauvegarde les dimensions d'origine de l'organe
+    orig_d, orig_h, orig_w = d_dim, h_dim, w_dim
 
-    output_volume = torch.zeros((d_dim, h_dim, w_dim), device=device)
-    weight_sum    = torch.zeros((d_dim, h_dim, w_dim), device=device)
-
-    # --- 2. Configuration dynamique des patchs ---
+    # --- 2. Configuration dynamique des patchs & PADDING ---
     z_patch_size = 5
     y_patch_size = 64
     x_patch_size = 64
+    
+    # Pad symétrique si le volume est plus petit que la taille minimale du patch
+    if d_dim < z_patch_size:
+        pad_z = z_patch_size - d_dim
+        suv_source = torch.nn.functional.pad(suv_source, (0, 0, 0, 0, pad_z // 2, pad_z - pad_z // 2))
+        d_dim += pad_z
+    if h_dim < y_patch_size:
+        pad_y = y_patch_size - h_dim
+        suv_source = torch.nn.functional.pad(suv_source, (0, 0, pad_y // 2, pad_y - pad_y // 2, 0, 0))
+        h_dim += pad_y
+    if w_dim < x_patch_size:
+        pad_x = x_patch_size - w_dim
+        suv_source = torch.nn.functional.pad(suv_source, (pad_x // 2, pad_x - pad_x // 2, 0, 0, 0, 0))
+        w_dim += pad_x
+
+    # 🎯 CORRECTION 1 : On initialise les volumes vides APRÈS avoir mis à jour d_dim, h_dim, w_dim
+    output_volume = torch.zeros((d_dim, h_dim, w_dim), device=device)
+    weight_sum    = torch.zeros((d_dim, h_dim, w_dim), device=device)
 
     z_starts = get_uniform_starts(d_dim, z_patch_size, min_overlap_ratio=0.6)
     y_starts = get_uniform_starts(h_dim, y_patch_size, min_overlap_ratio=0.25)
     x_starts = get_uniform_starts(w_dim, x_patch_size, min_overlap_ratio=0.25)
 
     total_patches = len(z_starts) * len(y_starts) * len(x_starts)
+    style_mode    = "pré-extrait" if z_style_fixed is not None else "neutre (zéros)"
     print(
-        f"Volume: {d_dim}x{h_dim}x{w_dim} | "
-        f"Patches: {len(z_starts)}x{len(y_starts)}x{len(x_starts)} = {total_patches}"
+        f"Volume (Padded): {d_dim}x{h_dim}x{w_dim} (Original: {orig_d}x{orig_h}x{orig_w}) | "
+        f"Patches: {len(z_starts)}x{len(y_starts)}x{len(x_starts)} = {total_patches} | "
+        f"Style: {style_mode}"
     )
 
     gauss_w = make_gaussian_weight_map(
@@ -162,15 +150,12 @@ def process_subject(
                         pbar.update(1)
                         continue
 
-                    patch_norm = model._normalize(patch_src)
-
-                    # Inférence via harmonize — z_style_fixed précalculé
+                    patch_norm      = model._normalize(patch_src)
                     patch_pred_norm = model.harmonize(
                         patch_norm,
                         z_style_fixed=z_style_fixed,
                     )
-
-                    patch_pred = model._denormalize(patch_pred_norm).squeeze(0)  # (D, H, W)
+                    patch_pred = model._denormalize(patch_pred_norm).squeeze(0)
 
                     output_volume[
                         z:z + z_patch_size,
@@ -187,21 +172,64 @@ def process_subject(
 
     pbar.close()
 
-    # --- 4. Normalisation finale et post-processing ---
-    final_prediction = (output_volume / weight_sum.clamp(min=1e-8)).cpu()
-    final_prediction = final_prediction.squeeze().permute(2, 1, 0).numpy()
-    final_prediction = np.flip(final_prediction, axis=2)    # Flip Z
-    final_prediction = np.flip(final_prediction, axis=1)    # Flip Y
-    # final_prediction = gaussian_filter(final_prediction, sigma=1.0)
+    # --- 4. Post-processing et sauvegarde ---
+    recon_volume = (output_volume / weight_sum.clamp(min=1e-8)).cpu()
+    
+    # 🎯 CORRECTION 2 : On crop le volume reconstruit pour virer le padding et retrouver la taille initiale de l'organe
+    crop_z_start = (d_dim - orig_d) // 2
+    crop_y_start = (h_dim - orig_h) // 2
+    crop_x_start = (w_dim - orig_w) // 2
+    
+    recon_volume = recon_volume[
+        crop_z_start : crop_z_start + orig_d,
+        crop_y_start : crop_y_start + orig_h,
+        crop_x_start : crop_x_start + orig_w
+    ]
 
-    # --- 5. Sauvegarde ---
-    output_sitk = sitk.GetImageFromArray(final_prediction)
     source_path = batch['source']['path'][0]
-    output_sitk.CopyInformation(sitk.ReadImage(source_path))
 
-    output_path = os.path.join(os.path.dirname(source_path), f"{filename}.nii.gz")
-    sitk.WriteImage(output_sitk, output_path)
-    print(f"Prediction saved at: {output_path}")
+    if voi_filename is not None:
+        if z_style_fixed is None:
+            np_arr = gaussian_filter(recon_volume.numpy(), sigma=1.0)
+            recon_volume = torch.from_numpy(np_arr)
+
+        affine_matrix = batch['source'][tio.AFFINE][0]
+
+        # pred_tio fait maintenant exactement la taille attendue (orig_d, orig_h, orig_w)
+        pred_tio = tio.ScalarImage(tensor=recon_volume.unsqueeze(0), affine=affine_matrix)
+        output_sitk = pred_tio.as_sitk()
+
+        output_path = os.path.join(os.path.dirname(source_path), f"{filename}_voi_only.nii.gz")
+        sitk.WriteImage(output_sitk, output_path)
+        print(f"Prediction (Cropped VOI) saved at: {output_path}")
+
+        mask_tensor = batch['voi'][tio.DATA].cpu() 
+        if mask_tensor.shape[1] == 1:
+            mask_tensor = mask_tensor.squeeze(1)
+        
+        mask_tio = tio.LabelMap(tensor=mask_tensor, affine=affine_matrix)
+        mask_sitk = mask_tio.as_sitk()
+
+        mask_base_name = voi_filename.split('.')[0]
+        mask_output_path = os.path.join(os.path.dirname(source_path), f"{mask_base_name}_cropped.nii.gz")
+        sitk.WriteImage(mask_sitk, mask_output_path)
+        print(f"Matching cropped mask saved at: {mask_output_path}")
+
+    else:
+        # CAS DU VOLUME ENTIER
+        final_prediction = recon_volume.squeeze().permute(2, 1, 0).numpy()
+        final_prediction = np.flip(final_prediction, axis=2)
+        final_prediction = np.flip(final_prediction, axis=1)
+        
+        if z_style_fixed is None:
+            final_prediction = gaussian_filter(final_prediction, sigma=1.0)
+
+        output_sitk = sitk.GetImageFromArray(final_prediction)
+        output_sitk.CopyInformation(sitk.ReadImage(source_path))
+
+        output_path = os.path.join(os.path.dirname(source_path), f"{filename}.nii.gz")
+        sitk.WriteImage(output_sitk, output_path)
+        print(f"Whole-body prediction saved at: {output_path}")
 
 
 # =============================================================================
@@ -216,9 +244,9 @@ def predict_patch_wise_stargan(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Running on device: {device}")
 
-    pipeline_cfg = config.get("pipeline", {})
+    pipeline_cfg  = config.get("pipeline", {})
 
-    # ── Instanciation des composants ─────────────────────────────────────────
+    # ── Chargement du modèle ──────────────────────────────────────────────────
     print(f"Loading model from: {args.ckpt_path}")
     style_encoder  = StyleEncoder(**config.get("style_encoder", {}))
     style_embedder = StyleEmbedder(
@@ -244,38 +272,41 @@ def predict_patch_wise_stargan(args):
     model.eval()
     print("Model loaded successfully.")
 
-    # ── Extraction du style de référence ─────────────────────────────────────
-    z_style_fixed = extract_mean_style(
-        ref_nifti_path=args.style_ref,
-        model=model,
-        device=device,
-    )
+    # ── Chargement du style ───────────────────────────────────────────────────
+    z_style_fixed = None
+    if args.style_ref:
+        z_style_fixed = load_style(args.style_ref, device)
+    else:
+        print("⚠️  Aucun style fourni — utilisation du vecteur nul.")
+        z_style_fixed = torch.zeros(1, pipeline_cfg["style_dim"], device=device)
 
     # ── DataModule ────────────────────────────────────────────────────────────
-    datamodule = MultiDomainUnlearningDataModule(**config.get('datamodule', {}))
+    datamodule = MultiDomainUnlearningDataModule(**config.get('datamodule', {}), voi_filename=args.voi_filename)
     datamodule.prepare_data()
     datamodule.setup()
 
-    loader = datamodule.test_dataloader()
+    loader = datamodule.test_dataloader() if not args.voi_only else datamodule.voi_dataloader()
     for idx, batch in enumerate(loader):
         process_subject(
             model, batch, device, args.filename,
             idx + 1, len(loader),
             z_style_fixed=z_style_fixed,
+            voi_filename=args.voi_filename if args.voi_only else None
         )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Inférence patch-wise avec StarGANv2 — harmonisation PET"
+        description="Inférence patch-wise StarGAN v2 — harmonisation PET"
     )
     parser.add_argument('--config-file', '-c', type=str, required=True, help='Chemin vers le fichier config YAML.')
     parser.add_argument('--ckpt-path', '-m', type=str, required=True, help='Chemin vers le checkpoint (.ckpt).')
-    parser.add_argument('--style-ref', '-s', type=str, required=True, help='Chemin vers le volume NIfTI de réf')
-    parser.add_argument('--filename', '-f', type=str, required=False, default='harmonized_PET_stargan')
+    parser.add_argument('--style-ref', '-s', type=str, required=False, 
+                        default=None, help='Fichier .pt de style pré-extrait. Si absent → vecteur nul.')
+    parser.add_argument('--voi-only', action='store_true', help='Si activé, ne traite que les patchs contenant la VOI (ex. cerveau).')
+    parser.add_argument('--voi-filename', type=str, default=None, help='Chemin vers la VOI (masque binaire) à utiliser si --voi-only est activé.')
+    parser.add_argument('--filename', '-f', type=str, required=False, default='harmonized_PET_stargan',
+                        help='Nom du fichier de sortie (sans extension).')
     args = parser.parse_args()
-
-    if not os.path.exists(args.style_ref):
-        raise FileNotFoundError(f"Volume de référence introuvable : {args.style_ref}")
 
     predict_patch_wise_stargan(args)

@@ -1,25 +1,3 @@
-"""
-extract_style_stargan.py
-========================
-Extrait et agrège le vecteur de style depuis un ensemble de patients.
-
-Usage :
-    python extract_style_stargan.py \
-        --config-file config.yaml \
-        --ckpt-path model.ckpt \
-        --repo-ref /data/PET-EARL/site-rennes \
-        --filename-ref PET.nii.gz \
-        --num-samples 50 \
-        --mode medoid \
-        --output style_rennes.pt
-
-Modes disponibles :
-    mean    : moyenne des style codes
-    median  : médiane (robuste aux outliers)
-    medoid  : patient le plus représentatif (distance minimale aux autres)
-    cluster : centroïde k-means (k=1 par défaut, ajustable via --n-clusters)
-"""
-
 import argparse
 import math
 import os
@@ -32,6 +10,8 @@ from tqdm import tqdm
 from omegaconf import OmegaConf
 
 from modules.data import Float32Lambda
+
+# from modules.data import Float32Lambda
 from modules.models.starganv2 import (
     StarGANv2, StyleEncoder, StarGANv2Discriminator,
     StarGANv2Generator, StyleEmbedder,
@@ -219,7 +199,7 @@ def main(args):
         if os.path.isdir(os.path.join(args.repo_ref, p))
     ])
 
-    if args.num_samples < len(all_patients):
+    if args.num_samples is not None and args.num_samples < len(all_patients):
         all_patients = random.sample(all_patients, args.num_samples)
         print(f"Sampled {args.num_samples} patients from {len(all_patients)} available.")
     else:
@@ -286,8 +266,8 @@ if __name__ == "__main__":
                         help='Dossier racine contenant les patients de référence.')
     parser.add_argument('--filename-ref',  '-f', type=str, required=True,
                         help='Nom du fichier NIfTI dans chaque dossier patient (ex: PET.nii.gz).')
-    parser.add_argument('--num-samples',   '-n', type=int, default=50,
-                        help='Nombre de patients à échantillonner (défaut: 50).')
+    parser.add_argument('--num-samples',   '-n', type=int, default=None,
+                        help='Nombre de patients à échantillonner.')
     parser.add_argument('--mode',               type=str, default='medoid',
                         choices=['mean', 'median', 'medoid', 'cluster'],
                         help='Mode d\'agrégation (défaut: medoid).')
