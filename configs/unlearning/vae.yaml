@@ -8,10 +8,10 @@ name: Unlearning Harmonization with StyleVAE+AdaIN Conf2 (3 Domains)
 datamodule:
     root_dir:           ./data/PET-EARL/foundation-dataset
     split_config: 
-    - [0, 50]
-    - [0, 50]
-    - [0, 50]
-    - [0, 50]
+    - [0, 75]           
+    - [0, 75]           
+    - [0, 75]           
+    - [0, 75] 
     batch_size:         64
     patch_size:         [5, 64, 64]
     num_workers:        16

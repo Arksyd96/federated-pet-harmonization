@@ -9,9 +9,9 @@ from tqdm import tqdm
 from omegaconf import OmegaConf
 from scipy.ndimage import gaussian_filter
 
-from src.pet_harmonization.data import MultiDomainUnlearningDataModule, Float32Lambda
-from src.pet_harmonization.models.harmonization_vae import DisentangledHarmonizationVAE, UnlearningVAE
-from src.pet_harmonization.utils import set_seed
+from pet_harmonization.data import MultiDomainUnlearningDataModule, Float32Lambda
+from pet_harmonization.models.harmonization_vae import DisentangledHarmonizationVAE, UnlearningVAE
+from pet_harmonization.utils import set_seed
 
 
 # =============================================================================

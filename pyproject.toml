@@ -5,8 +5,6 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pet-harmonization"
 version = "0.1.0"
-requires-python = ">=3.9"
 
 [tool.setuptools.packages.find]
-where = ["src"]
 include = ["pet_harmonization*"]

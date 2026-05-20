@@ -15,8 +15,8 @@ from monai.networks.layers import Pool, Conv
 from monai.networks.layers.utils import get_act_layer, get_norm_layer, get_dropout_layer
 from monai.utils.misc import ensure_tuple_rep
 
-from src.pet_harmonization.models.attention import Attention
-from src.pet_harmonization.models.attention import Attention, zero_module
+from pet_harmonization.models.attention import Attention
+from pet_harmonization.models.attention import Attention, zero_module
 
 
 class AdaGroupNorm(nn.Module):

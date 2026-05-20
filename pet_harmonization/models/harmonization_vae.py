@@ -13,7 +13,7 @@ from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchvision.utils import make_grid
 
 from monai.networks.blocks import UnetOutBlock
-from src.pet_harmonization.models.base import (
+from pet_harmonization.models.base import (
     BasicBlock,
     BasicDown,
     BasicUp,
@@ -23,8 +23,8 @@ from src.pet_harmonization.models.base import (
     save_add,
 )
 
-from src.pet_harmonization.models.attention import Attention, zero_module
-from src.pet_harmonization.models.fft import FFTHighPassFilter, LearnableFFTHighPassFilter
+from pet_harmonization.models.attention import Attention, zero_module
+from pet_harmonization.models.fft import FFTHighPassFilter, LearnableFFTHighPassFilter
 
 
 # =============================================================================

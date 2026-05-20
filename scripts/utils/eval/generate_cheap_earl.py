@@ -9,22 +9,29 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def apply_gaussian_blur(input_path, output_path, sigma_mm=3.5):
-    """Applique un flou Gaussien sur une image NIfTI."""
+    """Applique un flou Gaussien sur une image NIfTI et force le fond à zéro absolu."""
     try:
         if not os.path.exists(input_path):
             return False, f"Fichier source introuvable : {os.path.basename(input_path)}"
         
-        # Création du dossier de destination miroir
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
         image = sitk.ReadImage(input_path)
-        
         gaussian_filter = sitk.SmoothingRecursiveGaussianImageFilter()
         gaussian_filter.SetSigma(sigma_mm)
         gaussian_filter.SetNormalizeAcrossScale(False)
-        
         blurred_image = gaussian_filter.Execute(image)
-        sitk.WriteImage(blurred_image, output_path)
+        
+        arr_orig = sitk.GetArrayFromImage(image)
+        arr_blurred = sitk.GetArrayFromImage(blurred_image)
+        
+        arr_blurred[arr_orig < 1e-4] = 0.0
+        
+        final_image = sitk.GetImageFromArray(arr_blurred)
+        final_image.CopyInformation(image)
+        
+        # 6. Sauvegarde
+        sitk.WriteImage(final_image, output_path)
         
         return True, "Succès"
     except Exception as e:
