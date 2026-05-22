@@ -63,7 +63,12 @@ def infer_patch(model_type: str, model, patch_src: torch.Tensor, style: torch.Te
         patch_pred = model._denormalize(patch_pred_norm)
         
     elif model_type == "vae":
-        patch_pred_norm = model.vae.harmonize(patch_norm, x_style_ref=None, z_style_fixed=style, style_dropout_p=0.95)
+        patch_pred_norm = model.vae.harmonize(
+            patch_norm, 
+            x_style_ref=None, 
+            z_style_fixed=style, 
+            style_dropout_p=0.95
+        )
         patch_pred = model._denormalize(patch_pred_norm)
         
     elif model_type == "unet_skip":
@@ -78,7 +83,7 @@ def infer_patch(model_type: str, model, patch_src: torch.Tensor, style: torch.Te
     else:
         raise ValueError(f"Modèle inconnu : {model_type}")
         
-    return patch_pred.squeeze( 0 )
+    return patch_pred.squeeze(0)
 
 # =============================================================================
 
@@ -144,10 +149,8 @@ def process_subject(
                     if patch_src.mean() < 1e-3: # Si le patch est essentiellement vide, on skip
                         pbar.update(1)
                         continue
-
-                    patch_norm = model._normalize(patch_src)
                     
-                    patch_pred = infer_patch(model_type, model, patch_norm, z_style_fixed)
+                    patch_pred = infer_patch(model_type, model, patch_src, z_style_fixed)
 
                     output_volume[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += patch_pred * gauss_w
                     weight_sum[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += gauss_w

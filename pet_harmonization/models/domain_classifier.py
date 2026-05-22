@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import List, Optional, Tuple, Dict
-from src.pet_harmonization.models.base import UnetResBlock, BasicBlock, BasicDown
+from pet_harmonization.models.base import UnetResBlock, BasicBlock, BasicDown
 
 class DomainClassifier(nn.Module):
     def __init__(

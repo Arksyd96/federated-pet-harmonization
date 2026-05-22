@@ -1,4 +1,5 @@
 import os
+import glob
 import argparse
 import logging
 import pandas as pd
@@ -11,26 +12,10 @@ from tqdm import tqdm
 import SimpleITK as sitk
 from radiomics import featureextractor
 from scipy.ndimage import distance_transform_edt
-import re
-
 import gc
-import psutil
 
 # Configuration du logging par défaut
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
-# --- NOUVELLE FONCTION DE SÉCURITÉ ---
-def check_ram_safety(num_workers, estimated_per_worker_gb=6.0):
-    """Vérifie si la RAM disponible est suffisante pour le pool de workers."""
-    available_gb = psutil.virtual_memory().available / (1024**3)
-    required_gb = num_workers * estimated_per_worker_gb
-    
-    logging.info(f"💾 RAM Dispo : {available_gb:.1f} GB | Requis estimé : {required_gb:.1f} GB")
-    
-    if required_gb > available_gb:
-        logging.error(f"⚠️ DANGER : Saturation mémoire imminente. Réduisez le nombre de workers.")
-        return False
-    return True
 
 def generate_centered_sphere(sitk_mask, radius_mm=15.0, use_barycenter=False, margin_mm=1.0, shift_mm=(0.0, 0.0, 0.0)):
     spacing = sitk_mask.GetSpacing() # (sx, sy, sz)
@@ -102,212 +87,189 @@ def generate_centered_sphere(sitk_mask, radius_mm=15.0, use_barycenter=False, ma
 
 def get_extractor(param_file=None):
     if param_file and os.path.isfile(param_file):
-        logging.info(f"Chargement de la configuration depuis : {param_file}")
         extractor = featureextractor.RadiomicsFeatureExtractor(param_file)
     else:
         extractor = featureextractor.RadiomicsFeatureExtractor()
         extractor.enableAllFeatures()
         extractor.disableFeatureByName('shape2D')
-        
         extractor.settings['correctMask'] = True 
         extractor.settings['geometryTolerance'] = 1e-5
         extractor.settings['binWidth'] = 0.25
-
     return extractor
 
-def parse_pred_mod(filename):
-    assert 'predicted' in filename.lower(), 'Le nom de fichier ne semble pas être une prédiction valide.'
-    output_name = 'PET_Predicted'
-    dsr_xy = re.findall(r'DSR\d+', filename, re.IGNORECASE)
-    if dsr_xy.__len__() > 0:
-        output_name += f'_{dsr_xy[0].upper()}'
-    return output_name
-
-def process_single_subject(args):
-    subject_id, root_dir, mask_filename, params_file, use_sphere, sphere_radius, filenames, output_name = args
-
-    logging.getLogger().setLevel(logging.WARNING) 
-    sitk.ProcessObject.SetGlobalWarningDisplay(False)
+def determine_modality(filename):
+    name_lower = filename.lower()
     
-    results = []
-    subject_path = os.path.join(root_dir, subject_id)
-    mask_path = os.path.join(subject_path, mask_filename)
+    if "source" in name_lower or "standard" in name_lower:
+        return "standard"
+    elif "vae" in name_lower or "stargan" in name_lower or "unet" in name_lower:
+        return "harmonized" 
+    elif "gaussian1" in name_lower:
+        return "gaussian-earl1"
+    elif "gaussian2" in name_lower:
+        return "gaussian-earl2"
+    elif "pseudo-earl" in name_lower:
+        return "pseudo-earl1"
+    elif "earl1" in name_lower:
+        return "earl1"
+    elif "earl2" in name_lower:
+        return "earl2"
+    
+    # Fallback pour les cas non prévus
+    return "unknown"
 
-    extractor = get_extractor(params_file)
+# =============================================================================
 
+def process_single_folder(args):
+    folder_path, mask_filename, params_file, use_sphere, sphere_radius = args
+    
+    sitk.ProcessObject.SetGlobalWarningDisplay(False)
+    logging.getLogger('radiomics').setLevel(logging.ERROR)
+    
+    # Variables de contexte
+    voi_name = os.path.basename(folder_path)
+    subject_id = os.path.basename(os.path.dirname(folder_path))
+    
+    mask_path = os.path.join(folder_path, mask_filename)
     if not os.path.exists(mask_path):
-        logging.warning(f"[{subject_id}] Masque introuvable ({mask_filename}). Sujet ignoré.")
         return
 
-    
-    # --- Gestion du Masque (Sphère vs Original) ---
-    current_mask_input = None
-    
+    # --- Gestion de la sphère ---
+    current_mask_input = mask_path
     if use_sphere:
         original_mask_sitk = sitk.ReadImage(mask_path)
-        
         sphere_mask_sitk, message = generate_centered_sphere(
             original_mask_sitk, 
             radius_mm=sphere_radius, 
             use_barycenter=False, 
             margin_mm=1.0
         )
-        
         if sphere_mask_sitk is None:
-            logging.warning(f"[{subject_id}] Échec génération masque sphérique. Sujet ignoré. => {message}")
+            # Échec de la sphère (ex: déborde du foie), on passe ce dossier
             return
-            
         current_mask_input = sphere_mask_sitk
-    else:
-        current_mask_input = mask_path
 
-    # --- Extraction PET ---
-    pet_files = []
-    if filenames:
-        for f in filenames:
-            # add nii.gz if not present
-            if not f.endswith(('.nii', '.nii.gz')):
-                f += '.nii.gz'
-            if os.path.exists(os.path.join(subject_path, f)):
-                pet_files.append(f)
-            else:
-                logging.warning(f"[{subject_id}] Fichier non trouvé : {f}")
+    extractor = get_extractor(params_file)
+    results = []
+    
+    # Parcours des images avec glob
+    search_pattern = os.path.join(folder_path, "*.nii.gz")
+    nifti_files = glob.glob(search_pattern)
 
-    if not pet_files:
-        logging.warning(f"[{subject_id}] Aucun fichier PET (PET/EARL*) trouvé.")
-        return
-                    
-    for pet_file in pet_files:
-        pet_path = os.path.join(subject_path, pet_file)
+    for pet_file_path in nifti_files:
+        filename = os.path.basename(pet_file_path)
         
-        # Détermination robuste de la Modalité
-        if pet_file.startswith('PET'):
-            modality = 'PET_Standard'
-        elif pet_file.startswith('EARL'):
-            modality = 'PET_EARL'
-        elif pet_file.startswith('harmonized'):
-            modality = 'PET_Harmonized'
-        elif 'predicted' in pet_file.lower():
-            modality = parse_pred_mod(pet_file)
-        else:
-            # Fallback si le fichier a été trouvé via un mot-clé personnalisé
-            modality = pet_file.replace('.nii.gz', '').replace('.nii', '')
-
-        # Extraction
-        feature_vector = extractor.execute(pet_path, current_mask_input)
+        # On ignore le masque
+        if filename == mask_filename:
+            continue
+            
+        modality = determine_modality(filename)
         
-        row = {k: v for k, v in feature_vector.items()}
-        row.update({
-            'Subject_ID': subject_id,
-            'Modality': modality,
-            'Image_Filename': pet_file,
-            'Mask_Filename': mask_filename,
-            'ROI_type': 'Sphere_{}mm'.format(sphere_radius) if use_sphere else 'Original'
-        })
-        results.append(row)
-        
-        del feature_vector 
+        try:
+            feature_vector = extractor.execute(pet_file_path, current_mask_input)
+            
+            row = {k: v.item() if hasattr(v, 'item') else v for k, v in feature_vector.items() if k.startswith('original_')}
+            row.update({
+                'Subject_ID': subject_id,
+                'VOI': voi_name,
+                'Modality': modality,
+                'Image_Filename': filename,
+                'ROI_type': f'Sphere_{sphere_radius}mm' if use_sphere else 'Original'
+            })
+            results.append(row)
+            
+        except Exception:
+            pass # Silencieux pour ne pas polluer l'exécution parallèle
+            
+        del feature_vector
         gc.collect()
 
-    # --- Sauvegarde CSV Individuel (Thread-Safe) ---
+    # --- Sauvegarde locale ---
     if results:
         df = pd.DataFrame(results)
-        # Organisation colonnes
-        first_cols = ['Subject_ID', 'Modality', 'Image_Filename', 'Mask_Filename', 'ROI_type']
+        first_cols = ['Subject_ID', 'VOI', 'Modality', 'Image_Filename', 'ROI_type']
         remaining_cols = [c for c in df.columns if c not in first_cols]
-        df = df[first_cols + remaining_cols]
+        df = df[ first_cols + remaining_cols ]
         
-        if output_name:
-            out_file_name = output_name + ('.csv' if not output_name.endswith('.csv') else '')
-        else:
-            suffix = '_sphere_radiomics.csv' if use_sphere else '_radiomics.csv'
-            out_file_name = mask_filename.split('.') + suffix
-            
-        output_file = os.path.join(subject_path, out_file_name)
-        df.to_csv(output_file, index=False)
-    else:
-        logging.info(f"[{subject_id}] Aucun résultat d'extraction à sauvegarder.")
-        return
+        suffix = '_sphere_radiomics.csv' if use_sphere else '_radiomics.csv'
+        out_name = mask_filename.split('.')[ 0 ] + suffix
+        out_file = os.path.join(folder_path, out_name)
+        
+        df.to_csv(out_file, index=False)
     
 
-def process_subjects(
-    root_dir, mask_filename, params_file, use_sphere=False, sphere_radius=20.0, 
-    num_workers=None, filenames=None, output_name=None):
+def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sphere_radius=20.0, include_only=None, num_workers=None):
     if not os.path.exists(root_dir):
         logging.error(f"Le dossier racine n'existe pas : {root_dir}")
-        return
-    
-    # Nettoyage nom de fichier
-    if os.path.isdir(mask_filename):
-        logging.error(f"Le masque est un dossier : {mask_filename}")
         return
     
     if not mask_filename.endswith(('.nii', '.nii.gz')):
         mask_filename += '.nii.gz'
 
-    # Lister les sujets
-    subjects = sorted([s for s in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, s))])
-    if args.include_only is not None and len(args.include_only) > 0:    
-        subjects = [s for s in subjects if s in args.include_only]
+    logging.info(f"Recherche des masques '{mask_filename}' dans {root_dir}...")
     
-    # Config Workers (Laisser 2 coeurs libres pour le système)
-    num_workers = max(1, multiprocessing.cpu_count() - 2) if num_workers is None else num_workers
+    # glob récursif pour trouver tous les masques
+    search_pattern = os.path.join(root_dir, "**", mask_filename)
+    all_masks = glob.glob(search_pattern, recursive=True)
     
-    logging.info(f"Traitement de {len(subjects)} sujets avec {num_workers} workers 🚀")
-    logging.info(f"Mode Sphère : {use_sphere} | Masque : {mask_filename}")
+    target_folders = []
     
-    # calcul volume de la sphere pour info avec radius par défaut
-    if use_sphere:
-        voxel_volume = np.prod(sitk.ReadImage(os.path.join(root_dir, subjects[0], mask_filename)).GetSpacing())
-        sphere_volume_mm3 = (4/3) * np.pi * (sphere_radius ** 3)
-        sphere_volume_voxels = sphere_volume_mm3 / voxel_volume
-        logging.info(f"Volume de la sphère de rayon {sphere_radius}mm : {sphere_volume_mm3:.2f} mm³ ≈ {sphere_volume_voxels:.1f} voxels")
-
-    # Préparation des tâches
-    tasks = [
-        (subject, root_dir, mask_filename, params_file, use_sphere, sphere_radius, filenames, output_name) 
-        for subject in subjects
-    ]
-
-    # Lancement Parallèle
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(process_single_subject, task): task for task in tasks}
+    for mask_path in all_masks:
+        folder_path = os.path.dirname(mask_path)
+        voi_name = os.path.basename(folder_path)
+        subject_id = os.path.basename(os.path.dirname(folder_path))
         
-        # Barre de progression
-        for future in tqdm(as_completed(futures), total=len(tasks), desc="Extraction Radiomics"):
-            try:
-                future.result()     
-            except Exception as e:
-                # On récupère le nom du sujet qui a planté pour le debug
-                failed_subject = futures[future][0] 
-                logging.error(f"CRASH sur le sujet {failed_subject} : {e}")
+        # 1. Ignorer les whole_body
+        if voi_name == "whole_body":
+            continue
+            
+        # 2. Filtrer via include_only si défini
+        if include_only and subject_id not in include_only:
+            continue
+            
+        target_folders.append(folder_path)
 
+    if not target_folders:
+        logging.warning("Aucun dossier cible valide n'a été trouvé.")
+        return
+
+    num_workers = max(1, multiprocessing.cpu_count() - 2) if num_workers is None else num_workers
+    logging.info(f"Traitement de {len(target_folders)} dossiers VOI avec {num_workers} workers 🚀")
+
+    tasks = [(folder, mask_filename, params_file, use_sphere, sphere_radius) for folder in target_folders]
+
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(process_single_folder, task): task for task in tasks}
+        
+        for future in tqdm(as_completed(futures), total=len(tasks), desc="Extraction Radiomics"):
+            future.result()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extraction de Radiomics (PyRadiomics) sur images PET (Standard/EARL) avec masques.")
-    parser.add_argument("--root", "-r", type=str, required=True, help="Root folder with subjects.")
-    parser.add_argument("--include-only", "-i", type=str, nargs='*', default=None, help="List of subject IDs to include (default: all).")
-    parser.add_argument("--mask", "-m", type=str, required=True, help="Mask filename on the same subject folder (e.g., 'MASK.nii.gz').")
-    parser.add_argument("--use-sphere", "-s", action="store_true", help="Use spherical masks centered on the lesion's centroid.")
-    parser.add_argument("--sphere-radius", type=float, default=20.0, help="Radius of the spherical mask in mm (default: 20.0).")
+    parser = argparse.ArgumentParser(description="Extraction locale de Radiomics par dossier patient/VOI.")
+    parser.add_argument("--root", "-r", type=str, required=True, help="Dossier racine (ex: outputs/harmonization/)")
+    parser.add_argument("--include-only", "-i", type=str, nargs='*', default=None, help="Liste d'IDs à inclure (défaut: tous).")
+    parser.add_argument("--mask", "-m", type=str, default="mask_cropped.nii.gz", help="Nom du masque (défaut: mask_cropped.nii.gz).")
+    parser.add_argument("--use-sphere", "-s", action="store_true", help="Utiliser un masque sphérique centré.")
+    parser.add_argument("--sphere-radius", type=float, default=20.0, help="Rayon de la sphère en mm (défaut: 20.0).")
     parser.add_argument("--params", "-p", type=str, default=None, help="YAML pyradiomics params file.")
-    parser.add_argument("--num-workers", "-n", type=int, default=None, help="Number of parallel workers (default: all available minus 2).")
-    parser.add_argument("--debug-radiomics", "-db",action="store_true")
-    parser.add_argument("--filenames", "-k", type=str, nargs='*', default=None, help="Liste des fichiers à traiter.")
-    parser.add_argument("--output-name", "-o", type=str, default=None, help="Nom exact du fichier CSV en sortie (ex: results.csv).")
+    parser.add_argument("--num-workers", "-n", type=int, default=None, help="Nombre de workers.")
+    parser.add_argument("--debug-radiomics", "-db", action="store_true")
     args = parser.parse_args()
 
-    if args.debug_radiomics:    logging.getLogger('radiomics').setLevel(logging.INFO)
-    else:                       logging.getLogger('radiomics').setLevel(logging.ERROR)
+    if args.debug_radiomics:
+        logging.getLogger('radiomics').setLevel(logging.INFO)
+        logging.getLogger('pykwalify').setLevel(logging.INFO)
+    else:
+        logging.getLogger('radiomics').setLevel(logging.ERROR)
+        logging.getLogger('pykwalify').setLevel(logging.ERROR)
     
     process_subjects(
         args.root, 
         args.mask, 
         args.params, 
-        use_sphere=args.use_sphere, 
-        sphere_radius=args.sphere_radius, 
-        num_workers=args.num_workers,
-        filenames=args.filenames,
-        output_name=args.output_name
+        use_sphere=args.use_sphere,
+        sphere_radius=args.sphere_radius,
+        include_only=args.include_only,
+        num_workers=args.num_workers
     )

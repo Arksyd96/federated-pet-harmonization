@@ -9,6 +9,7 @@ wandb/
 wandb_logs/
 lightning_logs/
 media/
+outputs/
 .vscode/
 __pycache__/
 

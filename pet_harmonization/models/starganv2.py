@@ -11,10 +11,10 @@ from pytorch_lightning import LightningModule
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchvision.utils import make_grid
 
-from src.pet_harmonization.models.fft import LearnableFFTHighPassFilter
-from src.pet_harmonization.models.unet import UNet
+from pet_harmonization.models.fft import LearnableFFTHighPassFilter
+from pet_harmonization.models.unet import UNet
 
-from src.pet_harmonization.models.base import (
+from pet_harmonization.models.base import (
     BasicBlock,
     BasicDown,
     BasicUp,
@@ -23,7 +23,7 @@ from src.pet_harmonization.models.base import (
     SequentialEmb,
     save_add,
 )
-from src.pet_harmonization.models.attention import Attention, zero_module
+from pet_harmonization.models.attention import Attention, zero_module
 from monai.networks.blocks import UnetOutBlock
 
 # =============================================================================
