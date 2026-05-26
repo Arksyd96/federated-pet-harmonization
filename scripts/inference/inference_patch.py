@@ -99,11 +99,12 @@ def process_subject(
     voi_filename: str = None
 ):
     subject_name = batch['subject_name'][0]
+    subject_domain = batch['domain_name'][0].split('_')[-1]
     print(f"Treating subject: {subject_name} ({curr_idx}/{length_loader})")
 
     region_name = voi_filename.split('.')[0] if voi_filename is not None else "whole_body"
 
-    subj_out_dir = os.path.join(output_dir, subject_name, region_name)
+    subj_out_dir = os.path.join(output_dir, subject_domain.lower(),subject_name, region_name)
     os.makedirs(subj_out_dir, exist_ok=True)
 
     suv_source = batch["source"][tio.DATA].float().to(device)
