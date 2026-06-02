@@ -41,7 +41,6 @@ def generate_centered_sphere(sitk_mask, radius_mm=15.0, use_barycenter=False, ma
         cz, cy, cx = np.unravel_index(max_idx_flat, mask_arr.shape)
         
         c_phys = list(sitk_mask.TransformIndexToPhysicalPoint((int(cx), int(cy), int(cz))))
-
     
     c_phys[0] += shift_mm[0]
     c_phys[1] += shift_mm[1]
@@ -100,7 +99,7 @@ def get_extractor(param_file=None):
 def determine_modality(filename):
     name_lower = filename.lower()
     
-    if "source" in name_lower or "standard" in name_lower:
+    if "pet" in name_lower or "standard" in name_lower:
         return "standard"
     elif "vae" in name_lower or "stargan" in name_lower or "unet" in name_lower:
         return "harmonized" 
@@ -108,7 +107,9 @@ def determine_modality(filename):
         return "gaussian-earl1"
     elif "gaussian2" in name_lower:
         return "gaussian-earl2"
-    elif "pseudo-earl" in name_lower:
+    elif "pseudo-earl1" in name_lower:
+        return "pseudo-earl1"
+    elif "pseudo-earl2" in name_lower:
         return "pseudo-earl1"
     elif "earl1" in name_lower:
         return "earl1"
@@ -198,7 +199,7 @@ def process_single_folder(args):
         df.to_csv(out_file, index=False)
     
 
-def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sphere_radius=20.0, include_only=None, num_workers=None):
+def process_subjects(root_dir, mask_filename="mask_cropped.nii.gz", params_file=None, use_sphere=False, sphere_radius=20.0, include_only=None, vois=None, num_workers=None):
     if not os.path.exists(root_dir):
         logging.error(f"Le dossier racine n'existe pas : {root_dir}")
         return
@@ -207,6 +208,8 @@ def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sph
         mask_filename += '.nii.gz'
 
     logging.info(f"Recherche des masques '{mask_filename}' dans {root_dir}...")
+    if vois:
+        logging.info(f"Filtre activé pour les VOIs : {', '.join(vois)}")
     
     # glob récursif pour trouver tous les masques
     search_pattern = os.path.join(root_dir, "**", mask_filename)
@@ -219,11 +222,13 @@ def process_subjects(root_dir, mask_filename, params_file, use_sphere=False, sph
         voi_name = os.path.basename(folder_path)
         subject_id = os.path.basename(os.path.dirname(folder_path))
         
-        # 1. Ignorer les whole_body
+        # 1. Ignorer les whole_body systématiquement
         if voi_name == "whole_body":
             continue
-            
-        # 2. Filtrer via include_only si défini
+
+        if vois and voi_name not in vois:
+            continue
+
         if include_only and subject_id not in include_only:
             continue
             
@@ -249,7 +254,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extraction locale de Radiomics par dossier patient/VOI.")
     parser.add_argument("--root", "-r", type=str, required=True, help="Dossier racine (ex: outputs/harmonization/)")
     parser.add_argument("--include-only", "-i", type=str, nargs='*', default=None, help="Liste d'IDs à inclure (défaut: tous).")
-    parser.add_argument("--mask", "-m", type=str, default="mask_cropped.nii.gz", help="Nom du masque (défaut: mask_cropped.nii.gz).")
+    parser.add_argument("--vois", "-v", type=str, nargs='*', default=None, help="Liste des dossiers VOI à traiter (ex: liver lung).")
+    parser.add_argument("--mask", "-m", type=str, default="mask.nii.gz", help="Nom du masque (défaut: mask.nii.gz).")
     parser.add_argument("--use-sphere", "-s", action="store_true", help="Utiliser un masque sphérique centré.")
     parser.add_argument("--sphere-radius", type=float, default=20.0, help="Rayon de la sphère en mm (défaut: 20.0).")
     parser.add_argument("--params", "-p", type=str, default=None, help="YAML pyradiomics params file.")
@@ -271,5 +277,6 @@ if __name__ == "__main__":
         use_sphere=args.use_sphere,
         sphere_radius=args.sphere_radius,
         include_only=args.include_only,
+        vois=args.vois,
         num_workers=args.num_workers
     )

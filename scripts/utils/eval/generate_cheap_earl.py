@@ -69,11 +69,11 @@ def main():
         return
 
     # Liste initiale de tous les dossiers sujets
-    all_subjects = [ s for s in os.listdir(args.input) if os.path.isdir(os.path.join(args.input, s)) ]
+    all_subjects = [s for s in os.listdir(args.input) if os.path.isdir(os.path.join(args.input, s))]
     
     # Filtrage selon include-only
     if args.include_only is not None:
-        subjects = [ s for s in all_subjects if s in args.include_only ]
+        subjects = [s for s in all_subjects if s in args.include_only]
         logging.info(f"Filtre activé : {len(subjects)} sujets sélectionnés sur {len(all_subjects)}.")
     else:
         subjects = all_subjects
@@ -97,15 +97,15 @@ def main():
         for future in tqdm(as_completed(futures), total=len(tasks), desc="Génération Pseudo-EARL"):
             res = future.result()
             
-            # Application de l'espace dans les crochets [ ] pour ton rendu
-            subj_id = res[ 0 ]
-            is_ok = res[ 1 ]
-            msg = res[ 2 ]
+            # Application de l'espace dans les crochets [] pour ton rendu
+            subj_id = res[0]
+            is_ok = res[1]
+            msg = res[2]
             
             if is_ok:
                 success_count += 1
             else:
-                logging.warning(f"[ {subj_id} ] {msg}")
+                logging.warning(f"[{subj_id}] {msg}")
 
     logging.info(f"✅ Terminé : {success_count}/{len(subjects)} images générées dans {args.output}")
 

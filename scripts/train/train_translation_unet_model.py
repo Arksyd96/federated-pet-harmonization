@@ -13,9 +13,9 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.trainer import Trainer
 
-from src.pet_harmonization.data import SingleTargetPETDataModule, MultiTargetPETDataModule
-from src.pet_harmonization.models.unet import TranslationUNet
-from src.pet_harmonization.utils import set_seed
+from pet_harmonization.data import SingleTargetPETDataModule, MultiTargetPETDataModule
+from pet_harmonization.models.unet import TranslationUNet
+from pet_harmonization.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)

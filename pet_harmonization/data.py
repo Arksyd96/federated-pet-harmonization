@@ -32,10 +32,6 @@ from monai.data import CacheDataset, list_data_collate
 
 
 class IdentityDataset(torch.utils.data.Dataset):
-    """
-    Simple dataset that returns the same data (d0, d1, ..., dn)
-    """
-
     def __init__(self, *data):
         self.data = data
 
@@ -62,9 +58,6 @@ def normalize(input_data, norm="centered-norm"):
 
 
 class MIPDataset(torch.utils.data.Dataset):
-    """
-    Dataset for 2D Maximum Intensity Projection (MIP) images stored as NIfTI files.
-    """
     def __init__(
         self,
         root: str = None,
@@ -254,9 +247,6 @@ class MIPDataModule(LightningDataModule):
         )
 
 
-# EFFICIENT DATAMODULE FOR PET/EARL TRANSLATION TASK USING MONAI
-
-# --- 1. TRANSFORMATION CUSTOM POUR LA NORMALISATION CONJOINTE ---
 class JointZScoreNormalize(MapTransform):
     """
     Calcule Mean/Std sur l'image 'source_key' uniquement (en ignorant les zéros si demandé).
@@ -344,6 +334,7 @@ def robust_patch_normalization(src: torch.Tensor, tgt: torch.Tensor, percentiles
         
     return src_out, tgt_out, norm_factors
 
+
 def robust_patch_denormalization(src: torch.Tensor, tgt: torch.Tensor, norm_factors: torch.Tensor, clone=True):
     src_out, tgt_out = src, tgt
     if clone:
@@ -380,6 +371,87 @@ class Float32Lambda:
             image.data = image.data.float()
         return subject
 
+# Définition des types pour plus de clarté
+SplitConfigType = Union[
+    float, 
+    Tuple[int, int], 
+    List[Union[float, Tuple[int, int]]]
+]
+
+# class Float32Lambda:
+#     def __call__(self, sample):
+#         return sample
+    
+class CropToVOI(tio.Transform):
+    def __init__(self, min_shape, **kwargs):
+        super().__init__(**kwargs)
+        self.min_shape = min_shape
+
+    def apply_transform(self, subject: tio.Subject) -> tio.Subject:
+        if 'voi' not in subject:
+            return subject
+        
+        # Récupération des données du masque (Shape: C, W, H, D)
+        mask_data = subject[ 'voi' ].data
+        nonzero = torch.nonzero(mask_data > 0)
+        
+        if nonzero.numel() == 0:
+            return subject  # Masque vide, on renvoie le volume entier
+        
+        # Les dimensions spatiales sont aux index 1, 2, 3 du tenseur nonzero
+        min_w, max_w = nonzero[:, 1].min().item(), nonzero[ :, 1 ].max().item()
+        min_h, max_h = nonzero[:, 2].min().item(), nonzero[ :, 2 ].max().item()
+        min_d, max_d = nonzero[:, 3].min().item(), nonzero[ :, 3 ].max().item()
+        
+        # Récupération des dimensions max de l'image
+        w, h, d = subject[ 'source' ].spatial_shape
+        target_w, target_h, target_d = self.min_shape
+
+        # Fonction interne pour étendre la Bounding Box de manière sécurisée
+        def expand_dim(c_min, c_max, max_limit, target_size):
+            size = c_max - c_min + 1
+            if size < target_size:
+                diff = target_size - size
+                pad_before = diff // 2
+                pad_after = diff - pad_before
+                
+                c_min -= pad_before
+                c_max += pad_after
+                
+                # Si on déborde à gauche/en bas (ex: lésion près de la peau)
+                if c_min < 0:
+                    c_max += abs(c_min)
+                    c_min = 0
+                # Si on déborde à droite/en haut (ex: sommet du crâne)
+                if c_max >= max_limit:
+                    excess = c_max - max_limit + 1
+                    c_min -= excess
+                    c_max = max_limit - 1
+                    
+                # Sécurité ultime si l'image entière est plus petite que target_size
+                c_min = max(0, c_min)
+                c_max = min(max_limit - 1, c_max)
+                
+            return c_min, c_max
+
+        # 🎯 Élargissement dynamique pour atteindre la taille minimum
+        min_w, max_w = expand_dim(min_w, max_w, w, target_w)
+        min_h, max_h = expand_dim(min_h, max_h, h, target_h)
+        min_d, max_d = expand_dim(min_d, max_d, d, target_d)
+        
+        # Calcul du nombre de voxels à supprimer sur chaque face (6-tuple requis par TorchIO)
+        crop_left = min_w
+        crop_right = w - (max_w + 1)
+        crop_top = min_h
+        crop_bottom = h - (max_h + 1)
+        crop_front = min_d
+        crop_back = d - (max_d + 1)
+        
+        # Application du recadrage physique (met à jour la matrice affine !)
+        cropper = tio.Crop((crop_left, crop_right, crop_top, crop_bottom, crop_front, crop_back))
+        cropped_subject = cropper(subject)
+        
+        return cropped_subject
 
 # # # --- LE LIGHTNING DATA MODULE ---
 # class PETTranslationDataModule(LightningDataModule):
@@ -534,6 +606,7 @@ class BasePETDataModule(LightningDataModule):
         num_workers: int = 8,             
         queue_max_length: int = 600,      
         samples_per_volume: int = 4, 
+        voi_filename: Optional[str] = None, # Nom du fichier de la VOI (ex: 'voi.nii.gz') ou None si pas de VOI
     ):
         super().__init__()
         # Sauvegarde des hyperparamètres pour PyTorch Lightning
@@ -550,6 +623,7 @@ class BasePETDataModule(LightningDataModule):
         self.train_subjects: List[tio.Subject] = []
         self.val_subjects: List[tio.Subject] = []
         self.transform: Optional[tio.Compose] = None
+        self.voi_filename = voi_filename
 
     def get_pt_earl_files(self, files: List[str]) -> Dict[str, Optional[str]]:
         raise NotImplementedError("La méthode get_pt_earl_files doit être implémentée par les sous-classes.")
@@ -575,6 +649,13 @@ class BasePETDataModule(LightningDataModule):
                 'sampling_map': tio.Image(os.path.join(subj_path, file_paths['sampling_map']), type=tio.LABEL),
                 'subject_id': subj_name
             }
+            
+            if self.voi_filename:
+                matched_voi = next(f for f in files if f == self.voi_filename or f == f"{self.voi_filename}.nii.gz")
+                if matched_voi:
+                    subject_dict["voi"] = tio.Image(os.path.join(subj_path, matched_voi), type=tio.LABEL)
+                else:
+                    print(f"[{subj_name}] Masque VOI '{self.voi_filename}' introuvable.")
             
             # Ajout des cibles (targets)
             for key, file_name in file_paths.items():
@@ -603,7 +684,8 @@ class BasePETDataModule(LightningDataModule):
             tio.RandomFlip(axes=(0, 1, 2), p=0.5)
         ])
 
-    def _create_dataloader(self, subjects: List[tio.Subject], shuffle_subjects: bool, shuffle_patches: bool, is_validation: bool = False):
+    def _create_dataloader(
+        self, subjects: List[tio.Subject], shuffle_subjects: bool, shuffle_patches: bool, is_validation: bool = False):
         """Méthode utilitaire pour créer les DataLoaders (train et val)"""
         if not subjects:
             return None
@@ -662,7 +744,30 @@ class BasePETDataModule(LightningDataModule):
             )
         return None
     
-
+    def voi_dataloader(self, min_voi_crop_shape):
+        if not self.voi_filename:
+            raise ValueError("Impossible d'appeler voi_dataloader sans avoir défini 'voi_filename' à l'initialisation.")
+            
+        if self.val_subjects:
+            # Construction de la pipeline de transformation dédiée à la VOI (Pas de data augmentation !)
+            voi_transform = tio.Compose([
+                Float32Lambda(), 
+                tio.ToCanonical(),
+                CropToVOI(min_shape=min_voi_crop_shape) 
+            ])
+            
+            voi_dataset = tio.SubjectsDataset(self.val_subjects, transform=voi_transform)
+            
+            return tio.SubjectsLoader(
+                voi_dataset, 
+                batch_size=1, 
+                num_workers=multiprocessing.cpu_count() // 2, 
+                pin_memory=True, 
+                shuffle=False
+            )
+        return None  
+    
+    
 class SingleTargetPETDataModule(BasePETDataModule):
     def get_pt_earl_files(self, files: List[str]) -> Dict[str, Optional[str]]:
         """
@@ -704,60 +809,7 @@ class MultiTargetPETDataModule(BasePETDataModule):
             'target_2': earl2_files[0] if earl2_files else None, # EARL 2
             'sampling_map': sampling_files[0] if sampling_files else None,
         }
-        
-        
-class CropToVOI(tio.Transform):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
 
-    def apply_transform(self, subject: tio.Subject) -> tio.Subject:
-        if 'voi' not in subject:
-            return subject
-        
-        # Récupération des données du masque (Shape: C, W, H, D)
-        mask_data = subject['voi'].data
-        nonzero = torch.nonzero(mask_data > 0)
-        
-        if nonzero.numel() == 0:
-            return subject  # Masque vide, on renvoie le volume entier
-        
-        # Les dimensions spatiales sont aux index 1, 2, 3 du tenseur nonzero
-        min_w, max_w = nonzero[:, 1].min().item(), nonzero[:, 1].max().item()
-        min_h, max_h = nonzero[:, 2].min().item(), nonzero[:, 2].max().item()
-        min_d, max_d = nonzero[:, 3].min().item(), nonzero[:, 3].max().item()
-        
-        # Récupération des dimensions max de l'image
-        w, h, d = subject['source'].spatial_shape
-        
-        # Calcul du nombre de voxels à supprimer sur chaque face (6-tuple requis par TorchIO)
-        crop_left = min_w
-        crop_right = w - (max_w + 1)
-        crop_top = min_h
-        crop_bottom = h - (max_h + 1)
-        crop_front = min_d
-        crop_back = d - (max_d + 1)
-        
-        # Application du recadrage physique (met à jour la matrice d'orientation affine automatiquement)
-        cropper = tio.Crop((crop_left, crop_right, crop_top, crop_bottom, crop_front, crop_back))
-        cropped_subject = cropper(subject)
-        
-        # Isolation stricte : On multiplie l'image par le masque pour éliminer le reste (ex: poumons si on veut le foie)
-        # cropped_subject['source'].data = cropped_subject['source'].data * (cropped_subject['voi'].data > 0).float()
-        
-        return cropped_subject
-
-
-# Définition des types pour plus de clarté
-SplitConfigType = Union[
-    float, 
-    Tuple[int, int], 
-    List[Union[float, Tuple[int, int]]]
-]
-
-class Float32Lambda:
-    # (Je suppose que tu as cette classe définie quelque part, je la laisse pour la signature)
-    def __call__(self, sample):
-        return sample
 
 class MultiDomainUnlearningDataModule(LightningDataModule):
     def __init__(
@@ -979,11 +1031,6 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
         return None     
     
 
-
-# =============================================================================
-# Dataset in-memory :
-# =============================================================================
-
 class InMemoryVolumeDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -1062,10 +1109,6 @@ class InMemoryVolumeDataset(torch.utils.data.Dataset):
         }
 
 
-# =============================================================================
-# DataModule
-# =============================================================================
-
 class InMemoryUnlearningDataModule(LightningDataModule):
     def __init__(
         self,
@@ -1090,10 +1133,6 @@ class InMemoryUnlearningDataModule(LightningDataModule):
         self._train_data:  List[dict] = []
         self._val_data:    List[dict] = []
         self._val_subjects: List[tio.Subject] = []   # pour test_dataloader
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Helpers
-    # ──────────────────────────────────────────────────────────────────────────
 
     def get_pet_body_files(self, files):
         pet_files  = [f for f in files if f.startswith('PET')  and (f.endswith('.nii') or f.endswith('.nii.gz'))]
