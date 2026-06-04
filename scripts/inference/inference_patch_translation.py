@@ -40,33 +40,40 @@ def make_gaussian_weight_map(patch_size: tuple[int, int, int], sigma_ratio: floa
         maps.append(g / g.max())
     return maps[0][:, None, None] * maps[1][None, :, None] * maps[2][None, None, :]
 
-def process_subject(model, batch, device, filename, output_dir, curr_idx, length_loader, voi_filename=None):
+def process_subject(
+    model, 
+    batch, 
+    device, 
+    filename, 
+    output_dir, 
+    override, 
+    include_only,
+    curr_idx, 
+    length_loader
+    ):
     SUV_LOG_MAX = model.hparams.suv_global_log_max
     ALPHA = model.hparams.alpha
     
     subject_name = batch['subject_id'][0]
     print(f"Treating subject: {subject_name} ({curr_idx}/{length_loader})")
     
-    # assert that voi is not empty if --voi-only is activated
-    if voi_filename is not None:
-        voi_tensor = batch['voi'][tio.DATA]
-        if voi_tensor.sum() < 1e-3:
-            print(f"⚠️  Skipping {subject_name} due to empty VOI mask.")
-            return
+    if include_only is not None and subject_name not in include_only:
+        print(f"⚠️  Subject {subject_name} not in include_only list. Skipping...")
+        return
     
-    # dir
-    region_name = voi_filename.split('.')[0] if voi_filename is not None else "whole_body"
-    subj_out_dir = os.path.join(output_dir, subject_name, region_name)
+    # check if file already exists
+    subj_out_dir = os.path.join(output_dir, subject_name)
     os.makedirs(subj_out_dir, exist_ok=True)
+    if not override and os.path.exists(os.path.join(subj_out_dir, f"{filename}.nii.gz")):
+        print(f"⚠️  Prediction already exists for {subject_name} at {os.path.join(subj_out_dir, f'{filename}.nii.gz')}. Skipping...")
+        return
 
-    # --- 1. Préparation des Tenseurs ---
     # Récupération des données brutes (batch de taille 1)
     suv_source = batch['source'][tio.DATA].float().to(device)
     if suv_source.ndim == 5:
         suv_source = suv_source.squeeze(1) # (D, H, W)
 
     _, d_dim, h_dim, w_dim = suv_source.shape
-    orig_d, orig_h, orig_w = d_dim, h_dim, w_dim
     
     # padding dynamique pour assurer les dimensions du patch d'entrée
     z_patch_size, y_patch_size, x_patch_size = 5, 64, 64
@@ -116,73 +123,22 @@ def process_subject(model, batch, device, filename, output_dir, curr_idx, length
 
     pbar.close()
     
-    # Dé-padding et pondération
+    # pondération
     recon_volume = (output_volume / weight_sum.clamp(min=1e-8)).cpu()
-    crop_z_start = (d_dim - orig_d) // 2
-    crop_y_start = (h_dim - orig_h) // 2
-    crop_x_start = (w_dim - orig_w) // 2
-    
-    recon_volume = recon_volume[
-        crop_z_start : crop_z_start + orig_d,
-        crop_y_start : crop_y_start + orig_h,
-        crop_x_start : crop_x_start + orig_w
-   ]
-
-    # Sauvegarde BIDS like
     source_path = batch['source']['path'][0]
-    affine_matrix = batch['source'][tio.AFFINE][0]
-    
-    if voi_filename is not None:        
-        # Sauvegarde source croppée
-        source_cropped_path = os.path.join(subj_out_dir, "pet.nii.gz")
-        if not os.path.exists(source_cropped_path):
-            source_tensor = batch['source'][tio.DATA][0].cpu()
-            source_tio = tio.ScalarImage(tensor=source_tensor, affine=affine_matrix)
-            sitk.WriteImage(source_tio.as_sitk(), source_cropped_path)
-            
-        # Sauvegarde targets croppée (EARL1 et/ou 2)
-        c_idx = 1
-        for key in batch.keys():
-            if key.startswith('target'):
-                target_cropped_path = os.path.join(subj_out_dir, f"earl{c_idx}.nii.gz")
-                if not os.path.exists(target_cropped_path):
-                    target_tensor = batch[key][tio.DATA][0].cpu()
-                    target_tio = tio.ScalarImage(tensor=target_tensor, affine=affine_matrix)
-                    sitk.WriteImage(target_tio.as_sitk(), target_cropped_path)
-                c_idx += 1
-                   
-        # Sauvegarde mask croppé
-        mask_cropped_path = os.path.join(subj_out_dir, "mask.nii.gz")
-        if not os.path.exists(mask_cropped_path):
-            mask_tensor = batch['voi'][tio.DATA].cpu()
-            if mask_tensor.shape[1] == 1:
-                mask_tensor = mask_tensor.squeeze( 1 )
-            mask_tio = tio.LabelMap(tensor=mask_tensor, affine=affine_matrix)
-            sitk.WriteImage(mask_tio.as_sitk(), mask_cropped_path)
-            
-        # Sauvegarde prédiction pseudo-EARL
-        if recon_volume.ndim == 3:
-            recon_volume = recon_volume.unsqueeze(0)
-            
-        num_channels = recon_volume.shape[0]
-        for c in range(num_channels):
-            pred_path = os.path.join(subj_out_dir, f"{filename}{c + 1}.nii.gz")
-            pred_tio = tio.ScalarImage(tensor=recon_volume[c].unsqueeze( 0 ), affine=affine_matrix)
-            sitk.WriteImage(pred_tio.as_sitk(), pred_path)
-        
-    else:
-        final_prediction = recon_volume.squeeze().permute(2, 1, 0).numpy()
-        final_prediction = np.flip(final_prediction, axis=2) # Flip Z
-        final_prediction = np.flip(final_prediction, axis=1) # Flip Y (Correction orientation)
-        final_prediction = final_prediction.astype(np.float32) # ensure float32 for SimpleITK
 
-        # Création image SimpleITK
-        output_sitk = sitk.GetImageFromArray(final_prediction)
-        output_sitk.CopyInformation(sitk.ReadImage(source_path))
-        
-        pred_path = os.path.join(subj_out_dir, f"{filename}.nii.gz")
-        sitk.WriteImage(output_sitk, pred_path)
-        print(f"✅ Whole-body prediction saved at: {pred_path}")
+    final_prediction = recon_volume.squeeze().permute(2, 1, 0).numpy()
+    final_prediction = np.flip(final_prediction, axis=2) # Flip Z
+    final_prediction = np.flip(final_prediction, axis=1) # Flip Y (Correction orientation)
+    final_prediction = final_prediction.astype(np.float32) # ensure float32 for SimpleITK
+
+    # Création image SimpleITK
+    output_sitk = sitk.GetImageFromArray(final_prediction)
+    output_sitk.CopyInformation(sitk.ReadImage(source_path))
+    
+    pred_path = os.path.join(subj_out_dir, f"{filename}.nii.gz")
+    sitk.WriteImage(output_sitk, pred_path)
+    print(f"✅ Whole-body prediction saved at: {pred_path}")
 
         
 def predict_patch_wise_earl(args):
@@ -200,13 +156,12 @@ def predict_patch_wise_earl(args):
 
     # Passage du voi_filename dans les kwargs du DataModule
     datamodule_kwargs = config.get('datamodule', {})
-    datamodule_kwargs['voi_filename'] = args.voi_filename
     
     datamodule = SingleTargetPETDataModule(**datamodule_kwargs)
     datamodule.prepare_data()
     datamodule.setup()
 
-    loader = datamodule.voi_dataloader(min_voi_crop_shape=(32, 192, 192)) if args.voi_only else datamodule.test_dataloader()
+    loader = datamodule.test_dataloader()
     
     for idx, batch in enumerate(loader):
         process_subject(
@@ -215,9 +170,10 @@ def predict_patch_wise_earl(args):
             device=device, 
             filename=args.filename, 
             output_dir=args.output, 
+            include_only=args.include_only,
+            override=args.override,
             curr_idx=idx + 1, 
-            length_loader=len(loader),
-            voi_filename=args.voi_filename if args.voi_only else None
+            length_loader=len(loader)
         )
 
 if __name__ == "__main__":
@@ -225,9 +181,9 @@ if __name__ == "__main__":
     parser.add_argument('--config-file', '-c', type=str, required=True, help='Path to the config yaml file.')
     parser.add_argument('--ckpt-path', '-m', type=str, required=True, help='Path to the model checkpoint (.ckpt).')
     parser.add_argument('--output', '-o', type=str, required=True, help='ex: outputs/pseudoEARL.')
+    parser.add_argument('--include-only', '-i', type=str, nargs='*', default=None, help='List of subject IDs to include (default: all).')
     parser.add_argument('--filename', '-f', type=str, required=False, default='pseudo-earl', help='Filename to process.')
-    parser.add_argument('--voi-only', action='store_true', help='Activer le recadrage sur l\'organe ciblé.')
-    parser.add_argument('--voi-filename', type=str, default=None, help='Nom du masque (ex: liver.nii.gz) si --voi-only est activé.')
+    parser.add_argument('--override', '-r', action='store_true', help='Whether to override existing predictions.')
     args = parser.parse_args()
     
     predict_patch_wise_earl(args)

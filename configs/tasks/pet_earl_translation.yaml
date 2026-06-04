@@ -8,10 +8,10 @@ dir_name: runs/2d-to-3d-pet-earl-translation-unet-dsr10-chb
 name: Traduction PET EARL2 5x64x64 DSR 10p Nantes (UNet)
 
 datamodule:
-    root_dir: ./data/PET-EARL/domain_nantes
+    root_dir: ./data/PET-EARL/domain_chb
     batch_size: 64
     # train_ratio: 1.0 # No DSR
-    train_ratio: 10 # for DSR with N subjects only | 0 means all as validation
+    train_ratio: 0 # for DSR with N subjects only | 0 means all as validation
     patch_size: [5, 64, 64]
     num_workers: 16 
     queue_max_length: 9000

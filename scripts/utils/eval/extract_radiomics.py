@@ -103,14 +103,14 @@ def determine_modality(filename):
         return "standard"
     elif "vae" in name_lower or "stargan" in name_lower or "unet" in name_lower:
         return "harmonized" 
-    elif "gaussian1" in name_lower:
+    elif "gaussian-earl1" in name_lower:
         return "gaussian-earl1"
-    elif "gaussian2" in name_lower:
+    elif "gaussian-earl2" in name_lower:
         return "gaussian-earl2"
     elif "pseudo-earl1" in name_lower:
         return "pseudo-earl1"
     elif "pseudo-earl2" in name_lower:
-        return "pseudo-earl1"
+        return "pseudo-earl2"
     elif "earl1" in name_lower:
         return "earl1"
     elif "earl2" in name_lower:
