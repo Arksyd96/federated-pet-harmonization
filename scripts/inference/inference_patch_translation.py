@@ -40,6 +40,20 @@ def make_gaussian_weight_map(patch_size: tuple[int, int, int], sigma_ratio: floa
         maps.append(g / g.max())
     return maps[0][:, None, None] * maps[1][None, :, None] * maps[2][None, None, :]
 
+
+def save_prediction(recon_volume: torch.Tensor, source_path: str, pred_path: str):
+    """Fonction modulaire pour formater et sauvegarder le volume SimpleITK."""
+    final_prediction = recon_volume.squeeze().permute(2, 1, 0).numpy()
+    final_prediction = np.flip(final_prediction, axis=2) # Flip Z
+    final_prediction = np.flip(final_prediction, axis=1) # Flip Y (Correction orientation)
+    final_prediction = final_prediction.astype(np.float32) # ensure float32 for SimpleITK
+
+    output_sitk = sitk.GetImageFromArray(final_prediction)
+    output_sitk.CopyInformation(sitk.ReadImage(source_path))
+    sitk.WriteImage(output_sitk, pred_path)
+    print(f"✅ Prediction saved at: {pred_path}")
+
+
 def process_subject(
     model, 
     batch, 
@@ -49,7 +63,8 @@ def process_subject(
     override, 
     include_only,
     curr_idx, 
-    length_loader
+    length_loader,
+    num_standards
     ):
     SUV_LOG_MAX = model.hparams.suv_global_log_max
     ALPHA = model.hparams.alpha
@@ -61,11 +76,16 @@ def process_subject(
         print(f"⚠️  Subject {subject_name} not in include_only list. Skipping...")
         return
     
-    # check if file already exists
+    # Check if files already exist
     subj_out_dir = os.path.join(output_dir, subject_name)
     os.makedirs(subj_out_dir, exist_ok=True)
-    if not override and os.path.exists(os.path.join(subj_out_dir, f"{filename}.nii.gz")):
-        print(f"⚠️  Prediction already exists for {subject_name} at {os.path.join(subj_out_dir, f'{filename}.nii.gz')}. Skipping...")
+    
+    # Détermination dynamique des noms de fichiers
+    out_filenames = [f"{filename}.nii.gz"] if num_standards == 1 else [f"{filename}{i + 1}.nii.gz" for i in range(num_standards)]
+    all_exist = all(os.path.exists(os.path.join(subj_out_dir, f)) for f in out_filenames)
+    
+    if not override and all_exist:
+        print(f"⚠️  Predictions already exist for {subject_name}. Skipping...")
         return
 
     # Récupération des données brutes (batch de taille 1)
@@ -79,8 +99,10 @@ def process_subject(
     z_patch_size, y_patch_size, x_patch_size = 5, 64, 64
     overlap = 2
 
-    # Initialisation des volumes de sortie
-    output_volume   = torch.zeros((d_dim, h_dim, w_dim), device=device)
+    # Initialisation des volumes de sortie (Une liste contenant 1 ou 2 volumes)
+    output_volumes  = [torch.zeros((d_dim, h_dim, w_dim), device=device) for _ in range(num_standards)]
+    
+    # Un seul weight_sum suffit car les patchs sont accumulés aux mêmes endroits
     weight_sum      = torch.zeros((d_dim, h_dim, w_dim), device=device)
     
     z_starts = get_start_indices(d_dim, z_patch_size, z_patch_size - 1)
@@ -91,7 +113,7 @@ def process_subject(
     gauss_w = make_gaussian_weight_map((z_patch_size, y_patch_size, x_patch_size), sigma_ratio=.5).to(device)
 
     # --- 3. Boucle d'Inférence ---
-    pbar = tqdm(total=total_patches, desc="Inférence du pseudo-EARL")
+    pbar = tqdm(total=total_patches, desc="Inférence patch-wise")
 
     with torch.no_grad():
         for z in z_starts:
@@ -107,38 +129,38 @@ def process_subject(
                     log_source = torch.log1p(patch_src)
                     normalized_log_source = 2.0 * (log_source / SUV_LOG_MAX) - 1.0
                     
-                    # Prédiction
+                    # Prédiction du/des résidus (peut être 5 canaux ou 10 canaux)
                     predicted_residual = model.forward(normalized_log_source)
 
+                    # Duplication de la source pour l'addition si on a plusieurs standards (ex: (1, 10, 64, 64))
+                    src_repeated = normalized_log_source.repeat(1, num_standards, 1, 1)
+
                     # Reconstruction inverse
-                    normalized_log_prediction = normalized_log_source + (predicted_residual / ALPHA)
+                    normalized_log_prediction = src_repeated + (predicted_residual / ALPHA)
                     log_prediction = 0.5 * (normalized_log_prediction + 1.0) * SUV_LOG_MAX
                     suv_prediction = torch.expm1(log_prediction)
 
-                    # Accumulation
-                    output_volume[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += suv_prediction.squeeze(0) * gauss_w
+                    # Split des canaux prédits selon les standards (morceaux de taille 5)
+                    chunks = torch.chunk(suv_prediction, num_standards, dim=1)
+
+                    # Accumulation séparée pour chaque standard
+                    for i, chunk in enumerate(chunks):
+                        output_volumes[i][z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += chunk.squeeze(0) * gauss_w
+                    
                     weight_sum[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += gauss_w
                     
                     pbar.update(1)
 
     pbar.close()
     
-    # pondération
-    recon_volume = (output_volume / weight_sum.clamp(min=1e-8)).cpu()
+    # Pondération et sauvegarde
     source_path = batch['source']['path'][0]
-
-    final_prediction = recon_volume.squeeze().permute(2, 1, 0).numpy()
-    final_prediction = np.flip(final_prediction, axis=2) # Flip Z
-    final_prediction = np.flip(final_prediction, axis=1) # Flip Y (Correction orientation)
-    final_prediction = final_prediction.astype(np.float32) # ensure float32 for SimpleITK
-
-    # Création image SimpleITK
-    output_sitk = sitk.GetImageFromArray(final_prediction)
-    output_sitk.CopyInformation(sitk.ReadImage(source_path))
+    weight_clamped = weight_sum.clamp(min=1e-8)
     
-    pred_path = os.path.join(subj_out_dir, f"{filename}.nii.gz")
-    sitk.WriteImage(output_sitk, pred_path)
-    print(f"✅ Whole-body prediction saved at: {pred_path}")
+    for i, out_filename in enumerate(out_filenames):
+        recon_volume = (output_volumes[i] / weight_clamped).cpu()
+        pred_path = os.path.join(subj_out_dir, out_filename)
+        save_prediction(recon_volume, source_path, pred_path)
 
         
 def predict_patch_wise_earl(args):
@@ -154,9 +176,10 @@ def predict_patch_wise_earl(args):
     model.eval()
     print('Model loaded successfully.')
 
-    # Passage du voi_filename dans les kwargs du DataModule
+    print(f"⚙️  Configuration : Génération de {args.num_standards} standard(s) cible(s).")
+
+    # On utilise toujours le SingleTargetPETDataModule pour l'inférence
     datamodule_kwargs = config.get('datamodule', {})
-    
     datamodule = SingleTargetPETDataModule(**datamodule_kwargs)
     datamodule.prepare_data()
     datamodule.setup()
@@ -173,7 +196,8 @@ def predict_patch_wise_earl(args):
             include_only=args.include_only,
             override=args.override,
             curr_idx=idx + 1, 
-            length_loader=len(loader)
+            length_loader=len(loader),
+            num_standards=args.num_standards
         )
 
 if __name__ == "__main__":
@@ -184,6 +208,7 @@ if __name__ == "__main__":
     parser.add_argument('--include-only', '-i', type=str, nargs='*', default=None, help='List of subject IDs to include (default: all).')
     parser.add_argument('--filename', '-f', type=str, required=False, default='pseudo-earl', help='Filename to process.')
     parser.add_argument('--override', '-r', action='store_true', help='Whether to override existing predictions.')
+    parser.add_argument('--num-standards', '-n', type=int, default=1, help='Number of target standards to generate (ex: 1 or 2).')
     args = parser.parse_args()
     
     predict_patch_wise_earl(args)
