@@ -3,7 +3,7 @@ import glob
 import pandas as pd
 from tqdm import tqdm
 
-input_dir = "outputs/pseudo-earl/"
+input_dir = 'outputs/pseudo-earl/'
 
 search_pattern = os.path.join(input_dir, "**", "*radiomics.csv")
 csv_files = glob.glob(search_pattern, recursive=True)
@@ -57,4 +57,4 @@ print(f"Total des lignes  : {len(master_df)}")
 print(f"Total des colonnes: {len(master_df.columns)}")
 print("="*50)
 
-print(master_df.head())
+master_df.head()
