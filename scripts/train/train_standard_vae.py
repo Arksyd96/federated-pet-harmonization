@@ -14,7 +14,7 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
 from pet_harmonization.data import MultiDomainUnlearningDataModule
-from pet_harmonization.models.harmonization_vae import DisentangledHarmonizationVAE, UnlearningVAE
+from pet_harmonization.models.harmonization_vae import DisentangledHarmonizationVAE, StandardHarmonizationVAE
 from pet_harmonization.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -25,7 +25,6 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 def main(args):
-    # ── Config ────────────────────────────────────────────────────────────────
     config = OmegaConf.load(args.config_file)
     config = OmegaConf.to_container(config, resolve=True)
     config["DEBUG"] = args.debug
@@ -35,7 +34,6 @@ def main(args):
 
     set_seed(config.get("SEED", 42), workers=True)
 
-    # ── Dossiers et logger WandB ──────────────────────────────────────────────
     save_dir  = None
     wb_logger = None
 
@@ -57,28 +55,23 @@ def main(args):
         save_dir = "./runs/temporary/"
         logger.info("Mode DEBUG activé : pas de sauvegarde ni de logging WandB.")
 
-    # ── DataModule ────────────────────────────────────────────────────────────
     datamodule = MultiDomainUnlearningDataModule(**config.get("datamodule", {}))
-
-    # ── Modèle VAE ────────────────────────────────────────────────────────────
     vae = DisentangledHarmonizationVAE(**config.get("vae", {}))
 
-    # ── Pipeline Lightning ────────────────────────────────────────────────────
     if args.resume_checkpoint:
         logger.info(f"Reprise depuis : {args.resume_checkpoint}")
-        pipeline = UnlearningVAE.load_from_checkpoint(
+        pipeline = StandardHarmonizationVAE.load_from_checkpoint(
             args.resume_checkpoint,
             vae=vae,
             strict=False,
             **config.get("pipeline", {}),
         )
     else:
-        pipeline = UnlearningVAE(
+        pipeline = StandardHarmonizationVAE(
             vae=vae,
             **config.get("pipeline", {}),
         )
 
-    # ── Callbacks ─────────────────────────────────────────────────────────────
     callbacks = [
         ModelCheckpoint(
             dirpath=os.path.join(save_dir, "./checkpoints"),
@@ -89,7 +82,6 @@ def main(args):
     if not config.get("DEBUG"):
         callbacks.append(LearningRateMonitor(logging_interval="step"))
 
-    # ── Trainer ───────────────────────────────────────────────────────────────
     trainer = Trainer(
         logger=wb_logger if not config.get('DEBUG') else False,
         default_root_dir=save_dir,
@@ -97,30 +89,18 @@ def main(args):
         **config.get('trainer', {})
     )
 
-    # ── Lancement ─────────────────────────────────────────────────────────────
-    logger.info("Lancement de l'entraînement UnlearningVAE 🚀")
-    logger.info(f"  Stage 1 (warmup) : {config['pipeline'].get('warmup_epochs')} époques")
-    logger.info(f"  Stage 2 (unlearn): {config['trainer'].get('max_epochs') - config['pipeline'].get('warmup_epochs')} époques")
+    logger.info("Lancement de l'entraînement StandardHarmonizationVAE (Ablation) 🚀")
+    logger.info(f"  Objectif : MAE + KLD (Sans désapprentissage adversarial)")
+    logger.info(f"  Époques prévues : {config['trainer'].get('max_epochs')}")
 
     trainer.fit(pipeline, datamodule=datamodule)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Entraînement harmonisation PET — DisentangledHarmonizationVAE + Unlearning"
-    )
-    parser.add_argument(
-        "-c", "--config-file", type=str, required=True,
-        help="Chemin vers le fichier de configuration YAML",
-    )
-    parser.add_argument(
-        "-d", "--debug", action="store_true",
-        help="Mode debug : pas de sauvegarde ni de logging WandB",
-    )
-    parser.add_argument(
-        "-r", "--resume-checkpoint", type=str, default=None,
-        help="Chemin vers un checkpoint pour reprendre l'entraînement",
-    )
+    parser = argparse.ArgumentParser(description="Entraînement harmonisation PET — Étude d'ablation (Standard VAE)")
+    parser.add_argument("-c", "--config-file", type=str, required=True, help="Chemin vers le fichier de configuration YAML",)
+    parser.add_argument("-d", "--debug", action="store_true", help="Mode debug : pas de sauvegarde ni de logging WandB",)
+    parser.add_argument("-r", "--resume-checkpoint", type=str, default=None, help="Chemin vers un checkpoint pour reprendre l'entraînement",)
 
     args = parser.parse_args()
 

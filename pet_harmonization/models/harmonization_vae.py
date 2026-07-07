@@ -1360,4 +1360,158 @@ class UnlearningVAE(LightningModule):
         })
         
         
+
+# =============================================================================
+# StandardHarmonizationVAE — Ablation (Sans Unlearning)
+# =============================================================================
+
+class StandardHarmonizationVAE(LightningModule):
+    """
+    Module Lightning standard pour l'ablation.
+    Entraîne le DisentangledHarmonizationVAE uniquement sur la tâche de 
+    reconstruction (MAE) et de régularisation de l'espace latent (KL), 
+    sans aucun mécanisme de désapprentissage ni classifieur de domaine.
+    """
+
+    def __init__(
+        self,
+        vae: DisentangledHarmonizationVAE,
+        kl_weight: float = 1e-4,
+        lr: float = 1e-4,
+        weight_decay: float = 1e-6,
+        suv_global_log_max: float = 6.0,
+    ):
+        super().__init__()
+
+        self.vae = vae
+        self.kl_weight = kl_weight
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.suv_global_log_max = suv_global_log_max
+
+        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
         
+        # Optimisation standard activée
+        self.save_hyperparameters(ignore=["vae"])
+
+
+    def _normalize(self, suv: torch.Tensor) -> torch.Tensor:
+        """SUV → espace log normalisé [-1, 1]."""
+        log = torch.log1p(suv)
+        return 2.0 * (log.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
+
+    def _denormalize(self, x_norm: torch.Tensor) -> torch.Tensor:
+        """Espace log normalisé [-1, 1] → SUV."""
+        log = 0.5 * (x_norm.clamp(-1, 1) + 1.0) * self.suv_global_log_max
+        return torch.expm1(log)
+
+    def configure_optimizers(self):
+        """Un seul optimiseur pour tout le réseau."""
+        optimizer = torch.optim.AdamW(
+            self.vae.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
+        return optimizer
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_hat, *_ = self.vae(x, sample_posterior=False)
+        return x_hat
+
+
+    def training_step(self, batch, batch_idx):
+        suv_source = batch["source"][tio.DATA].float()
+
+        if suv_source.ndim == 5:
+            suv_source = suv_source.squeeze(1)
+
+        x = self._normalize(suv_source)
+        bs = x.shape[0]
+
+        # Forward avec les mêmes probabilités de dropout que l'original
+        x_hat, mu_content, logvar_content, mu_style, logvar_style = self.vae(
+            x, sample_posterior=True, style_dropout_p=0.
+        )
+
+        # Calcul des losses standards
+        loss_rec = F.l1_loss(x_hat, x)
+        loss_kl_content = kl_loss_spatial(mu_content, logvar_content).mean()
+        loss_kl_style = kl_loss_1d(mu_style, logvar_style).mean()
+        loss_kl = torch.mean(loss_kl_content + loss_kl_style)
+
+        loss_total = loss_rec + self.kl_weight * loss_kl
+
+        # Logging
+        self.log("train/rec_loss", loss_rec, on_step=True, on_epoch=True, batch_size=bs, sync_dist=True)
+        self.log("train/kl_content", loss_kl_content, on_step=True, on_epoch=True, batch_size=bs, sync_dist=True)
+        self.log("train/kl_style", loss_kl_style, on_step=True, on_epoch=True, batch_size=bs, sync_dist=True)
+        self.log("train/total", loss_total, on_step=True, on_epoch=True, batch_size=bs, prog_bar=True, sync_dist=True)
+
+        return loss_total
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Boucle de validation
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def validation_step(self, batch, batch_idx):
+        suv_source = batch["source"][tio.DATA].float()
+
+        if suv_source.ndim == 5:
+            suv_source = suv_source.squeeze(1)
+
+        x = self._normalize(suv_source)
+        bs = x.shape[0]
+
+        # Forward d'évaluation (dropout activé comme dans l'original pour forcer l'usage du content)
+        x_hat, mu_content, logvar_content, mu_style, logvar_style = self.vae(
+            x, sample_posterior=False, style_dropout_p=0.95
+        )
+
+        loss_rec = F.l1_loss(x_hat, x)
+        loss_kl_content = kl_loss_spatial(mu_content, logvar_content).mean()
+        loss_kl_style = kl_loss_1d(mu_style, logvar_style).mean()
+
+        # SSIM
+        x_01 = (x.clamp(-1, 1) + 1.0) / 2.0
+        x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
+        ssim_score = self.ssim(x_hat_01, x_01)
+
+        # Score composite de base (uniquement sur la reco car pas de classifieurs)
+        composite_score = loss_rec 
+
+        self.log("val/rec_loss", loss_rec, batch_size=bs, sync_dist=True)
+        self.log("val/kl_content", loss_kl_content, batch_size=bs, sync_dist=True)
+        self.log("val/kl_style", loss_kl_style, batch_size=bs, sync_dist=True)
+        self.log("val/ssim", ssim_score, batch_size=bs, sync_dist=True)
+        self.log("val/composite_score", composite_score, batch_size=bs, sync_dist=True, prog_bar=True)
+
+        if batch_idx == 0:
+            self._log_images(x, x_hat, suv_source)
+
+        return loss_rec
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Logging images
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _log_images(self, x_norm: torch.Tensor, x_hat_norm: torch.Tensor, suv_source: torch.Tensor):
+        if self.trainer.global_rank != 0:
+            return
+
+        suv_pred = self._denormalize(x_hat_norm)
+
+        mid = suv_source.shape[1] // 2
+        src_slice = suv_source[:, mid:mid+1, :, :]
+        pred_slice = suv_pred[:, mid:mid+1, :, :]
+
+        display_max = max(5.0, src_slice.max().item(), pred_slice.max().item())
+        imgs = torch.cat([src_slice, pred_slice], dim=3)
+        imgs = (imgs / display_max).clamp(0, 1)
+
+        grid = make_grid(imgs, nrow=1, padding=2)
+        wandb.log({
+            "Validation/Reconstruction_Ablation": wandb.Image(
+                grid.permute(1, 2, 0).cpu().numpy(),
+                caption=f"Gauche : PET | Droite : Harmonisée (Ablation) (epoch {self.current_epoch})"
+            )
+        })

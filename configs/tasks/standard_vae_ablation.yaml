@@ -1,0 +1,78 @@
+SEED: 101
+WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
+
+project_name: federated-pet
+dir_name: runs/harmonization-std-vae
+name: Standard VAE Harmonization (Ablation)
+
+datamodule:
+    root_dir: ./data/PET-EARL/
+    split_config: 
+    - [50, 15]           
+    - [50, 15]           
+    - [50, 15]           
+    - [50, 15] 
+    batch_size:         64
+    patch_size:         [5, 64, 64]
+    num_workers:        16
+    queue_max_length:   9000
+    samples_per_volume: 350
+
+vae:
+    input_shape:          [64, 64]   
+    fft_sigma:            7.5        
+    in_channels:          5
+    out_channels:         5
+    hidden_channels:      [64, 128, 256, 512]
+    kernel_sizes:         [3, 3, 3, 3]
+    strides:              [1, 2, 2, 2]
+    latent_channels:      6
+    style_channels:       256
+    style_embedding_dim:  256      
+    num_residual_blocks:  1
+    spatial_dims:         2
+    normalization:
+    - group
+    - {num_groups: 32, affine: true}
+    activation:
+    - swish
+    - {}
+    dropout:              0.0
+    use_residual_block:   true
+    learnable_interpolation: true
+    attention_type:       none   
+    use_contour_skip:     false
+
+# Section épurée pour le VAE Standard
+pipeline:
+    kl_weight:             5.0e-7
+    lr:                    1.0e-4   # lr unique au lieu des différents LR de l'unlearning
+    weight_decay:          1.0e-6
+    suv_global_log_max:    6.0
+
+model_checkpoint:
+    monitor: val/composite_score
+    every_n_epochs: 1
+    save_last: true
+    save_top_k: 3
+    mode: min
+    verbose: true
+    # Filename corrigé pour retirer les références aux accuracy des classifieurs
+    filename: "epoch={epoch:03d}-rec={val/rec_loss:.4f}-ssim={val/ssim:.4f}"
+    auto_insert_metric_name: false
+
+trainer:
+    precision:           32
+    accelerator:         gpu
+    devices:             1
+    log_every_n_steps:   1
+    min_epochs:          10
+    max_epochs:          120
+    check_val_every_n_epoch: 1
+    num_sanity_val_steps: 0
+    limit_train_batches: 400
+    limit_val_batches:   80
+    
+    # Compatible désormais avec l'optimisation automatique de Lightning !
+    gradient_clip_val: 1.0
+    gradient_clip_algorithm: "norm"

@@ -2,16 +2,16 @@ SEED: 101
 WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 project_name: federated-pet
-dir_name: runs/unlearning-harmonization-vae
-name: Unlearning Harmonization with StyleVAE+AdaIN Conf2 (3 Domains)
+dir_name: runs/harmonization-std-vae # runs/unlearning-harmonization-vae
+name: Unlearning Harmonization with a Std VAE (Ablation) # StyleVAE+AdaIN Conf2 (4 Domains)
 
 datamodule:
-    root_dir:           ./data/PET-EARL/
+    root_dir: ./data/PET-EARL/
     split_config: 
-    - [0, 75]           
-    - [0, 75]           
-    - [0, 75]           
-    - [0, 75] 
+    - [0, 50]           
+    - [0, 50]           
+    - [0, 50]           
+    - [0, 50] 
     batch_size:         64
     patch_size:         [5, 64, 64]
     num_workers:        16

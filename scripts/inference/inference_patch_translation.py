@@ -145,10 +145,9 @@ def process_subject(
 
                     # Accumulation séparée pour chaque standard
                     for i, chunk in enumerate(chunks):
-                        output_volumes[i][z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += chunk.squeeze(0) * gauss_w
+                        output_volumes[i][z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += chunk.squeeze(0) # * gauss_w
                     
-                    weight_sum[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += gauss_w
-                    
+                    weight_sum[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += 1
                     pbar.update(1)
 
     pbar.close()
