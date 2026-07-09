@@ -8,9 +8,9 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import wandb as wandb_logger
 from pytorch_lightning.trainer import Trainer
 
-from src.pet_harmonization.data import MIPDataModule
-from src.pet_harmonization.models.autoencoders import VariationalAutoencoder
-from src.pet_harmonization.utils import set_seed
+from pet_harmonization.data import MIPDataModule
+from pet_harmonization.models.autoencoders import VariationalAutoencoder
+from pet_harmonization.utils import set_seed
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
