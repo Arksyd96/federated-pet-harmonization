@@ -13,12 +13,12 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
-from src.pet_harmonization.data import MultiDomainUnlearningDataModule
-from src.pet_harmonization.models.unet import UNet
-from src.pet_harmonization.models.starganv2 import (
+from pet_harmonization.data import MultiDomainUnlearningDataModule
+from pet_harmonization.models.unet import UNet
+from pet_harmonization.models.starganv2 import (
     StarGANv2, StyleEncoder, StarGANv2Discriminator, StarGANv2Generator, StyleEmbedder
 )
-from src.pet_harmonization.utils import set_seed
+from pet_harmonization.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
