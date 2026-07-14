@@ -98,21 +98,24 @@ def process_subject(
     device: torch.device,
     curr_idx: int,
     length_loader: int,
-    z_style_fixed: torch.Tensor = None
+    z_style_fixed: torch.Tensor = None,
+    override: bool = False
 ):
     subject_name = batch['subject_name'][0]
     source_path = batch['source']['path'][0]
     
-    # 💡 MODIFICATION : Le dossier de sortie est directement le dossier parent de l'image source
     subj_out_dir = os.path.dirname(source_path)
     pred_path = os.path.join(subj_out_dir, f"harmonized-pet-{model_type}.nii.gz")
     
     print(f"Treating subject: {subject_name} ({curr_idx}/{length_loader})")
     
-    # 💡 MODIFICATION : Condition de skip placée avant de préparer les tenseurs
+    # 💡 NOUVEAU : Logique de vérification avec le paramètre override
     if os.path.exists(pred_path):
-        print(f"⏩ Skip : Le fichier {os.path.basename(pred_path)} existe déjà dans {subj_out_dir}")
-        return
+        if not override:
+            print(f"⏩ Skip : Le fichier {os.path.basename(pred_path)} existe déjà dans {subj_out_dir}")
+            return
+        else:
+            print(f"⚠️ Override : Le fichier {os.path.basename(pred_path)} sera écrasé.")
 
     suv_source = batch["source"][tio.DATA].float().to(device)
     if suv_source.ndim == 5:
@@ -139,12 +142,12 @@ def process_subject(
     output_volume = torch.zeros((d_dim, h_dim, w_dim), device=device)
     weight_sum    = torch.zeros((d_dim, h_dim, w_dim), device=device)
     
-    z_starts = get_uniform_starts(d_dim, z_patch_size, min_overlap_ratio=0.60)
-    y_starts = get_uniform_starts(h_dim, y_patch_size, min_overlap_ratio=0.25)
-    x_starts = get_uniform_starts(w_dim, x_patch_size, min_overlap_ratio=0.25)
+    z_starts = get_uniform_starts(d_dim, z_patch_size, min_overlap_ratio=0.5)
+    y_starts = get_uniform_starts(h_dim, y_patch_size, min_overlap_ratio=0.3)
+    x_starts = get_uniform_starts(w_dim, x_patch_size, min_overlap_ratio=0.3)
 
     total_patches = len(z_starts) * len(y_starts) * len(x_starts)
-    gauss_w = make_gaussian_weight_map((z_patch_size, y_patch_size, x_patch_size), sigma_ratio=1.0).to(device)
+    gauss_w = make_gaussian_weight_map((z_patch_size, y_patch_size, x_patch_size), sigma_ratio=.5).to(device)
 
     pbar = tqdm(total=total_patches, desc=f"Inférence ({model_type})")
     with torch.no_grad():
@@ -199,6 +202,7 @@ if __name__ == "__main__":
     parser.add_argument('--ckpt-path', '-m', type=str, required=True, help='Chemin vers le checkpoint (.ckpt).')
     parser.add_argument('--model-type', type=str, required=True, choices=['stargan', 'vae', 'unet-skip', 'unet-iffn', 'standard-vae'], help='Le type d\'architecture à charger.')
     parser.add_argument('--style-ref', '-s', type=str, required=False, default=None, help='Fichier .pt de style pré-extrait (pour StarGAN et VAE).')
+    parser.add_argument('--override', action='store_true', help='Écrase les fichiers de prédiction existants au lieu de les ignorer.') # 💡 NOUVEAU
     args = parser.parse_args()
 
     config = OmegaConf.load(args.config_file)
@@ -269,5 +273,6 @@ if __name__ == "__main__":
             device=device,
             curr_idx=idx + 1,
             length_loader=len(loader),
-            z_style_fixed=z_style_fixed
+            z_style_fixed=z_style_fixed,
+            override=args.override # 💡 NOUVEAU
         )

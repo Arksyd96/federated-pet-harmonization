@@ -16,6 +16,8 @@ def ensure_nii_gz(filenames):
 def parse_file_name(filename):
     if filename.lower().startswith('pet'):
         return 'pet'
+    elif filename.lower().startswith('harmonized-pet'):
+        return filename.split('.')[0]  
     elif 'pseudo-earl1' in filename.lower():
         return 'pseudo-earl1'
     elif 'pseudo-earl2' in filename.lower():

@@ -8,7 +8,7 @@ import pytorch_lightning as pl
 import wandb
 
 from .base import DownEncoderBlock2D, UpDecoderBlock2D, UNetMidBlock2D
-from src.pet_harmonization.losses import LPIPS
+from pet_harmonization.losses import LPIPS
 from .base import (
     BasicModel, UnetResBlock, UnetBasicBlock, DownBlock, BasicBlock, UpBlock
 )
