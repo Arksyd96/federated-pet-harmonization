@@ -113,7 +113,7 @@ def process_subject(
     gauss_w = make_gaussian_weight_map((z_patch_size, y_patch_size, x_patch_size), sigma_ratio=.5).to(device)
 
     # --- 3. Boucle d'Inférence ---
-    pbar = tqdm(total=total_patches, desc="Inférence patch-wise")
+    pbar = tqdm(total=total_patches, desc="Patch-wise inference", unit="patches")
 
     with torch.no_grad():
         for z in z_starts:

@@ -835,7 +835,6 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
         self.voi_filename = voi_filename
         self.seed = seed
         
-        
         self.domain_to_id = {}
         self.train_subjects = []
         self.val_subjects = []
