@@ -142,9 +142,9 @@ def process_subject(
     output_volume = torch.zeros((d_dim, h_dim, w_dim), device=device)
     weight_sum    = torch.zeros((d_dim, h_dim, w_dim), device=device)
     
-    z_starts = get_uniform_starts(d_dim, z_patch_size, min_overlap_ratio=0.5)
-    y_starts = get_uniform_starts(h_dim, y_patch_size, min_overlap_ratio=0.3)
-    x_starts = get_uniform_starts(w_dim, x_patch_size, min_overlap_ratio=0.3)
+    z_starts = get_uniform_starts(d_dim, z_patch_size, min_overlap_ratio=0.50)
+    y_starts = get_uniform_starts(h_dim, y_patch_size, min_overlap_ratio=0.25)
+    x_starts = get_uniform_starts(w_dim, x_patch_size, min_overlap_ratio=0.25)
 
     total_patches = len(z_starts) * len(y_starts) * len(x_starts)
     gauss_w = make_gaussian_weight_map((z_patch_size, y_patch_size, x_patch_size), sigma_ratio=.5).to(device)
