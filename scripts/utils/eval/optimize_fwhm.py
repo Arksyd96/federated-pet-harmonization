@@ -181,7 +181,7 @@ def main():
     df = pd.DataFrame(all_results)
     df.to_csv(args.output_csv, index=False)
     
-    summary_df = df.groupby('FWHM_mm')['aRE_SUVmean_%'].median().reset_index()
+    summary_df = df.groupby('FWHM_mm')['aRE_SUVmean_%'].mean().reset_index()
     best_row = summary_df.loc[summary_df['aRE_SUVmean_%'].idxmin()]
     
     logging.info(f"=== RESULTATS DE L'OPTIMISATION ===")

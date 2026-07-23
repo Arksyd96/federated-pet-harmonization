@@ -11,7 +11,7 @@ datamodule:
     root_dir: ./data/PET-EARL/domain_a100
     batch_size: 64
     # train_ratio: 1.0 # No DSR
-    train_ratio: 0 # for DSR with N subjects only | 0 means all as validation
+    train_ratio: 10 # for DSR with N subjects only | 0 means all as validation
     patch_size: [5, 64, 64]
     num_workers: 16 
     queue_max_length: 9000
