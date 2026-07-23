@@ -1,5 +1,6 @@
 import os
 import argparse
+import numpy as np
 import SimpleITK as sitk
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
@@ -8,13 +9,16 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-def apply_gaussian_blur(input_path, output_path, sigma_mm=3.5):
-    """Applique un flou Gaussien sur une image NIfTI et force le fond à zéro absolu."""
+def apply_gaussian_blur(input_path, output_path, fwhm_mm=8.0):
+    """Applique un flou Gaussien sur une image NIfTI (basé sur le FWHM) et force le fond à zéro absolu."""
     try:
         if not os.path.exists(input_path):
             return False, f"Fichier source introuvable : {os.path.basename(input_path)}"
         
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # Conversion FWHM (mm) vers Sigma (mm)
+        sigma_mm = fwhm_mm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
         
         image = sitk.ReadImage(input_path)
         gaussian_filter = sitk.SmoothingRecursiveGaussianImageFilter()
@@ -30,7 +34,7 @@ def apply_gaussian_blur(input_path, output_path, sigma_mm=3.5):
         final_image = sitk.GetImageFromArray(arr_blurred)
         final_image.CopyInformation(image)
         
-        # 6. Sauvegarde
+        # 6. Sauvegarde (écrase silencieusement le fichier s'il existe déjà)
         sitk.WriteImage(final_image, output_path)
         
         return True, "Succès"
@@ -39,16 +43,20 @@ def apply_gaussian_blur(input_path, output_path, sigma_mm=3.5):
 
 def process_subject(args_tuple):
     """Fonction worker traitant un sujet unique."""
-    subj_id, subj_in_dir, subj_out_dir, filename, target_name, sigma = args_tuple
+    subj_id, subj_in_dir, subj_out_dir, filename, target_name, fwhm = args_tuple
     
-    # Gestion de l'extension .nii.gz si l'utilisateur l'oublie
+    # Gestion de l'extension .nii.gz pour l'entrée
     if not filename.endswith((".nii", ".nii.gz")):
         filename += ".nii.gz"
-    
+        
+    # Gestion de l'extension .nii.gz pour la sortie
+    if not target_name.endswith((".nii", ".nii.gz")):
+        target_name += ".nii.gz"
+        
     input_path = os.path.join(subj_in_dir, filename)
-    output_path = os.path.join(subj_out_dir, f"{target_name}.nii.gz")
+    output_path = os.path.join(subj_out_dir, target_name)
     
-    success, message = apply_gaussian_blur(input_path, output_path, sigma)
+    success, message = apply_gaussian_blur(input_path, output_path, fwhm)
     return subj_id, success, message
 
 def main():
@@ -57,10 +65,10 @@ def main():
     parser.add_argument("--input", type=str, required=True, help="Repo source")
     parser.add_argument("--output", type=str, required=True, help="Repo destination")
     parser.add_argument("--filename", type=str, required=True, help="Nom exact du fichier d'entrée (ex: pet_std)")
-    parser.add_argument("--tg-filename", type=str, default='Gaussian_pseudo_EARL', help="Nom du fichier de sortie")
+    parser.add_argument("--output-filename", type=str, default='gaussian-earl.nii.gz', help="Nom du fichier de sortie")
     parser.add_argument("--include-only", nargs='*', default=None, help="Liste des IDs de sujets à traiter (ex: S01 S05)")
     parser.add_argument("--num-workers", type=int, default=multiprocessing.cpu_count() - 2, help="Nombre de processus")
-    parser.add_argument("--sigma", type=float, default=3.5, help="Sigma en mm")
+    parser.add_argument("--fwhm", type=float, default=8.0, help="FWHM en mm (ex: 8.0 pour un pseudo-EARL1)")
 
     args = parser.parse_args()
 
@@ -84,11 +92,11 @@ def main():
 
     # Préparation des tâches
     tasks = [
-        (s, os.path.join(args.input, s), os.path.join(args.output, s), args.filename, args.tg_filename, args.sigma)
+        (s, os.path.join(args.input, s), os.path.join(args.output, s), args.filename, args.output_filename, args.fwhm)
         for s in subjects
     ]
 
-    logging.info(f"🚀 Traitement lancé pour {len(subjects)} sujets.")
+    logging.info(f"🚀 Traitement lancé pour {len(subjects)} sujets avec un FWHM de {args.fwhm} mm.")
     success_count = 0
     
     with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
@@ -97,7 +105,6 @@ def main():
         for future in tqdm(as_completed(futures), total=len(tasks), desc="Génération Pseudo-EARL"):
             res = future.result()
             
-            # Application de l'espace dans les crochets [] pour ton rendu
             subj_id = res[0]
             is_ok = res[1]
             msg = res[2]
