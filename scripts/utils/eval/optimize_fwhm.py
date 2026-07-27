@@ -35,9 +35,14 @@ def precompute_subject_data(subj_dir, subj_id, args):
     earl_img = sitk.ReadImage(earl_path, sitk.sitkFloat32)
     earl_arr = sitk.GetArrayFromImage(earl_img)
     
+<<<<<<< HEAD
     components_data = [] # <-- RENOMMÉ POUR PLUS DE CLARTÉ
     
     # 1. ITÉRATION SUR LES 6 MASQUES (VOIs)
+=======
+    components_data = []
+    
+>>>>>>> bea07c6 (latest)
     for mask_filename in args.mask_filenames:
         mask_path = os.path.join(subj_dir, mask_filename)
         
@@ -143,13 +148,28 @@ def main():
     parser.add_argument("--earl-filename", type=str, required=True, help="PET EARL cible (ex: earl.nii.gz).")
     parser.add_argument("--mask-filenames", type=str, nargs='+', required=True, 
                         help="Liste des fichiers masques (ex: brain.nii.gz liver.nii.gz lesion.nii.gz).")
+<<<<<<< HEAD
     parser.add_argument("--num-subjects", type=int, required=True, help="Nombre de patients.")
+=======
+    
+    # Modifs : --num-subjects n'est plus obligatoire, et ajout de --include-only
+    parser.add_argument("--num-subjects", type=int, default=None, help="Nombre de patients.")
+    parser.add_argument("--include-only", type=str, nargs='+', default=None, help="Liste de patients spécifiques à forcer. Ignore --num-subjects et --seed.")
+    
+>>>>>>> bea07c6 (latest)
     parser.add_argument("--min-fwhm", type=float, default=0.0, help="FWHM minimum en mm.")
     parser.add_argument("--max-fwhm", type=float, default=10.0, help="FWHM maximum en mm.")
     parser.add_argument("--seed", type=int, default=101, help="Seed reproductibilité.")
     parser.add_argument("--output-csv", type=str, default="optimal_fwhm_multivoi_results.csv", help="CSV sortie brute.")
     parser.add_argument("--num-workers", type=int, default=16, help="Nombre de threads.")
     args = parser.parse_args()
+
+    # Vérification stricte des paramètres exclusifs
+    if args.num_subjects is None and args.include_only is None:
+        parser.error("Vous devez spécifier soit --num-subjects, soit --include-only.")
+        
+    if args.include_only and args.num_subjects is not None:
+        logging.warning("⚠️ Les arguments --include-only et --num-subjects ont été fournis ensemble. --num-subjects et --seed seront ignorés.")
 
     random.seed(args.seed)
 
@@ -176,8 +196,20 @@ def main():
         logging.error("Aucun patient valide trouvé.")
         return
         
+<<<<<<< HEAD
     sampled_subjects = random.sample(valid_subjects, min(args.num_subjects, len(valid_subjects)))
     logging.info(f"{len(sampled_subjects)} patients sélectionnés.")
+=======
+    if args.include_only:
+        sampled_subjects = [s for s in args.include_only if s in valid_subjects]
+        if len(sampled_subjects) < len(args.include_only):
+            logging.warning(f"Seulement {len(sampled_subjects)}/{len(args.include_only)} patients trouvés valides parmi la liste fournie.")
+    else:
+        # Logique aléatoire d'origine
+        sampled_subjects = random.sample(valid_subjects, min(args.num_subjects, len(valid_subjects)))
+        
+    logging.info(f"{len(sampled_subjects)} patients sélectionnés pour le traitement.")
+>>>>>>> bea07c6 (latest)
 
     logging.info("Pré-chargement en mémoire et alignement...")
     for subj in tqdm(sampled_subjects, desc="Pré-calculs"):
@@ -199,14 +231,20 @@ def main():
     df = pd.DataFrame(all_results)
     df.to_csv(args.output_csv, index=False)
     
+<<<<<<< HEAD
     # =========================================================================
     # 4. AGRÉGATION HIÉRARCHIQUE STRICTE
     # =========================================================================
+=======
+>>>>>>> bea07c6 (latest)
     # Étape A : Moyenne de toutes les composantes au sein de la MÊME VOI pour UN patient
     # -> Le patient aura exactement 6 lignes par FWHM (Foie, Cerveau, Lésion(Moyenne)...)
     patient_voi_df = df.groupby(['Subject', 'FWHM_mm', 'VOI'])['aRE_SUVmean_%'].mean().reset_index()
     
+<<<<<<< HEAD
     # Étape B : Moyenne globale à travers tous les patients et toutes les VOIs
+=======
+>>>>>>> bea07c6 (latest)
     # -> 1 seule valeur par FWHM mm
     summary_df = patient_voi_df.groupby('FWHM_mm')['aRE_SUVmean_%'].mean().reset_index()
     
