@@ -27,7 +27,7 @@ def align_mask_to_reference(mask_img, ref_img):
     return resampler.Execute(mask_img)
 
 def precompute_subject_data(subj_dir, subj_id, args):
-    """Charge les images, aligne les 6 masques, et pré-calcule les VOI50 pour chaque composante."""
+    """Charge les images, aligne les masques, et pré-calcule les VOI50 pour chaque composante."""
     std_path = os.path.join(subj_dir, args.std_filename)
     earl_path = os.path.join(subj_dir, args.earl_filename)
     
@@ -36,31 +36,36 @@ def precompute_subject_data(subj_dir, subj_id, args):
     earl_arr = sitk.GetArrayFromImage(earl_img)
     
     components_data = []
+    missing_or_empty_masks = []
     
     for mask_filename in args.mask_filenames:
         mask_path = os.path.join(subj_dir, mask_filename)
+        voi_name = mask_filename.split('.')[0]
         
+        # 1. Vérification de l'existence du fichier
         if not os.path.exists(mask_path):
+            missing_or_empty_masks.append(voi_name)
             continue
             
         mask_img = sitk.ReadImage(mask_path, sitk.sitkUInt8)
         aligned_mask_img = align_mask_to_reference(mask_img, std_img)
         mask_arr = sitk.GetArrayFromImage(aligned_mask_img)
         
-        voi_name = mask_filename.split('.')[0]
+        # 2. Vérification si le masque est complètement vide
+        if not np.any(mask_arr > 0):
+            missing_or_empty_masks.append(voi_name)
+            continue
         
-        # Traitement asymétrique Organes vs Lésions
         is_lesion = 'lesion' in voi_name.lower()
         
         if is_lesion:
-            # Séparation en multiples composantes (Lésion 1, Lésion 2...)
             labeled_mask, num_components = label(mask_arr > 0)
         else:
-            # Organe normal (Foie, Cerveau...) = 1 seule composante globale
             labeled_mask = (mask_arr > 0).astype(int)
-            num_components = 1 if np.any(mask_arr > 0) else 0
+            num_components = 1
         
-        # 2. ITÉRATION SUR LES COMPOSANTES DU MASQUE
+        components_added_for_this_mask = 0
+        
         for k in range(1, num_components + 1):
             component_mask = (labeled_mask == k)
             suv_max_earl = np.max(earl_arr[component_mask])
@@ -82,10 +87,16 @@ def precompute_subject_data(subj_dir, subj_id, args):
                 'suv_max_earl': suv_max_earl,
                 'suv_mean_earl': suv_mean_earl
             })
+            components_added_for_this_mask += 1
+            
+        # Si aucune composante valide (suv max > 0 et voi50 non vide) n'a été extraite
+        if components_added_for_this_mask == 0:
+            missing_or_empty_masks.append(voi_name)
             
     return {
         'std_img': std_img,
-        'components': components_data
+        'components': components_data,
+        'missing_or_empty_masks': missing_or_empty_masks
     }
 
 def process_fwhm_task(task_args):
@@ -107,7 +118,6 @@ def process_fwhm_task(task_args):
         blurred_img = gaussian_filter.Execute(std_img)
         arr_blurred = sitk.GetArrayFromImage(blurred_img)
         
-    # 3. ITÉRATION SUR TOUTES LES COMPOSANTES (Foie, Cerveau, Lésion 1, Lésion 2...)
     for comp in components:
         voi50_mask = comp['voi50_mask']
         
@@ -116,7 +126,6 @@ def process_fwhm_task(task_args):
         
         safe_earl_mean = comp['suv_mean_earl'] if comp['suv_mean_earl'] != 0 else 1e-8
         
-        # aRE sur la composante
         are_mean = abs(suv_mean_filt - safe_earl_mean) / safe_earl_mean * 100.0
         bias_mean = ((suv_mean_filt - safe_earl_mean) / safe_earl_mean) * 100.0
         
@@ -143,7 +152,6 @@ def main():
     parser.add_argument("--mask-filenames", type=str, nargs='+', required=True, 
                         help="Liste des fichiers masques (ex: brain.nii.gz liver.nii.gz lesion.nii.gz).")
     
-    # Modifs : --num-subjects n'est plus obligatoire, et ajout de --include-only
     parser.add_argument("--num-subjects", type=int, default=None, help="Nombre de patients.")
     parser.add_argument("--include-only", type=str, nargs='+', default=None, help="Liste de patients spécifiques à forcer. Ignore --num-subjects et --seed.")
     
@@ -154,7 +162,6 @@ def main():
     parser.add_argument("--num-workers", type=int, default=16, help="Nombre de threads.")
     args = parser.parse_args()
 
-    # Vérification stricte des paramètres exclusifs
     if args.num_subjects is None and args.include_only is None:
         parser.error("Vous devez spécifier soit --num-subjects, soit --include-only.")
         
@@ -163,27 +170,19 @@ def main():
 
     random.seed(args.seed)
 
-    logging.info("Scan du répertoire pour trouver les patients avec lésion...")
-    lesion_filename = next((m for m in args.mask_filenames if 'lesion' in m.lower()), None)
-    if not lesion_filename:
-        logging.error("Aucun fichier 'lesion' trouvé dans --mask-filenames.")
-        return
-
+    logging.info("Scan du répertoire pour valider l'existence des PET std et earl...")
     valid_subjects = []
+    
+    # La condition est maintenant allégée : il faut juste que std et earl existent
     for subj_folder in os.listdir(args.data_dir):
         subj_path = os.path.join(args.data_dir, subj_folder)
         if os.path.isdir(subj_path):
             if (os.path.exists(os.path.join(subj_path, args.std_filename)) and 
                 os.path.exists(os.path.join(subj_path, args.earl_filename))):
-                
-                lesion_path = os.path.join(subj_path, lesion_filename)
-                if os.path.exists(lesion_path):
-                    mask_img = sitk.ReadImage(lesion_path, sitk.sitkUInt8)
-                    if np.any(sitk.GetArrayFromImage(mask_img) > 0):
-                        valid_subjects.append(subj_folder)
+                valid_subjects.append(subj_folder)
                 
     if len(valid_subjects) == 0:
-        logging.error("Aucun patient valide trouvé.")
+        logging.error("Aucun patient valide (std + earl) trouvé.")
         return
         
     if args.include_only:
@@ -191,15 +190,43 @@ def main():
         if len(sampled_subjects) < len(args.include_only):
             logging.warning(f"Seulement {len(sampled_subjects)}/{len(args.include_only)} patients trouvés valides parmi la liste fournie.")
     else:
-        # Logique aléatoire d'origine
-        sampled_subjects = random.sample(valid_subjects, min(args.num_subjects, len(valid_subjects)))
+        # Priorisation : On sépare les patients "complets" (qui ont tous les fichiers masques) des "incomplets"
+        preferred = []
+        others = []
+        for s in valid_subjects:
+            has_all = all(os.path.exists(os.path.join(args.data_dir, s, m)) for m in args.mask_filenames)
+            if has_all:
+                preferred.append(s)
+            else:
+                others.append(s)
+                
+        random.shuffle(preferred)
+        random.shuffle(others)
+        
+        # On remplit d'abord avec les complets, puis on complète avec les autres
+        pool = preferred + others
+        sampled_subjects = pool[:args.num_subjects]
         
     logging.info(f"{len(sampled_subjects)} patients sélectionnés pour le traitement.")
 
     logging.info("Pré-chargement en mémoire et alignement...")
+    mask_issues_counts = {}
+    
     for subj in tqdm(sampled_subjects, desc="Pré-calculs"):
         subj_dir = os.path.join(args.data_dir, subj)
-        MEMORY_POOL[subj] = precompute_subject_data(subj_dir, subj, args)
+        data = precompute_subject_data(subj_dir, subj, args)
+        MEMORY_POOL[subj] = data
+        
+        for missing_voi in data['missing_or_empty_masks']:
+            mask_issues_counts[missing_voi] = mask_issues_counts.get(missing_voi, 0) + 1
+
+    # Affichage du bilan des masques
+    if mask_issues_counts:
+        logging.info("--- Bilan des masques manquants ou vides (ignorés dans le calcul) ---")
+        for voi, count in mask_issues_counts.items():
+            logging.info(f"  - '{voi}' manquant/vide pour {count} patient(s) sur {len(sampled_subjects)}")
+    else:
+        logging.info("--- Tous les patients sélectionnés possèdent tous les masques valides ! ---")
 
     fwhm_values = np.arange(args.min_fwhm, args.max_fwhm + 0.5, 0.5)
     tasks = [(subj, fwhm) for subj in sampled_subjects for fwhm in fwhm_values]
@@ -212,15 +239,19 @@ def main():
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Evaluation"):
             all_results.extend(future.result())
             
-    # Sauvegarde des résultats bruts (toutes les composantes séparées)
+    if not all_results:
+        logging.error("Aucun résultat généré. Tous les masques de tous les patients étaient probablement vides.")
+        return
+
+    # Sauvegarde des résultats bruts
     df = pd.DataFrame(all_results)
     df.to_csv(args.output_csv, index=False)
     
     # Étape A : Moyenne de toutes les composantes au sein de la MÊME VOI pour UN patient
-    # -> Le patient aura exactement 6 lignes par FWHM (Foie, Cerveau, Lésion(Moyenne)...)
+    # Les masques vides sont ignorés naturellement par pandas car ils n'ont pas de ligne dans df
     patient_voi_df = df.groupby(['Subject', 'FWHM_mm', 'VOI'])['aRE_SUVmean_%'].mean().reset_index()
     
-    # -> 1 seule valeur par FWHM mm
+    # Étape B : Moyenne globale à travers tous les patients et toutes les VOIs
     summary_df = patient_voi_df.groupby('FWHM_mm')['aRE_SUVmean_%'].mean().reset_index()
     
     best_row = summary_df.loc[summary_df['aRE_SUVmean_%'].idxmin()]
