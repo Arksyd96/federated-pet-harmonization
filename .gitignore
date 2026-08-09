@@ -12,6 +12,9 @@ media/
 outputs/
 .vscode/
 __pycache__/
+**.pdf
+**.csv
+**.pkl
 
 # ignore all __pycache__ directories no matter the depth of the directory
 **/__pycache__/
