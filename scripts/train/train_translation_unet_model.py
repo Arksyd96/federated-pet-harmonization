@@ -51,7 +51,7 @@ def main(args):
             name=config.get('name'),
             save_dir=save_dir,
             config=config,
-            offline=True
+            offline=False
         )
     else:
         save_dir = "./runs/temporary/"

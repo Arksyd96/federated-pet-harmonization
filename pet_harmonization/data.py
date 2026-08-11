@@ -636,17 +636,17 @@ class BasePETDataModule(LightningDataModule):
         for subj_name in all_subjects:
             subj_path = os.path.join(self.root_dir, subj_name)
             files = os.listdir(subj_path)
-            file_paths = self.get_pt_earl_files(files)
+            self.file_paths = self.get_pt_earl_files(files)
             
             # Vérification minimale (doit au moins avoir le PET source)
-            if not file_paths.get('source'):
+            if not self.file_paths.get('source'):
                 print(f"Avertissement: Sujet {subj_name} ignoré (PET source manquant).")
                 continue
             
             # Création de l'objet tio.Subject
             subject_dict = {
-                'source': tio.Image(os.path.join(subj_path, file_paths['source']), type=tio.INTENSITY),
-                'sampling_map': tio.Image(os.path.join(subj_path, file_paths['sampling_map']), type=tio.LABEL),
+                'source': tio.Image(os.path.join(subj_path, self.file_paths['source']), type=tio.INTENSITY),
+                'sampling_map': tio.Image(os.path.join(subj_path, self.file_paths['sampling_map']), type=tio.LABEL),
                 'subject_id': subj_name
             }
             
@@ -658,7 +658,7 @@ class BasePETDataModule(LightningDataModule):
                     print(f"[{subj_name}] Masque VOI '{self.voi_filename}' introuvable.")
             
             # Ajout des cibles (targets)
-            for key, file_name in file_paths.items():
+            for key, file_name in self.file_paths.items():
                 if key.startswith('target') and file_name:
                     subject_dict[key] = tio.Image(os.path.join(subj_path, file_name), type=tio.INTENSITY)
             
