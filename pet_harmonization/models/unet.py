@@ -396,119 +396,48 @@ class TranslationUNet(LightningModule):
     def forward(self, x):
         return self.model(x, t=None, condition=None)
 
-    def _common_step(self, batch, batch_idx, stage):
-        # 1. Récupération des données
-        suv_source = batch['source'][tio.DATA].float() # PET
-        suv_targets = {
-            key: batch[key][tio.DATA].float() for key in ['target_1', 'target_2']
-            if key in batch
-        }
-        
-        if not suv_targets:
-            raise ValueError("Aucune cible (target_1, target_2) trouvée dans le batch.")
-
-        # Gestion des dimensions pour le "2D Channel Wise"
-        if suv_source.ndim == 5 and self.hparams.spatial_dims == 2:
-            suv_source = suv_source.squeeze(1) # Réduire la dimension du canal
-            for key in suv_targets:
-                suv_targets[key] = suv_targets[key].squeeze(1)
-
-        # normalisation Globale
-        log_source = torch.log1p(suv_source)
-        concat_suv_targets = torch.cat([suv_targets[key] for key in sorted(suv_targets.keys())], dim=1)
-        log_target = torch.log1p(concat_suv_targets)
-
-        # scale to [-1, 1+eps]
-        normalized_log_source = 2.0 * (log_source.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
-        normalized_log_target = 2.0 * (log_target.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
-
-        # target_Residual = EARL_norm - PET_norm
-        target_residual = (normalized_log_target - normalized_log_source.repeat(1, 2, 1, 1)) * self.alpha
-        predicted_residual = self.forward(normalized_log_source)
-
-        # normalized residual loss
-        residual_loss = self.loss_fn(predicted_residual, target_residual)
-
-        # reconstruction (log norm space)
-        normalized_log_prediction = normalized_log_source.repeat(1, 2, 1, 1) + (predicted_residual / self.alpha)
-
-        # reconstruction (suv space)
-        log_prediction = 0.5 * (normalized_log_prediction + 1.0) * self.suv_global_log_max
-        suv_prediction = torch.expm1(log_prediction)
-
-        # residual suv loss
-        loss_suv = self.loss_fn(suv_prediction, concat_suv_targets)
-        
-        # ssim loss range [0, 1]
-        nlp_01 = (normalized_log_prediction + 1.0) / 2.0
-        nlt_01 = (normalized_log_target + 1.0) / 2.0
-        nlp_01 , nlt_01 = torch.clamp(nlp_01, 0.0, 1.0), torch.clamp(nlt_01, 0.0, 1.0)
-
-        ssim_score = self.ssim_loss(nlp_01, nlt_01)
-        loss_ssim = 1 - ssim_score
-
-        # global loss
-        loss = residual_loss + (0.1 * loss_suv) + (.5 * loss_ssim)
-
-        # 6. Logging Metrics
-        self.log(f"{stage}/loss", loss, on_step=True, on_epoch=True, prog_bar=True, 
-                    sync_dist=True, batch_size=suv_source.size(0))
-        self.log(f"{stage}/loss_residual", residual_loss, on_step=True, on_epoch=True, prog_bar=False,
-                    sync_dist=True, batch_size=suv_source.size(0))
-        self.log(f"{stage}/loss_suv", loss_suv, on_step=True, on_epoch=True, prog_bar=False,
-                    sync_dist=True, batch_size=suv_source.size(0))
-        self.log(f"{stage}/ssim_score", ssim_score, on_step=True, on_epoch=True, prog_bar=True, 
-                    sync_dist=True, batch_size=suv_source.size(0))
-
-        return loss, (
-            normalized_log_source, 
-            normalized_log_target, 
-            normalized_log_prediction,
-            suv_source,
-            concat_suv_targets,
-            suv_prediction,
-            predicted_residual,
-            target_residual
-        )
-
-
     # def _common_step(self, batch, batch_idx, stage):
     #     # 1. Récupération des données
     #     suv_source = batch['source'][tio.DATA].float() # PET
-    #     suv_target = batch['target'][tio.DATA].float() # EARL
+    #     suv_targets = {
+    #         key: batch[key][tio.DATA].float() for key in ['target_1', 'target_2']
+    #         if key in batch
+    #     }
         
-    #     if suv_target is None:
-    #         raise ValueError("Aucune cible trouvée dans le batch.")
+    #     if not suv_targets:
+    #         raise ValueError("Aucune cible (target_1, target_2) trouvée dans le batch.")
 
     #     # Gestion des dimensions pour le "2D Channel Wise"
     #     if suv_source.ndim == 5 and self.hparams.spatial_dims == 2:
     #         suv_source = suv_source.squeeze(1) # Réduire la dimension du canal
-    #         suv_target = suv_target.squeeze(1)
+    #         for key in suv_targets:
+    #             suv_targets[key] = suv_targets[key].squeeze(1)
 
     #     # normalisation Globale
     #     log_source = torch.log1p(suv_source)
-    #     log_target = torch.log1p(suv_target)
+    #     concat_suv_targets = torch.cat([suv_targets[key] for key in sorted(suv_targets.keys())], dim=1)
+    #     log_target = torch.log1p(concat_suv_targets)
 
     #     # scale to [-1, 1+eps]
     #     normalized_log_source = 2.0 * (log_source.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
     #     normalized_log_target = 2.0 * (log_target.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
 
     #     # target_Residual = EARL_norm - PET_norm
-    #     target_residual = (normalized_log_target - normalized_log_source) * self.alpha
+    #     target_residual = (normalized_log_target - normalized_log_source.repeat(1, 2, 1, 1)) * self.alpha
     #     predicted_residual = self.forward(normalized_log_source)
 
     #     # normalized residual loss
     #     residual_loss = self.loss_fn(predicted_residual, target_residual)
 
     #     # reconstruction (log norm space)
-    #     normalized_log_prediction = normalized_log_source + (predicted_residual / self.alpha)
+    #     normalized_log_prediction = normalized_log_source.repeat(1, 2, 1, 1) + (predicted_residual / self.alpha)
 
     #     # reconstruction (suv space)
     #     log_prediction = 0.5 * (normalized_log_prediction + 1.0) * self.suv_global_log_max
     #     suv_prediction = torch.expm1(log_prediction)
 
     #     # residual suv loss
-    #     loss_suv = self.loss_fn(suv_prediction, suv_target)
+    #     loss_suv = self.loss_fn(suv_prediction, concat_suv_targets)
         
     #     # ssim loss range [0, 1]
     #     nlp_01 = (normalized_log_prediction + 1.0) / 2.0
@@ -519,7 +448,7 @@ class TranslationUNet(LightningModule):
     #     loss_ssim = 1 - ssim_score
 
     #     # global loss
-    #     loss = residual_loss + (0.1 * loss_suv) + (.5 * loss_ssim)
+    #     loss = residual_loss + (0.1 * loss_suv) + (0.1 * loss_ssim)
 
     #     # 6. Logging Metrics
     #     self.log(f"{stage}/loss", loss, on_step=True, on_epoch=True, prog_bar=True, 
@@ -536,11 +465,82 @@ class TranslationUNet(LightningModule):
     #         normalized_log_target, 
     #         normalized_log_prediction,
     #         suv_source,
-    #         suv_target,
+    #         concat_suv_targets,
     #         suv_prediction,
     #         predicted_residual,
     #         target_residual
     #     )
+
+
+    def _common_step(self, batch, batch_idx, stage):
+        # 1. Récupération des données
+        suv_source = batch['source'][tio.DATA].float() # PET
+        suv_target = batch['target'][tio.DATA].float() # EARL
+        
+        if suv_target is None:
+            raise ValueError("Aucune cible trouvée dans le batch.")
+
+        # Gestion des dimensions pour le "2D Channel Wise"
+        if suv_source.ndim == 5 and self.hparams.spatial_dims == 2:
+            suv_source = suv_source.squeeze(1) # Réduire la dimension du canal
+            suv_target = suv_target.squeeze(1)
+
+        # normalisation Globale
+        log_source = torch.log1p(suv_source)
+        log_target = torch.log1p(suv_target)
+
+        # scale to [-1, 1+eps]
+        normalized_log_source = 2.0 * (log_source.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
+        normalized_log_target = 2.0 * (log_target.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
+
+        # target_Residual = EARL_norm - PET_norm
+        target_residual = (normalized_log_target - normalized_log_source) * self.alpha
+        predicted_residual = self.forward(normalized_log_source)
+
+        # normalized residual loss
+        residual_loss = self.loss_fn(predicted_residual, target_residual)
+
+        # reconstruction (log norm space)
+        normalized_log_prediction = normalized_log_source + (predicted_residual / self.alpha)
+
+        # reconstruction (suv space)
+        log_prediction = 0.5 * (normalized_log_prediction + 1.0) * self.suv_global_log_max
+        suv_prediction = torch.expm1(log_prediction)
+
+        # residual suv loss
+        loss_suv = self.loss_fn(suv_prediction, suv_target)
+        
+        # ssim loss range [0, 1]
+        nlp_01 = (normalized_log_prediction + 1.0) / 2.0
+        nlt_01 = (normalized_log_target + 1.0) / 2.0
+        nlp_01 , nlt_01 = torch.clamp(nlp_01, 0.0, 1.0), torch.clamp(nlt_01, 0.0, 1.0)
+
+        ssim_score = self.ssim_loss(nlp_01, nlt_01)
+        loss_ssim = 1 - ssim_score
+
+        # global loss
+        loss = residual_loss + (0.1 * loss_suv) + (0.1 * loss_ssim)
+
+        # 6. Logging Metrics
+        self.log(f"{stage}/loss", loss, on_step=True, on_epoch=True, prog_bar=True, 
+                    sync_dist=True, batch_size=suv_source.size(0))
+        self.log(f"{stage}/loss_residual", residual_loss, on_step=True, on_epoch=True, prog_bar=False,
+                    sync_dist=True, batch_size=suv_source.size(0))
+        self.log(f"{stage}/loss_suv", loss_suv, on_step=True, on_epoch=True, prog_bar=False,
+                    sync_dist=True, batch_size=suv_source.size(0))
+        self.log(f"{stage}/ssim_score", ssim_score, on_step=True, on_epoch=True, prog_bar=True, 
+                    sync_dist=True, batch_size=suv_source.size(0))
+
+        return loss, (
+            normalized_log_source, 
+            normalized_log_target, 
+            normalized_log_prediction,
+            suv_source,
+            suv_target,
+            suv_prediction,
+            predicted_residual,
+            target_residual
+        )
 
     def training_step(self, batch, batch_idx):
         loss, _ = self._common_step(batch, batch_idx, "train")

@@ -4,7 +4,7 @@ WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 # modules state
 project_name: federated-pet
-dir_name: runs/2d-to-3d-pet-earl-translation-unet-dsr10-a100
+dir_name: runs/pet-earl-translation/2d-to-3d-pet-earl-translation-unet-dsr10-a100
 name: Traduction PET EARL1 only 5x64x64 DSR 10p A100 (UNet)
 
 datamodule:
