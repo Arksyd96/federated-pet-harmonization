@@ -20,16 +20,16 @@ datamodule:
 # UNet regression style related modules
 translation_model:
     in_ch: 5          
-    out_ch: 10         
+    out_ch: 5         
     spatial_dims: 2 
-    hid_chs: [64, 128, 256, 512]
+    hid_chs: [128, 128, 256, 512]
     kernel_sizes: [3, 3, 3, 3]
     strides: [1, 2, 2, 2]
     
     # Hyperparamètres d'entraînement
     alpha: 1.0                  # Facteur d'amplification du résidu
     learning_rate: 1.0e-4
-    weight_decay: 1.0e-5
+    weight_decay: 1.0e-6
     # suv_global_log_max: 5.5   # Notre max P99.9 Rennes
     suv_global_log_max: 6.0     # Notre max P99.9 CHB/A100/Nantes
     
@@ -47,7 +47,7 @@ trainer:
     accelerator: gpu
     log_every_n_steps: 1
     min_epochs: 100
-    max_epochs: 200
+    max_epochs: 1000
     check_val_every_n_epoch: 10
     num_sanity_val_steps: 0
 

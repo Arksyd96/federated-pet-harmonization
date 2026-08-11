@@ -2,6 +2,7 @@ import os
 import glob
 import argparse
 import logging
+import json
 import SimpleITK as sitk
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
@@ -87,7 +88,7 @@ def process_single_subject(args):
         return subj_in_dir, f"Erreur : {str(e)}"
 
 
-def extract_vois(input_dir, output_dir, mask_names, file_names, num_workers=None):
+def extract_vois(input_dir, output_dir, mask_names, file_names, num_workers=None, manifest_path=None):
     if not os.path.exists(input_dir):
         logging.error(f"Le dossier racine d'entrée n'existe pas : {input_dir}")
         return
@@ -95,12 +96,34 @@ def extract_vois(input_dir, output_dir, mask_names, file_names, num_workers=None
     mask_names = ensure_nii_gz(mask_names)
     file_names = ensure_nii_gz(file_names)
 
+    # --- FILTRAGE VIA MANIFEST ---
+    allowed_subjects = None
+    if manifest_path:
+        if not os.path.exists(manifest_path):
+            logging.error(f"Le fichier manifest n'existe pas : {manifest_path}")
+            return
+            
+        with open(manifest_path, 'r') as f:
+            manifest_data = json.load(f)
+            
+        allowed_subjects = set()
+        if 'test' in manifest_data:
+            for domain, subjects in manifest_data['test'].items():
+                # Ajoute tous les identifiants patients de chaque domaine dans un set global
+                allowed_subjects.update(subjects)
+        
+        logging.info(f"Manifest chargé : {len(allowed_subjects)} patients cibles trouvés dans le set de test.")
+
     search_pattern = os.path.join(input_dir, "**", "*.nii.gz")
     all_niftis = glob.glob(search_pattern, recursive=True)
     subject_dirs = list(set([os.path.dirname(f) for f in all_niftis]))
     
+    # Application du filtre
+    if allowed_subjects is not None:
+        subject_dirs = [d for d in subject_dirs if os.path.basename(d) in allowed_subjects]
+
     if not subject_dirs:
-        logging.warning("Aucun dossier patient trouvé.")
+        logging.warning("Aucun dossier patient trouvé (ou aucun correspondant au manifest).")
         return
 
     tasks = []
@@ -131,6 +154,10 @@ if __name__ == "__main__":
                         help="Liste des noms de fichiers masques (ex: liver spleen lung).")
     parser.add_argument("--num-workers", "-n", type=int, default=None, help="Nombre de workers.")
     
+    # Ajout du nouvel argument optionnel
+    parser.add_argument("--manifest", type=str, default=None, 
+                        help="Chemin vers le manifest.json pour filtrer les patients (optionnel).")
+    
     args = parser.parse_args()
     
     extract_vois(
@@ -138,5 +165,6 @@ if __name__ == "__main__":
         output_dir=args.output,
         mask_names=args.masks,
         file_names=args.filenames,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        manifest_path=args.manifest
     )
