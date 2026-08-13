@@ -38,7 +38,7 @@ def main():
     
     for root, dirs, files in os.walk(args.data_dir):
         for filename in files:
-            if filename.startswith("PET_") and filename.endswith(".nii.gz"):
+            if filename.startswith("PET") and filename.endswith(".nii.gz"):
                 pet_files.append(os.path.join(root, filename))
 
     if not pet_files:
