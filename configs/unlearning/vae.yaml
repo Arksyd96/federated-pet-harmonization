@@ -7,18 +7,13 @@ name: Unlearning Harmonization with a Std VAE (Ablation) # StyleVAE+AdaIN Conf2 
 
 datamodule:
     root_dir: ./data/PET-EARL/
-    split_config: 
-<<<<<<< Updated upstream
-    - [50, 15]           
-    - [50, 15]           
-    - [50, 15]           
-    - [50, 15] 
-=======
-    - [60, 15]           
-    - [60, 15]           
-    - [60, 15]           
-    - [60, 15] 
->>>>>>> Stashed changes
+    split_config: # ['a100', 'chb', 'curie', 'lacassagne', 'nantes', 'rennes']
+    - [0, 50]           
+    - [0, 50]           
+    - [0, 50]           
+    - [0, 50] 
+    - [0, 50]           
+    - [0, 50] 
     batch_size:         64
     patch_size:         [5, 64, 64]
     num_workers:        16

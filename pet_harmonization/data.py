@@ -885,7 +885,7 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
             raise FileNotFoundError(f"Le dossier racine {self.root_dir} n'existe pas.")
 
         # 1. Lister et trier les domaines
-        domain_names = sorted([d for d in os.listdir(self.root_dir) if os.path.isdir(os.path.join(self.root_dir, d))])
+        domain_names = sorted([d for d in sorted(os.listdir(self.root_dir)) if os.path.isdir(os.path.join(self.root_dir, d))])
         self.domain_to_id = {name: i for i, name in enumerate(domain_names)}
         print(f"Mapping Domaines: {self.domain_to_id}")
 
