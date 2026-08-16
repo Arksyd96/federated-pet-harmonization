@@ -30,9 +30,6 @@ def process_nifti_to_float32(file_path: Path):
     return (file_path.name, "Converti en Float32")
 
 
-# =====================================================================
-# BLOC D'EXÉCUTION PRINCIPAL (Niveau 0)
-# =====================================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convertit les NIfTI ciblés d'un dossier en Float32 (en parallèle).")
     parser.add_argument("directory", type=str, help="Dossier racine contenant les fichiers .nii ou .nii.gz")
@@ -43,23 +40,19 @@ if __name__ == "__main__":
     root_dir = Path(args.directory)
     if not root_dir.exists() or not root_dir.is_dir():
         logging.error(f"Le dossier {root_dir} n'existe pas ou n'est pas un répertoire.")
-        exit( 1 ) 
+        exit(1) 
 
     logging.info(f"Recherche des fichiers NIfTI dans {root_dir}...")
 
     # On liste tous les fichiers NIfTI en brut
     all_niftis = list(root_dir.rglob("*.nii")) + list(root_dir.rglob("*.nii.gz"))
     
-    allowed_prefixes = ('PET', 'PT', 'Gaussian', 'harmonized', 'predicted', 'EARL')
-    
-    nifti_files = [
-        f for f in all_niftis 
-        if f.name.startswith(allowed_prefixes)
-    ]
+    allowed_prefixes = ('pet', 'gaussian-earl', 'harmonized', 'earl', 'pseudo-earl')
+    nifti_files = [f for f in all_niftis if f.name.lower().startswith(allowed_prefixes)]
     
     if not nifti_files:
         logging.warning(f"Aucun fichier NIfTI correspondant aux préfixes autorisés n'a été trouvé.")
-        exit( 0 ) 
+        exit(0)
 
     logging.info(f"{len(nifti_files)} fichiers valides trouvés (CT et autres ignorés). Lancement ({args.workers} workers)...")
 
