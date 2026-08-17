@@ -48,7 +48,7 @@ def main():
     pet_files, mask_files = [], []
     for root, dirs, files in os.walk(ROOT_DIR):
         for filename in files:
-            if filename.startswith("PET_") and filename.endswith(".nii.gz"):
+            if filename.lower().startswith("pet") and filename.endswith(".nii.gz"):
                 pet_files.append(os.path.join(root, filename))
                 if args.mask_file:
                     args.mask_file = args.mask_file + '.nii.gz' if not args.mask_file.endswith(('.nii', '.nii.gz')) else args.mask_file
@@ -69,21 +69,15 @@ def main():
     # 2. Exécution Parallèle (étape lente, multithread)
     if total_files > 0:
         with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
-            # On soumet toutes les tâches
-            # future_to_file permettrait de savoir quel fichier a échoué si besoin
             futures = {executor.submit(process_patient_volume, (f, m, args.log_transform)): (f, m) for f, m in zip(pet_files, mask_files)}
             
-            # as_completed permet de mettre à jour la barre dès qu'un fichier est fini
             for future in tqdm(concurrent.futures.as_completed(futures), total=total_files, desc="Calcul Maxima"):
                 result = future.result()
                 if result is not None:
                     pet_max_values.append(result)
                 else:
-                    # Optionnel: Récupérer le nom du fichier qui a échoué
-                    failed_file = futures[future]
-                    # print(f"Echec sur : {failed_file}")
+                    _ = futures[future]
 
-    # 3. Analyse Statistique Détaillée
     if not pet_max_values:
         print("Aucune donnée valide trouvée.")
         return
@@ -97,7 +91,6 @@ def main():
 
     for p in percentiles_to_check:
         thresh = np.percentile(pet_max_values, p)
-        # Nombre de patients qui dépassent ce seuil (qui seront clippés)
         n_clipped = np.sum(pet_max_values > thresh)
         n_kept = total_patients - n_clipped
         stats[p] = (thresh, n_kept, n_clipped)
@@ -122,7 +115,6 @@ def main():
     recommended_p = 98 # Par défaut
     for p in percentiles_to_check:
         thresh, kept, clipped = stats[p]
-        # Règle empirique : on tolère de clipper ~2-5% des patients si ça permet de gagner beaucoup en dynamique
         if clipped <= (0.05 * total_patients): 
             recommended_p = p
             break
@@ -133,5 +125,4 @@ def main():
     print(f"   et de ne saturer légèrement que les {rec_clipped} patients les plus extrêmes.")
 
 if __name__ == '__main__':
-    # Protection nécessaire pour le multiprocessing sous Windows/macOS
     main()

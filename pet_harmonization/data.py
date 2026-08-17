@@ -815,7 +815,7 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
     def __init__(
         self, 
         root_dir: str, 
-        split_config: SplitConfigType = 0.8, # NOUVEAU PARAMÈTRE
+        split_config: SplitConfigType = 0.8, 
         batch_size: int = 4, 
         patch_size: tuple = (64, 64, 64),
         num_workers: int = 8,
@@ -841,8 +841,8 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
 
     def get_pet_body_files(self, files: List[str]):
         """Filtre les fichiers PET et body mask selon la nomenclature os."""
-        pet_files = [f for f in files if f.startswith('PET') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
-        body_files = [f for f in files if f.startswith('body') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
+        pet_files = [f for f in files if f.lower().startswith('pet') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
+        body_files = [f for f in files if f.lower().startswith('body') and (f.endswith('.nii') or f.endswith('.nii.gz'))]
         
         pet_file = pet_files[0] if len(pet_files) > 0 else None
         body_file = body_files[0] if len(body_files) > 0 else None
@@ -884,10 +884,31 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
         if not os.path.exists(self.root_dir):
             raise FileNotFoundError(f"Le dossier racine {self.root_dir} n'existe pas.")
 
-        # 1. Lister et trier les domaines
-        domain_names = sorted([d for d in sorted(os.listdir(self.root_dir)) if os.path.isdir(os.path.join(self.root_dir, d))])
+        all_domain_names = sorted([d for d in os.listdir(self.root_dir) if os.path.isdir(os.path.join(self.root_dir, d))])
+        
+        domain_names = []
+        active_split_configs = []
+        
+        for i, domain_name in enumerate(all_domain_names):
+            if isinstance(self.split_config, list):
+                if len(self.split_config) != len(all_domain_names):
+                    raise ValueError(f"La liste split_config ({len(self.split_config)}) doit correspondre au nombre de domaines trouvés ({len(all_domain_names)}).")
+                
+                current_config = self.split_config[i]
+                
+                # Si le domaine a [0, 0], on l'ignore (il n'aura pas d'ID et ne sera pas chargé)
+                if isinstance(current_config, (tuple, list)) and len(current_config) == 2 and current_config[0] == 0 and current_config[1] == 0:
+                    print(f"⚠️ Domaine '{domain_name}' ignoré (configuré avec [0, 0]).")
+                    continue
+                
+                active_split_configs.append(current_config)
+            domain_names.append(domain_name)
+            
+        if not isinstance(self.split_config, list):
+            active_split_configs = self.split_config
+
         self.domain_to_id = {name: i for i, name in enumerate(domain_names)}
-        print(f"Mapping Domaines: {self.domain_to_id}")
+        print(f"Mapping Domaines Actifs: {self.domain_to_id}")
 
         self.train_subjects = []
         self.val_subjects = []
@@ -903,15 +924,13 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
             rng.shuffle(subjects_in_domain)
             total_subj = len(subjects_in_domain)
 
-            # 2. Déterminer la configuration de split pour CE domaine
-            if isinstance(self.split_config, list):
-                if len(self.split_config) != len(domain_names):
-                    raise ValueError(f"La liste split_config ({len(self.split_config)}) doit correspondre au nombre de domaines ({len(domain_names)}).")
-                current_config = self.split_config[i]
+            # 3. Déterminer la configuration de split pour CE domaine actif (utilise la nouvelle liste filtrée)
+            if isinstance(active_split_configs, list):
+                current_config = active_split_configs[i]
             else:
-                current_config = self.split_config
+                current_config = active_split_configs
 
-            # 3. Calculer les index de coupure (train_count et test_count)
+            # 4. Calculer les index de coupure (train_count et test_count)
             if isinstance(current_config, float):
                 # Cas 1 : Pourcentage
                 train_count = int(total_subj * current_config)
@@ -930,13 +949,13 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
             else:
                 raise TypeError(f"Format de split_config invalide pour le domaine {domain_name}: {current_config}")
 
-            # 4. Découpage
+            # 5. Découpage
             train_names = subjects_in_domain[:train_count]
             val_names = subjects_in_domain[train_count:train_count + test_count]
 
-            print(f"Domaine {domain_name:12} -> Train: {len(train_names):3d}, Test: {len(val_names):3d} (Total: {total_subj})")
+            print(f"Domaine {domain_name:12} -> ID: {domain_id}, Train: {len(train_names):3d}, Test: {len(val_names):3d} (Total dispo: {total_subj})")
 
-            # 5. Création des objets TorchIO
+            # 6. Création des objets TorchIO
             self.train_subjects.extend(self._create_tio_subjects(train_names, domain_path, domain_name, domain_id))
             self.val_subjects.extend(self._create_tio_subjects(val_names, domain_path, domain_name, domain_id))
 
