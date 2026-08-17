@@ -2,8 +2,8 @@ SEED: 101
 WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 project_name: federated-pet
-dir_name: runs/harmonization-std-vae # runs/unlearning-harmonization-vae
-name: Unlearning Harmonization with a Std VAE (Ablation) # StyleVAE+AdaIN Conf2 (4 Domains)
+dir_name: runs/unlearning-harmonization-vae # runs/unlearning-harmonization-vae
+name: Unlearning Harmonization with StyleVAE+AdaIN Conf with Lacassagne (16 channels)
 
 datamodule:
     root_dir: ./data/PET-EARL/
@@ -28,9 +28,9 @@ vae:
     hidden_channels:      [128, 128, 256, 512]
     kernel_sizes:         [3, 3, 3, 3]
     strides:              [1, 2, 2, 2]
-    latent_channels:      12
-    style_channels:       256
-    style_embedding_dim:  256      # aligné sur style_channels (pas d'upscaling)
+    latent_channels:      16
+    style_channels:       512
+    style_embedding_dim:  512      # aligné sur style_channels (pas d'upscaling)
     num_residual_blocks:  2
     spatial_dims:         2
     normalization:
@@ -47,8 +47,8 @@ vae:
 
 
 pipeline:
-    num_domains:           3
-    classifier_hidden_dim: 256
+    num_domains:           5
+    classifier_hidden_dim: 512
     warmup_epochs:         5        # stage 1 : apprendre la tâche + classifieurs
 
     beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
