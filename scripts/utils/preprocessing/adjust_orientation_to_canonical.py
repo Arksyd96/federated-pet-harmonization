@@ -27,7 +27,7 @@ def process_file(filepath: Path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Standardise l'orientation de TOUS les fichiers NIfTI (ToCanonical) en multiprocessing."
+        description="Standardise l'orientation (ToCanonical) des PET, EARL et masques body en multiprocessing."
     )
     parser.add_argument(
         "--data-dir", 
@@ -49,16 +49,17 @@ def main():
         print(f"❌ Erreur : Le dossier {data_dir} n'existe pas.")
         return
 
-    # --- Recherche Globale ---
-    print(f"🔍 Recherche de TOUS les fichiers NIfTI dans : {data_dir}")
-    # On prend tous les fichiers sans filtrer sur le nom
-    target_files = list(data_dir.rglob("*.nii.gz")) + list(data_dir.rglob("*.nii"))
+    # --- Recherche et Filtrage ---
+    print(f"🔍 Recherche des fichiers dans : {data_dir}")
+    all_nifti_files = list(data_dir.rglob("*.nii.gz")) + list(data_dir.rglob("*.nii"))
     
+    target_files = all_nifti_files
+
     if not target_files:
-        print(f"⚠️ Aucun fichier NIfTI trouvé.")
+        print(f"⚠️ Aucun fichier cible trouvé.")
         return
 
-    print(f"🎯 {len(target_files)} fichiers trouvés.")
+    print(f"🎯 {len(target_files)} fichiers cibles trouvés.")
     print(f"🚀 Lancement du pool multiprocessing sur {args.workers} cœurs...\n")
 
     already_canonical = 0
@@ -69,7 +70,7 @@ def main():
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(process_file, path): path for path in target_files}
         
-        with tqdm(total=len(target_files), desc="Standardisation globale (RAS)", unit=" fichier") as pbar:
+        with tqdm(total=len(target_files), desc="Standardisation RAS ciblée", unit=" fichier") as pbar:
             for future in concurrent.futures.as_completed(futures):
                 status, filename, err_msg = future.result()
                 
@@ -92,8 +93,6 @@ def main():
     if errors > 0:
         print(f"➤ Erreurs de lecture/écriture           : {errors}")
     print("="*55)
-    print("💡 Ton dataset est maintenant 100% harmonisé spatialement.")
-    print("   Tu peux définitivement retirer 'tio.ToCanonical()' de ton DataLoader !")
 
 if __name__ == "__main__":
     main()
