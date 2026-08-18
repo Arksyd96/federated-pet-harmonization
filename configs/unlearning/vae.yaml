@@ -25,13 +25,13 @@ vae:
     fft_sigma:            7.5        # sigma du filtre gaussien passe-haut
     in_channels:          16
     out_channels:         16
-    hidden_channels:      [128, 128, 256, 512]
+    hidden_channels:      [64, 128, 256, 512]
     kernel_sizes:         [3, 3, 3, 3]
     strides:              [1, 2, 2, 2]
     latent_channels:      16
-    style_channels:       512
-    style_embedding_dim:  512      # aligné sur style_channels (pas d'upscaling)
-    num_residual_blocks:  2
+    style_channels:       256
+    style_embedding_dim:  256      # aligné sur style_channels (pas d'upscaling)
+    num_residual_blocks:  1
     spatial_dims:         2
     normalization:
     - group
@@ -48,8 +48,8 @@ vae:
 
 pipeline:
     num_domains:           5
-    classifier_hidden_dim: 512
-    warmup_epochs:         5        # stage 1 : apprendre la tâche + classifieurs
+    classifier_hidden_dim: 256
+    warmup_epochs:         10        # stage 1 : apprendre la tâche + classifieurs
 
     beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
     kl_content_weight:     5.0e-7   # régularisation KL sur z_content spatial
@@ -82,7 +82,7 @@ trainer:
     accelerator:         gpu
     devices:             1
     log_every_n_steps:   1
-    min_epochs:          10
+    min_epochs:          20
     max_epochs:          120
     check_val_every_n_epoch: 1
     num_sanity_val_steps: 0

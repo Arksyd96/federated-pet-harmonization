@@ -665,12 +665,12 @@ class DisentangledHarmonizationVAE(nn.Module):
     Parameters
     ----------
     in_channels, out_channels : int
-    hidden_channels, kernel_sizes, strides : List[int]   (identiques pour tous les sous-modules)
-    latent_channels : int     dim de z_content
-    style_channels       : int     dim de z_style (1D)
-    style_embedding_dim   : int     dim de l'embedding de style (= tembedding_channels du décodeur)
-    num_residual_blocks  : int
-    spatial_dims    : int
+    hidden_channels, kernel_sizes, strides : List[int] (identiques pour tous les sous-modules)
+    latent_channels : int dim de z_content
+    style_channels : int dim de z_style (1D)
+    style_embedding_dim : int dim de l'embedding de style (= tembedding_channels du décodeur)
+    num_residual_blocks : int
+    spatial_dims : int
     normalization, activation, dropout, use_residual_block, learnable_interpolation, attention_type
     """
 
