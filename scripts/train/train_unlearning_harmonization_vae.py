@@ -20,7 +20,7 @@ from pet_harmonization.utils import set_seed
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-torch.set_float32_matmul_precision("high")
+torch.set_float32_matmul_precision('high')
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 
@@ -77,6 +77,7 @@ def main(args):
             vae=vae,
             **config.get("pipeline", {}),
         )
+    pipeline.vae = torch.compile(pipeline.vae)
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
     callbacks = [

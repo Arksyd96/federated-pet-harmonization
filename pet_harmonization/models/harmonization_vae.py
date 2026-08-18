@@ -1208,11 +1208,14 @@ class UnlearningVAE(LightningModule):
             self.vae.content_style_encoder.eval()
             for p in self.vae.content_style_encoder.parameters():
                 p.requires_grad = False
+                
+            # with torch.no_grad():
+            #     mu_c_det, lv_c_det, mu_s_det, lv_s_det = self.vae.content_style_encoder(x)
+            #     z_content_det = reparameterize(mu_c_det, lv_c_det)
+            #     z_style_det   = reparameterize(mu_s_det, lv_s_det)
 
-            with torch.no_grad():
-                mu_c_det, lv_c_det, mu_s_det, lv_s_det = self.vae.content_style_encoder(x)
-                z_content_det = reparameterize(mu_c_det, lv_c_det)
-                z_style_det   = reparameterize(mu_s_det, lv_s_det)
+            z_content_det = reparameterize(mu_content.detach(), logvar_content.detach())
+            z_style_det   = reparameterize(mu_style.detach(), logvar_style.detach())
 
             for _ in range(self.k_style_steps):
                 logits_style_det   = self.style_classifier(z_style_det)

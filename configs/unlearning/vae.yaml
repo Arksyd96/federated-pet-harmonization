@@ -17,8 +17,8 @@ datamodule:
     batch_size:         64
     patch_size:         [16, 64, 64]
     num_workers:        16
-    queue_max_length:   9000
-    samples_per_volume: 350
+    queue_max_length:   10000
+    samples_per_volume: 1000
 
 vae:
     input_shape:          [64, 64]   # (H, W) pour FFTHighPassFilter
@@ -78,7 +78,7 @@ model_checkpoint:
     auto_insert_metric_name: false
 
 trainer:
-    precision:           32
+    precision:           bf16-mixed
     accelerator:         gpu
     devices:             1
     log_every_n_steps:   1

@@ -967,7 +967,7 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
         
         self.transform = tio.Compose([
             Float32Lambda(),
-            tio.ToCanonical(),
+            # tio.ToCanonical(),
             tio.RandomFlip(axes=(0, 1, 2), p=0.5),
         ])
 
