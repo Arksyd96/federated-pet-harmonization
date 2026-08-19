@@ -62,6 +62,7 @@ def main(args):
 
     # ── Modèle VAE ────────────────────────────────────────────────────────────
     vae = DisentangledHarmonizationVAE(**config.get("vae", {}))
+    vae = torch.compile(vae)
 
     # ── Pipeline Lightning ────────────────────────────────────────────────────
     if args.resume_checkpoint:
@@ -77,7 +78,7 @@ def main(args):
             vae=vae,
             **config.get("pipeline", {}),
         )
-    pipeline.vae = torch.compile(pipeline.vae)
+        
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
     callbacks = [
@@ -103,7 +104,10 @@ def main(args):
     logger.info(f"  Stage 1 (warmup) : {config['pipeline'].get('warmup_epochs')} époques")
     logger.info(f"  Stage 2 (unlearn): {config['trainer'].get('max_epochs') - config['pipeline'].get('warmup_epochs')} époques")
 
-    trainer.fit(pipeline, datamodule=datamodule)
+    if args.resume_checkpoint:
+        trainer.fit(pipeline, datamodule=datamodule, ckpt_path=args.resume_checkpoint)
+    else:
+        trainer.fit(pipeline, datamodule=datamodule)
 
 
 if __name__ == "__main__":

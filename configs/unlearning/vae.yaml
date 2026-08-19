@@ -49,7 +49,7 @@ vae:
 pipeline:
     num_domains:           5
     classifier_hidden_dim: 256
-    warmup_epochs:         10        # stage 1 : apprendre la tâche + classifieurs
+    warmup_epochs:         0        # stage 1 : apprendre la tâche + classifieurs
 
     beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
     kl_content_weight:     5.0e-7   # régularisation KL sur z_content spatial
@@ -61,7 +61,7 @@ pipeline:
     lr_classifiers_final:  1.0e-6   # LR classifieurs (plus faible : désapprentissage doux)
     lr_unlearn:            1.0e-6   # LR confusion (plus faible : désapprentissage doux)
     lr_unlearn_final:      5.0e-6
-    k_style_steps:         1        # nombre d'itérations de mise à jour du style par étape d'entraînement
+    k_style_steps:         2        # nombre d'itérations de mise à jour du style par étape d'entraînement
 
     weight_decay:          1.0e-6
     suv_global_log_max:    6.0
