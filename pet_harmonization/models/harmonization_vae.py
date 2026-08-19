@@ -81,6 +81,175 @@ def kl_loss_1d(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
 # ContentStyleEncoder
 # =============================================================================
 
+class BifurcatedContentStyleEncoder(nn.Module):
+    def __init__(
+        self,
+        input_shape: Tuple[int, int],
+        fft_sigma: float = 7.5,
+        in_channels: int = 5,
+        hidden_channels: List[int] = [64, 128, 256, 512],
+        kernel_sizes: List[int] = [3, 3, 3, 3],
+        strides: List[int] = [1, 2, 2, 2],
+        latent_channels: int = 8,
+        style_channels: int = 256,
+        num_residual_blocks: int = 1,
+        spatial_dims: int = 2,
+        normalization: Tuple = ('group', {'num_groups': 32, 'affine': True}),
+        activation: Tuple = ('swish', {}),
+        dropout: float = 0.0,
+        use_residual_block: bool = True,
+        learnable_interpolation: bool = True,
+        attention_type: Union[str, List[str]] = 'none',
+    ):
+        super().__init__()
+
+        self.depth = len(hidden_channels)
+        self.num_residual_blocks = num_residual_blocks
+
+        attention_type = (
+            attention_type if isinstance(attention_type, list)
+            else [attention_type] * self.depth
+        )
+        ConvBlock = UnetResBlock if use_residual_block else UnetBasicBlock
+
+        # ── FFT Filter ────────────────────────────────────────────────────────
+        self.fft_filter = LearnableFFTHighPassFilter(
+            input_shape, in_channels=in_channels, sigma=fft_sigma
+        )
+
+        # ── In-Convolution (Tronc commun) ─────────────────────────────────────
+        self.input_conv = BasicBlock(
+            spatial_dims, in_channels * 2, hidden_channels[0],
+            kernel_size=kernel_sizes[0], stride=strides[0],
+        )
+
+        # ── Fonction pour dédoubler l'architecture sans dupliquer le code ─────
+        def _build_branch():
+            encoder_block_list = []
+            for i in range(1, self.depth):
+                for k in range(num_residual_blocks):
+                    seq = [
+                        ConvBlock(
+                            spatial_dims=spatial_dims,
+                            in_channels=hidden_channels[i - 1] if k == 0 else hidden_channels[i],
+                            out_channels=hidden_channels[i],
+                            kernel_size=kernel_sizes[i],
+                            stride=1,
+                            norm_name=normalization,
+                            act_name=activation,
+                            dropout=dropout,
+                            emb_channels=None,        # pas de conditioning
+                        ),
+                        Attention(
+                            spatial_dims=spatial_dims,
+                            in_channels=hidden_channels[i],
+                            out_channels=hidden_channels[i],
+                            num_heads=8,
+                            ch_per_head=hidden_channels[i] // 8,
+                            depth=1,
+                            norm_name=normalization,
+                            dropout=dropout,
+                            emb_dim=None,
+                            attention_type=attention_type[i],
+                        ),
+                    ]
+                    encoder_block_list.append(SequentialEmb(*seq))
+
+                if i < self.depth - 1:
+                    encoder_block_list.append(
+                        BasicDown(
+                            spatial_dims=spatial_dims,
+                            in_channels=hidden_channels[i],
+                            out_channels=hidden_channels[i],
+                            kernel_size=kernel_sizes[i],
+                            stride=strides[i],
+                            learnable_interpolation=learnable_interpolation,
+                        )
+                    )
+
+            middle_block = SequentialEmb(
+                ConvBlock(
+                    spatial_dims=spatial_dims,
+                    in_channels=hidden_channels[-1], out_channels=hidden_channels[-1],
+                    kernel_size=kernel_sizes[-1], stride=1,
+                    norm_name=normalization, act_name=activation,
+                    dropout=dropout, emb_channels=None,
+                ),
+                Attention(
+                    spatial_dims=spatial_dims,
+                    in_channels=hidden_channels[-1], out_channels=hidden_channels[-1],
+                    num_heads=8, ch_per_head=hidden_channels[-1] // 8, depth=1,
+                    norm_name=normalization, dropout=dropout,
+                    emb_dim=None, attention_type=attention_type[-1],
+                ),
+                ConvBlock(
+                    spatial_dims=spatial_dims,
+                    in_channels=hidden_channels[-1], out_channels=hidden_channels[-1],
+                    kernel_size=kernel_sizes[-1], stride=1,
+                    norm_name=normalization, act_name=activation,
+                    dropout=dropout, emb_channels=None,
+                ),
+            )
+            return nn.ModuleList(encoder_block_list), middle_block
+
+        # ── Instanciation des deux branches indépendantes ─────────────────────
+        self.content_encoder_blocks, self.content_middle_block = _build_branch()
+        self.style_encoder_blocks,   self.style_middle_block   = _build_branch()
+
+        # ── Content head : spatial posterior ─────────────────────────────────
+        self.content_head = nn.Sequential(
+            BasicBlock(spatial_dims, hidden_channels[-1], 2 * latent_channels, 3),
+            BasicBlock(spatial_dims, 2 * latent_channels, 2 * latent_channels, 1),
+        )
+        self.content_in = nn.InstanceNorm2d(latent_channels, affine=False)
+
+        # ── Style head ───────────────────────────────────────────────────────
+        self.style_head    = BasicBlock(spatial_dims, hidden_channels[-1], 2 * style_channels, kernel_size=1)
+        self.style_pool    = nn.AdaptiveAvgPool2d(1)
+        self.style_flatten = nn.Flatten()
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns
+        -------
+        mu_content      : (B, latent_channels, H', W')
+        logvar_content  : (B, latent_channels, H', W')
+        mu_style        : (B, style_channels)
+        logvar_style    : (B, style_channels)
+        """
+        # ── Tronc commun ─────────────────────────────────────────────────────
+        fft_x = self.fft_filter(x)
+        h_shared = self.input_conv(torch.cat([x, fft_x], dim=1))  
+        
+        # ── Branche Content ──────────────────────────────────────────────────
+        h_c = h_shared
+        for block in self.content_encoder_blocks:
+            h_c = block(h_c, None)
+        h_c = self.content_middle_block(h_c, None)
+
+        # ── Branche Style ────────────────────────────────────────────────────
+        h_s = h_shared
+        for block in self.style_encoder_blocks:
+            h_s = block(h_s, None)
+        h_s = self.style_middle_block(h_s, None)
+
+        # ── Content head ─────────────────────────────────────────────────────
+        moments_c = self.content_head(h_c)
+        mu_content, logvar_content = moments_c.chunk(2, dim=1)
+        mu_content     = self.content_in(mu_content)      # supprime les stats de style
+        logvar_content = self.content_in(logvar_content)  # cohérence
+
+        # ── Style head ───────────────────────────────────────────────────────
+        s = self.style_head(h_s)       # (B, 2*style_channels, H', W')
+        s = self.style_pool(s)         # (B, 2*style_channels, 1, 1) — agrégation globale
+        s = self.style_flatten(s)      # (B, 2*style_channels)
+        mu_style, logvar_style = s.chunk(2, dim=1)
+
+        return mu_content, logvar_content, mu_style, logvar_style
+
+
 class ContentStyleEncoder(nn.Module):
     def __init__(
         self,
@@ -714,7 +883,8 @@ class DisentangledHarmonizationVAE(nn.Module):
             attention_type=attention_type,
         )
 
-        self.content_style_encoder = ContentStyleEncoder(
+        # self.content_style_encoder = ContentStyleEncoder(
+        self.content_style_encoder = BifurcatedContentStyleEncoder(
             input_shape=input_shape,
             fft_sigma=fft_sigma,
             in_channels=in_channels,

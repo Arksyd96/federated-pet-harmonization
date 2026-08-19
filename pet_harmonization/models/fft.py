@@ -228,7 +228,7 @@ class FFTHighPassFilter(nn.Module):
             return x
         return (x - x_min) / (x_max - x_min)
 
-    @torch.compiler.disable
+    # @torch.compiler.disable
     def forward(self, x: torch.FloatTensor):
         """Apply the Gaussian high-pass filter to the input."""
         fft_image = self.calculate_2dft(x)

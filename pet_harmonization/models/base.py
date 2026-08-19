@@ -733,7 +733,8 @@ class BasicDown(nn.Module):
 #             return y
 #         else:
 #             new_size = self.calc_shape(x.shape[2:])
-#             return F.interpolate(x, size=new_size, mode="nearest-exact")*
+#             return F.interpolate(x, size=new_size, mode="nearest-exact")
+
 
 class BasicUp(nn.Module):
     def __init__(

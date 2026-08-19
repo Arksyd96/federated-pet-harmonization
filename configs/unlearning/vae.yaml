@@ -8,12 +8,12 @@ name: Unlearning Harmonization with StyleVAE+AdaIN Conf with Lacassagne (16 chan
 datamodule:
     root_dir: ./data/PET-EARL/
     split_config: # ['a100', 'chb', 'curie', 'lacassagne', 'nantes', 'rennes']
-    - [50, 15]           
-    - [50, 15]
+    - [60, 15]           
+    - [60, 15]
     - [0, 0]           
-    - [50, 15]
-    - [50, 15]          
-    - [50, 15]
+    - [60, 15]
+    - [60, 15]          
+    - [60, 15]
     batch_size:         64
     patch_size:         [16, 64, 64]
     num_workers:        16

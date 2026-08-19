@@ -865,7 +865,8 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
                     "sampling_map": tio.Image(os.path.join(subj_path, body_file), type=tio.LABEL),
                     "domain_id": torch.tensor(domain_id).long(),
                     "subject_name": subj_name,
-                    "domain_name": domain_name
+                    "domain_name": domain_name,
+                    "subject_path": subj_path
                 }
                 
                 if self.voi_filename:
