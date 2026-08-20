@@ -3,7 +3,7 @@ WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 project_name: federated-pet
 dir_name: runs/unlearning-harmonization-vae # runs/unlearning-harmonization-vae
-name: Unlearning Harmonization with StyleVAE+AdaIN Conf with Lacassagne (16 channels)
+name: Unlearning Harmonization with StyleVAE+AdaIN Conf with Lacassagne (10 channels)
 
 datamodule:
     root_dir: ./data/PET-EARL/
@@ -15,20 +15,20 @@ datamodule:
     - [60, 15]          
     - [60, 15]
     batch_size:         64
-    patch_size:         [16, 64, 64]
-    num_workers:        16
-    queue_max_length:   10000
-    samples_per_volume: 1000
+    patch_size:         [10, 64, 64]
+    num_workers:        24
+    queue_max_length:   8192
+    samples_per_volume: 128
 
 vae:
     input_shape:          [64, 64]   # (H, W) pour FFTHighPassFilter
     fft_sigma:            7.5        # sigma du filtre gaussien passe-haut
-    in_channels:          16
-    out_channels:         16
-    hidden_channels:      [64, 128, 256, 512]
+    in_channels:          10
+    out_channels:         10
+    hidden_channels:      [32, 64, 128, 256]
     kernel_sizes:         [3, 3, 3, 3]
     strides:              [1, 2, 2, 2]
-    latent_channels:      16
+    latent_channels:      10
     style_channels:       256
     style_embedding_dim:  256      # aligné sur style_channels (pas d'upscaling)
     num_residual_blocks:  1
@@ -49,7 +49,7 @@ vae:
 pipeline:
     num_domains:           5
     classifier_hidden_dim: 256
-    warmup_epochs:         0        # stage 1 : apprendre la tâche + classifieurs
+    warmup_epochs:         10       # stage 1 : apprendre la tâche + classifieurs
 
     beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
     kl_content_weight:     5.0e-7   # régularisation KL sur z_content spatial
@@ -86,8 +86,8 @@ trainer:
     max_epochs:          120
     check_val_every_n_epoch: 1
     num_sanity_val_steps: 0
-    limit_train_batches: 400
-    limit_val_batches:   80
+    limit_train_batches: 250
+    limit_val_batches:   50
 
     # Non compatible avec optimisation manuelle (multi-optimiseurs)
     # gradient_clip_val: 1.0

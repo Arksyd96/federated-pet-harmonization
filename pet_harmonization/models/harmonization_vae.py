@@ -883,8 +883,8 @@ class DisentangledHarmonizationVAE(nn.Module):
             attention_type=attention_type,
         )
 
-        # self.content_style_encoder = ContentStyleEncoder(
-        self.content_style_encoder = BifurcatedContentStyleEncoder(
+        self.content_style_encoder = ContentStyleEncoder(
+        # self.content_style_encoder = BifurcatedContentStyleEncoder(
             input_shape=input_shape,
             fft_sigma=fft_sigma,
             in_channels=in_channels,

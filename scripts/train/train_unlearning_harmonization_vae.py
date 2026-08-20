@@ -62,7 +62,6 @@ def main(args):
 
     # ── Modèle VAE ────────────────────────────────────────────────────────────
     vae = DisentangledHarmonizationVAE(**config.get("vae", {}))
-    vae = torch.compile(vae)
 
     # ── Pipeline Lightning ────────────────────────────────────────────────────
     if args.resume_checkpoint:

@@ -80,7 +80,7 @@ def process_subject(
 ):
     subject = tio.utils.get_subjects_from_batch(batch)[0]
     
-    subject_name = subject['subject_name'][0]
+    subject_name = subject['subject_name']
     subj_out_dir = batch['subject_path'][0]
     
     filename = f"{model_type}" if filename is None else filename
@@ -154,17 +154,15 @@ if __name__ == "__main__":
     
     elif args.model_type == 'vae':
         vae = DisentangledHarmonizationVAE(**config.get('vae', {}))
-        # vae = torch.compile(vae, mode='reduce-overhead')
-        model = UnlearningVAE.load_from_checkpoint(args.ckpt_path, vae=vae, strict=False, **config.get('pipeline', {}))
+        model = UnlearningVAE.load_from_checkpoint(args.ckpt_path, vae=vae, strict=True, **config.get('pipeline', {}))
         
     elif args.model_type == 'standard-vae':
         vae = DisentangledHarmonizationVAE(**config.get('vae', {}))
-        # vae = torch.compile(vae, mode='reduce-overhead')
-        model = StandardHarmonizationVAE.load_from_checkpoint(args.ckpt_path, vae=vae, strict=False, **config.get('pipeline', {}))
+        model = StandardHarmonizationVAE.load_from_checkpoint(args.ckpt_path, vae=vae, strict=True, **config.get('pipeline', {}))
     
     elif args.model_type == 'unet-skip':
         unet = SpectralUNetWithIntermediateFeatures(**config.get('unet', {}))
-        model = UnlearningUNetSkip.load_from_checkpoint(args.ckpt_path, model=unet, strict=False, **config.get('pipeline', {}))
+        model = UnlearningUNetSkip.load_from_checkpoint(args.ckpt_path, model=unet, strict=True, **config.get('pipeline', {}))
     
     elif args.model_type == 'unet-iffn':
         unet = UNet(**config.get('unet', {}))

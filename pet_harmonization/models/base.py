@@ -681,61 +681,6 @@ class BasicDown(nn.Module):
         return y
 
 
-# class BasicUp(nn.Module):
-#     def __init__(
-#         self,
-#         spatial_dims,
-#         in_channels,
-#         out_channels,
-#         kernel_size=2,
-#         stride=2,
-#         learnable_interpolation=True,
-#         use_res=False,
-#     ) -> None:
-#         super().__init__()
-#         self.learnable_interpolation = learnable_interpolation
-#         if learnable_interpolation:
-#             self.calc_shape = lambda x: tuple(
-#                 (np.asarray(x) - 1) * np.atleast_1d(stride)
-#                 + np.atleast_1d(kernel_size)
-#                 - 2 * np.atleast_1d(get_padding(kernel_size, stride))
-#             )
-#             Convolution = Conv[Conv.CONV, spatial_dims]
-#             self.up_op = Convolution(
-#                 in_channels,
-#                 out_channels,
-#                 kernel_size=3,
-#                 stride=1,
-#                 padding=1,
-#                 dilation=1,
-#                 groups=1,
-#                 bias=True,
-#             )
-
-#             if use_res:
-#                 self.up_skip = nn.PixelShuffle(
-#                     2
-#                 )  # WARNING: Only supports 2D, out_channels == in_channels/4
-#         else:
-#             self.calc_shape = lambda x: tuple(
-#                 (np.asarray(x) - 1) * np.atleast_1d(stride)
-#                 + np.atleast_1d(kernel_size)
-#                 - 2 * np.atleast_1d(get_padding(kernel_size, stride))
-#             )
-
-#     def forward(self, x, emb=None):
-#         if self.learnable_interpolation:
-#             new_size = self.calc_shape(x.shape[2:])
-#             x_res = F.interpolate(x, size=new_size, mode="nearest-exact")
-#             y = self.up_op(x_res)
-#             if hasattr(self, "up_skip"):
-#                 y = y + self.up_skip(x)
-#             return y
-#         else:
-#             new_size = self.calc_shape(x.shape[2:])
-#             return F.interpolate(x, size=new_size, mode="nearest-exact")
-
-
 class BasicUp(nn.Module):
     def __init__(
         self,
@@ -749,26 +694,12 @@ class BasicUp(nn.Module):
     ) -> None:
         super().__init__()
         self.learnable_interpolation = learnable_interpolation
-        
-        # --- CORRECTION PURE PYTHON (Compatible avec torch.compile) ---
-        pad_val = get_padding(kernel_size, stride)
-        
-        # Helper pour s'assurer qu'on a bien un tuple par dimension
-        def to_tuple(val):
-            return val if isinstance(val, (tuple, list)) else (val,) * spatial_dims
-            
-        s_tup = to_tuple(stride)
-        k_tup = to_tuple(kernel_size)
-        p_tup = to_tuple(pad_val)
-        
-        # Calcul de la shape avec de vrais entiers Python
-        self.calc_shape = lambda x_shape: tuple(
-            int((x_shape[i] - 1) * s_tup[i] + k_tup[i] - 2 * p_tup[i])
-            for i in range(len(x_shape))
-        )
-        # -------------------------------------------------------------
-
         if learnable_interpolation:
+            self.calc_shape = lambda x: tuple(
+                (np.asarray(x) - 1) * np.atleast_1d(stride)
+                + np.atleast_1d(kernel_size)
+                - 2 * np.atleast_1d(get_padding(kernel_size, stride))
+            )
             Convolution = Conv[Conv.CONV, spatial_dims]
             self.up_op = Convolution(
                 in_channels,
@@ -785,6 +716,12 @@ class BasicUp(nn.Module):
                 self.up_skip = nn.PixelShuffle(
                     2
                 )  # WARNING: Only supports 2D, out_channels == in_channels/4
+        else:
+            self.calc_shape = lambda x: tuple(
+                (np.asarray(x) - 1) * np.atleast_1d(stride)
+                + np.atleast_1d(kernel_size)
+                - 2 * np.atleast_1d(get_padding(kernel_size, stride))
+            )
 
     def forward(self, x, emb=None):
         if self.learnable_interpolation:
@@ -797,6 +734,69 @@ class BasicUp(nn.Module):
         else:
             new_size = self.calc_shape(x.shape[2:])
             return F.interpolate(x, size=new_size, mode="nearest-exact")
+
+
+# class BasicUp(nn.Module):
+#     def __init__(
+#         self,
+#         spatial_dims,
+#         in_channels,
+#         out_channels,
+#         kernel_size=2,
+#         stride=2,
+#         learnable_interpolation=True,
+#         use_res=False,
+#     ) -> None:
+#         super().__init__()
+#         self.learnable_interpolation = learnable_interpolation
+        
+#         # --- CORRECTION PURE PYTHON (Compatible avec torch.compile) ---
+#         pad_val = get_padding(kernel_size, stride)
+        
+#         # Helper pour s'assurer qu'on a bien un tuple par dimension
+#         def to_tuple(val):
+#             return val if isinstance(val, (tuple, list)) else (val,) * spatial_dims
+            
+#         s_tup = to_tuple(stride)
+#         k_tup = to_tuple(kernel_size)
+#         p_tup = to_tuple(pad_val)
+        
+#         # Calcul de la shape avec de vrais entiers Python
+#         self.calc_shape = lambda x_shape: tuple(
+#             int((x_shape[i] - 1) * s_tup[i] + k_tup[i] - 2 * p_tup[i])
+#             for i in range(len(x_shape))
+#         )
+#         # -------------------------------------------------------------
+
+#         if learnable_interpolation:
+#             Convolution = Conv[Conv.CONV, spatial_dims]
+#             self.up_op = Convolution(
+#                 in_channels,
+#                 out_channels,
+#                 kernel_size=3,
+#                 stride=1,
+#                 padding=1,
+#                 dilation=1,
+#                 groups=1,
+#                 bias=True,
+#             )
+
+#             if use_res:
+#                 self.up_skip = nn.PixelShuffle(
+#                     2
+#                 )  # WARNING: Only supports 2D, out_channels == in_channels/4
+
+#     def forward(self, x, emb=None):
+#         if self.learnable_interpolation:
+#             new_size = self.calc_shape(x.shape[2:])
+#             x_res = F.interpolate(x, size=new_size, mode="nearest-exact")
+#             y = self.up_op(x_res)
+#             if hasattr(self, "up_skip"):
+#                 y = y + self.up_skip(x)
+#             return y
+#         else:
+#             new_size = self.calc_shape(x.shape[2:])
+#             return F.interpolate(x, size=new_size, mode="nearest-exact")
 
 
 class BasicBlock(nn.Module):
