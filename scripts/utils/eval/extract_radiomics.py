@@ -180,7 +180,7 @@ def process_single_folder(args):
                         'ROI_type': 'Component'
                     })
                     results.append(row)
-                except Exception:
+                except Exception as e:
                     print(f"❌ CRASH PyRadiomics | Patient: {subject_id} | Fichier: {filename} | Erreur: {e}")
                     pass 
                     
@@ -218,7 +218,8 @@ def process_single_folder(args):
                     'ROI_type': f'Sphere_{sphere_radius}mm' if use_sphere else 'Original'
                 })
                 results.append(row)
-            except Exception:
+            except Exception as e:
+                print(f"❌ CRASH PyRadiomics | Patient: {subject_id} | Fichier: {filename} | Erreur: {e}")
                 pass
                 
         gc.collect()
