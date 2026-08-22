@@ -5,6 +5,7 @@ import torchio as tio
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from omegaconf import OmegaConf
+import numpy as np
 
 from pet_harmonization.data import MultiDomainUnlearningDataModule
 from pet_harmonization.models.starganv2 import StarGANv2, StyleEncoder, StarGANv2Discriminator, StarGANv2Generator, StyleEmbedder
@@ -75,6 +76,8 @@ def process_subject(
     curr_idx: int,
     length_loader: int,
     z_style_fixed: torch.Tensor = None,
+    patch_size: tuple = (64, 64, 64),
+    patch_overlap: tuple = (32, 32, 32),
     filename: str = None,
     override: bool = False
 ):
@@ -95,8 +98,7 @@ def process_subject(
         else:
             print(f"⚠️ Override : Le fichier {os.path.basename(pred_path)} sera écrasé.")
 
-    patch_size = (16, 64, 64) 
-    patch_overlap = (8, 16, 16)
+    print(f"Patch size: {patch_size}, Overlap: {patch_overlap}")
     
     grid_sampler = tio.data.GridSampler(subject, patch_size, patch_overlap)
     patch_loader = DataLoader(grid_sampler, batch_size=4, num_workers=0) 
@@ -134,6 +136,7 @@ if __name__ == "__main__":
     parser.add_argument('--model-type', type=str, required=True, choices=['stargan', 'vae', 'unet-skip', 'unet-iffn', 'standard-vae'])
     parser.add_argument('--style-ref', '-s', type=str, required=False, default=None)
     parser.add_argument('--filename', '-f', type=str, required=False, default=None)
+    parser.add_argument('--patch-overlap', '-o', type=int, nargs=3, required=False, default=(32, 32, 32))
     parser.add_argument('--override', action='store_true')
     args = parser.parse_args()
 
@@ -204,6 +207,8 @@ if __name__ == "__main__":
             curr_idx=idx + 1,
             length_loader=len(loader),
             z_style_fixed=z_style_fixed,
+            patch_size=config.get('datamodule', {}).get('patch_size', (5, 64, 64)),
+            patch_overlap=args.patch_overlap,
             filename=args.filename,
             override=args.override
         )

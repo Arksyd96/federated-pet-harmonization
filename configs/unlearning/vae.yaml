@@ -54,12 +54,12 @@ pipeline:
     beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
     kl_content_weight:     5.0e-7   # régularisation KL sur z_content spatial
     kl_style_weight:       5.0e-7   # régularisation KL sur z_style 1D
-    max_epochs:            70
+    max_epochs:            100
 
     lr_vae:                1.0e-4   # LR reconstruction
     lr_classifiers:        1.0e-4   # LR classifieurs
-    lr_classifiers_final:  1.0e-6   # LR classifieurs (plus faible : désapprentissage doux)
-    lr_unlearn:            1.0e-6   # LR confusion (plus faible : désapprentissage doux)
+    lr_classifiers_final:  1.0e-5   # LR classifieurs (plus faible : désapprentissage doux)
+    lr_unlearn:            1.0e-7   # LR confusion (plus faible : désapprentissage doux)
     lr_unlearn_final:      5.0e-6
     k_style_steps:         2        # nombre d'itérations de mise à jour du style par étape d'entraînement
 
