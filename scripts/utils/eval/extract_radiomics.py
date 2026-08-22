@@ -181,6 +181,7 @@ def process_single_folder(args):
                     })
                     results.append(row)
                 except Exception:
+                    print(f"❌ CRASH PyRadiomics | Patient: {subject_id} | Fichier: {filename} | Erreur: {e}")
                     pass 
                     
         del labeled_arr, labeled_sitk
