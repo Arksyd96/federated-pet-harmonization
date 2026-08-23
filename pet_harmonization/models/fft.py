@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Union
 import contextlib
 
 import torch
@@ -243,51 +243,131 @@ class FFTHighPassFilter(nn.Module):
         return fft_images * 2.0 - 1.0  # rescale to [-1, 1]
 
 
+# class LearnableFFTHighPassFilter(nn.Module):
+#     def __init__(
+#         self,
+#         input_shape: Tuple[int, int],
+#         in_channels: int,
+#         learnable: bool = True,
+#         sigma: float = 7.5,
+#         dim: Tuple[int, int] = (2, 3),
+#     ):
+#         super().__init__()
+#         self.dim = dim
+#         H, W = input_shape
+
+#         # Masque gaussien passe-haut centré — cohérent avec fft2 + fftshift
+#         # DC au centre → dist calculée depuis (H/2, W/2)
+#         cy, cx = H / 2.0, W / 2.0
+#         y = torch.arange(H).float() - cy
+#         x = torch.arange(W).float() - cx       # spectre COMPLET (H, W)
+#         yy, xx = torch.meshgrid(y, x, indexing='ij')
+#         dist      = torch.sqrt(yy ** 2 + xx ** 2)
+#         gauss     = torch.exp(-dist ** 2 / (2 * sigma ** 2))
+#         hp_mask   = 1.0 - gauss                 # passe-haut : supprime les basses fréq
+
+#         if learnable:
+#             # (C, H, W) — un filtre réel par canal
+#             # Initialisé avec hp_mask, le réseau peut affiner le filtrage
+#             self.W = nn.Parameter(
+#                 hp_mask.unsqueeze(0).expand(in_channels, -1, -1).clone()
+#             )
+#         else:
+#             self.register_buffer('W', hp_mask)  # (H, W) fixe, pas de gradient
+
+#         self.learnable = learnable
+#         self.interp    = Interp1d()
+
+#     def calculate_2dft(self, x: torch.Tensor) -> torch.Tensor:
+#         ft = torch.fft.ifftshift(x, dim=self.dim)
+#         ft = torch.fft.fft2(ft, dim=self.dim)
+#         return torch.fft.fftshift(ft, dim=self.dim)     # (B, C, H, W) complexe, centré
+
+#     def calculate_2dift(self, x: torch.Tensor) -> torch.Tensor:
+#         ift = torch.fft.ifftshift(x, dim=self.dim)
+#         ift = torch.fft.ifft2(ift, dim=self.dim)
+#         return torch.fft.fftshift(ift, dim=self.dim).real
+
+#     def histogram_equalization(self, x: torch.Tensor) -> torch.Tensor:
+#         hist = torch.histc(x, bins=256, min=0, max=1)
+#         bins = torch.linspace(0, 1, 256, device=x.device)
+#         cdf  = hist.cumsum(0)
+#         cdf_normalized = (cdf - cdf.min()) / (cdf.max() - cdf.min() + 1e-9)
+#         return self.interp(bins, cdf_normalized, x, out=None)
+
+#     def min_max_normalization(self, x: torch.Tensor) -> torch.Tensor:
+#         x_min, x_max = x.min(), x.max()
+#         if x_max == x_min:
+#             return x
+#         return (x - x_min) / (x_max - x_min)
+
+#     # @torch.compiler.disable
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         # x : (B, C, H, W)
+#         fft_x = self.calculate_2dft(x)         # (B, C, H, W) complexe
+
+#         # Broadcast du masque (C, H, W) → (1, C, H, W) — pas de repeat inutile
+#         mask = self.W.unsqueeze(0)              # (1, C, H, W)
+
+#         filtered = torch.abs(self.calculate_2dift(fft_x * mask))   # (B, C, H, W) réel
+
+#         # Normalisation par batch et canal
+#         out = torch.zeros_like(filtered)
+#         for b in range(filtered.shape[0]):
+#             for c in range(filtered.shape[1]):
+#                 img = self.min_max_normalization(filtered[b, c])
+#                 out[b, c] = self.histogram_equalization(img)
+
+#         return out * 2.0 - 1.0     # [0, 1] → [-1, 1]
+    
 class LearnableFFTHighPassFilter(nn.Module):
     def __init__(
         self,
-        input_shape: Tuple[int, int],
+        input_shape: Union[Tuple[int, int], Tuple[int, int, int]], # Supporte (H,W) ou (D,H,W)
         in_channels: int,
         learnable: bool = True,
         sigma: float = 7.5,
-        dim: Tuple[int, int] = (2, 3),
+        spatial_dims: int = 2, # 🎯 Paramètre magique
     ):
         super().__init__()
-        self.dim = dim
-        H, W = input_shape
+        self.spatial_dims = spatial_dims
+        self.dim = tuple(range(-spatial_dims, 0))
 
-        # Masque gaussien passe-haut centré — cohérent avec fft2 + fftshift
-        # DC au centre → dist calculée depuis (H/2, W/2)
-        cy, cx = H / 2.0, W / 2.0
-        y = torch.arange(H).float() - cy
-        x = torch.arange(W).float() - cx       # spectre COMPLET (H, W)
-        yy, xx = torch.meshgrid(y, x, indexing='ij')
-        dist      = torch.sqrt(yy ** 2 + xx ** 2)
-        gauss     = torch.exp(-dist ** 2 / (2 * sigma ** 2))
-        hp_mask   = 1.0 - gauss                 # passe-haut : supprime les basses fréq
+        grids = []
+        for size in input_shape:
+            center = size / 2.0
+            coord = torch.arange(size).float() - center
+            grids.append(coord)
+
+        mesh = torch.meshgrid(*grids, indexing='ij')
+        dist_sq = torch.zeros_like(mesh[0])
+        for m in mesh:
+            dist_sq += m ** 2
+        dist = torch.sqrt(dist_sq)
+
+        gauss = torch.exp(-dist ** 2 / (2 * sigma ** 2))
+        hp_mask = 1.0 - gauss
 
         if learnable:
-            # (C, H, W) — un filtre réel par canal
-            # Initialisé avec hp_mask, le réseau peut affiner le filtrage
-            self.W = nn.Parameter(
-                hp_mask.unsqueeze(0).expand(in_channels, -1, -1).clone()
-            )
+            # (C, *input_shape)
+            self.W = nn.Parameter(hp_mask.unsqueeze(0).expand(in_channels, *([-1] * spatial_dims)).clone())
         else:
-            self.register_buffer('W', hp_mask)  # (H, W) fixe, pas de gradient
+            self.register_buffer('W', hp_mask)
 
         self.learnable = learnable
         self.interp    = Interp1d()
-
-    def calculate_2dft(self, x: torch.Tensor) -> torch.Tensor:
+    
+    def calculate_ndft(self, x: torch.Tensor) -> torch.Tensor:
+        # fftn fait la transformée sur toutes les dimensions indiquées par self.dim
         ft = torch.fft.ifftshift(x, dim=self.dim)
-        ft = torch.fft.fft2(ft, dim=self.dim)
-        return torch.fft.fftshift(ft, dim=self.dim)     # (B, C, H, W) complexe, centré
-
-    def calculate_2dift(self, x: torch.Tensor) -> torch.Tensor:
+        ft = torch.fft.fftn(ft, dim=self.dim)
+        return torch.fft.fftshift(ft, dim=self.dim)
+    
+    def calculate_ndift(self, x: torch.Tensor) -> torch.Tensor:
         ift = torch.fft.ifftshift(x, dim=self.dim)
-        ift = torch.fft.ifft2(ift, dim=self.dim)
+        ift = torch.fft.ifftn(ift, dim=self.dim)
         return torch.fft.fftshift(ift, dim=self.dim).real
-
+    
     def histogram_equalization(self, x: torch.Tensor) -> torch.Tensor:
         hist = torch.histc(x, bins=256, min=0, max=1)
         bins = torch.linspace(0, 1, 256, device=x.device)
@@ -301,23 +381,17 @@ class LearnableFFTHighPassFilter(nn.Module):
             return x
         return (x - x_min) / (x_max - x_min)
 
-    # @torch.compiler.disable
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x : (B, C, H, W)
-        fft_x = self.calculate_2dft(x)         # (B, C, H, W) complexe
+        fft_x = self.calculate_ndft(x)         
 
-        # Broadcast du masque (C, H, W) → (1, C, H, W) — pas de repeat inutile
-        mask = self.W.unsqueeze(0)              # (1, C, H, W)
+        mask = self.W.unsqueeze(0) # (1, C, D, H, W) ou (1, C, H, W)
 
-        filtered = torch.abs(self.calculate_2dift(fft_x * mask))   # (B, C, H, W) réel
+        filtered = torch.abs(self.calculate_ndift(fft_x * mask))
 
-        # Normalisation par batch et canal
         out = torch.zeros_like(filtered)
         for b in range(filtered.shape[0]):
             for c in range(filtered.shape[1]):
                 img = self.min_max_normalization(filtered[b, c])
                 out[b, c] = self.histogram_equalization(img)
 
-        return out * 2.0 - 1.0     # [0, 1] → [-1, 1]
-    
-    
+        return out * 2.0 - 1.0

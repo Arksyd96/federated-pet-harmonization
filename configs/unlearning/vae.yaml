@@ -3,7 +3,7 @@ WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 project_name: federated-pet
 dir_name: runs/unlearning-harmonization-vae # runs/unlearning-harmonization-vae
-name: Unlearning Harmonization with StyleVAE+AdaIN Conf with Lacassagne (10 channels)
+name: Unlearning Harmonization with StyleVAE+AdaIN Conf 5cls 3D (64^3)
 
 datamodule:
     root_dir: ./data/PET-EARL/
@@ -14,25 +14,25 @@ datamodule:
     - [60, 15]
     - [60, 15]          
     - [60, 15]
-    batch_size:         64
-    patch_size:         [10, 64, 64]
+    batch_size:         16
+    patch_size:         [64, 64, 64]
     num_workers:        24
     queue_max_length:   8192
     samples_per_volume: 128
 
 vae:
-    input_shape:          [64, 64]   # (H, W) pour FFTHighPassFilter
-    fft_sigma:            7.5        # sigma du filtre gaussien passe-haut
-    in_channels:          10
-    out_channels:         10
+    input_shape:          [64, 64, 64]   # (H, W, D) pour FFTHighPassFilter
+    fft_sigma:            7.5            # sigma du filtre gaussien passe-haut
+    in_channels:          1
+    out_channels:         1
     hidden_channels:      [32, 64, 128, 256]
     kernel_sizes:         [3, 3, 3, 3]
     strides:              [1, 2, 2, 2]
-    latent_channels:      10
+    latent_channels:      1
     style_channels:       256
     style_embedding_dim:  256      # aligné sur style_channels (pas d'upscaling)
     num_residual_blocks:  1
-    spatial_dims:         2
+    spatial_dims:         3
     normalization:
     - group
     - {num_groups: 32, affine: true}

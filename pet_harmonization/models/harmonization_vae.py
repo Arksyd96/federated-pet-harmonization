@@ -114,7 +114,7 @@ class BifurcatedContentStyleEncoder(nn.Module):
 
         # ── FFT Filter ────────────────────────────────────────────────────────
         self.fft_filter = LearnableFFTHighPassFilter(
-            input_shape, in_channels=in_channels, sigma=fft_sigma
+            input_shape, in_channels=in_channels, sigma=fft_sigma, spatial_dims=spatial_dims
         )
 
         # ── In-Convolution (Tronc commun) ─────────────────────────────────────
@@ -201,11 +201,14 @@ class BifurcatedContentStyleEncoder(nn.Module):
             BasicBlock(spatial_dims, hidden_channels[-1], 2 * latent_channels, 3),
             BasicBlock(spatial_dims, 2 * latent_channels, 2 * latent_channels, 1),
         )
-        self.content_in = nn.InstanceNorm2d(latent_channels, affine=False)
+
+        InstanceNorm = getattr(nn, f"InstanceNorm{spatial_dims}d")
+        self.content_in = InstanceNorm(latent_channels, affine=False)
 
         # ── Style head ───────────────────────────────────────────────────────
+        AdaptiveAvgPool = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")
         self.style_head    = BasicBlock(spatial_dims, hidden_channels[-1], 2 * style_channels, kernel_size=1)
-        self.style_pool    = nn.AdaptiveAvgPool2d(1)
+        self.style_pool    = AdaptiveAvgPool(1)
         self.style_flatten = nn.Flatten()
 
     def forward(
@@ -367,10 +370,13 @@ class ContentStyleEncoder(nn.Module):
             BasicBlock(spatial_dims, hidden_channels[-1], 2 * latent_channels, 3),
             BasicBlock(spatial_dims, 2 * latent_channels, 2 * latent_channels, 1),
         )
-        self.content_in = nn.InstanceNorm2d(latent_channels, affine=False)
 
+        InstanceNorm = getattr(nn, f"InstanceNorm{spatial_dims}d")
+        self.content_in = InstanceNorm(latent_channels, affine=False)
+
+        AdaptiveAvgPool = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")
         self.style_head    = BasicBlock(spatial_dims, hidden_channels[-1], 2 * style_channels, kernel_size=1,)
-        self.style_pool    = nn.AdaptiveAvgPool2d(1)
+        self.style_pool    = AdaptiveAvgPool(1)
         self.style_flatten = nn.Flatten()
 
     def forward(
@@ -565,6 +571,65 @@ class StyleEmbedder(nn.Module):
 # StyleConditionedDecoder
 # =============================================================================
 
+# class AdaINResBlock(nn.Module):
+
+#     def __init__(
+#         self,
+#         in_channels:  int,
+#         out_channels: int,
+#         style_dim:    int,
+#         dropout:      float = 0.0,
+#     ):
+#         super().__init__()
+ 
+#         self.conv1 = nn.Conv2d(in_channels,  out_channels, kernel_size=3, padding=1)
+#         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+#         self.norm1 = nn.InstanceNorm2d(out_channels, affine=False)
+#         self.norm2 = nn.InstanceNorm2d(out_channels, affine=False)
+#         self.act   = nn.SiLU()
+#         self.drop  = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
+ 
+#         # Projections style → (gamma, beta) pour chaque normalisation
+#         # gamma centré sur 0 (on ajoute 1 dans _adain) → neutre au départ
+#         self.adain1 = nn.Linear(style_dim, out_channels * 2)
+#         self.adain2 = nn.Linear(style_dim, out_channels * 2)
+ 
+#         # Init : gamma=0, beta=0 → identité au départ
+#         nn.init.zeros_(self.adain1.weight)
+#         nn.init.zeros_(self.adain1.bias)
+#         nn.init.zeros_(self.adain2.weight)
+#         nn.init.zeros_(self.adain2.bias)
+ 
+#         # Skip connection si changement de canaux
+#         self.skip = (
+#             nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+#             if in_channels != out_channels else nn.Identity()
+#         )
+ 
+#     def _adain(
+#         self,
+#         x:         torch.Tensor,   # (B, C, H, W) déjà normalisé par InstanceNorm
+#         style_emb: torch.Tensor,   # (B, style_dim)
+#         proj:      nn.Linear,
+#     ) -> torch.Tensor:
+#         params        = proj(style_emb)                             # (B, 2*C)
+#         gamma, beta   = params.chunk(2, dim=1)                      # (B, C) chacun
+#         gamma         = gamma.unsqueeze(-1).unsqueeze(-1)           # (B, C, 1, 1)
+#         beta          = beta.unsqueeze(-1).unsqueeze(-1)
+#         return (1.0 + gamma) * x + beta                             # modulation affine
+ 
+#     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
+#         h = self.conv1(x)
+#         h = self._adain(self.norm1(h), emb, self.adain1)
+#         h = self.act(h)
+#         h = self.drop(h)
+ 
+#         h = self.conv2(h)
+#         h = self._adain(self.norm2(h), emb, self.adain2)
+#         h = self.act(h)
+ 
+#         return h + self.skip(x)
+    
 class AdaINResBlock(nn.Module):
     """
     ResBlock avec Adaptive Instance Normalization.
@@ -581,6 +646,7 @@ class AdaINResBlock(nn.Module):
     out_channels : int
     style_dim    : int  — dimension de style_emb (= style_embedding_dim)
     dropout      : float
+    spatial_dims : int  — 2 ou 3 (par défaut 2)
     """
  
     def __init__(
@@ -589,56 +655,67 @@ class AdaINResBlock(nn.Module):
         out_channels: int,
         style_dim:    int,
         dropout:      float = 0.0,
+        spatial_dims: int = 2,  # 🎯 Le paramètre magique (par défaut 2D)
     ):
         super().__init__()
- 
-        self.conv1 = nn.Conv2d(in_channels,  out_channels, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.norm1 = nn.InstanceNorm2d(out_channels, affine=False)
-        self.norm2 = nn.InstanceNorm2d(out_channels, affine=False)
+        self.spatial_dims = spatial_dims
+        
+        # 💡 Instanciation dynamique selon la dimension spatiale
+        Conv = getattr(nn, f"Conv{spatial_dims}d")
+        InstanceNorm = getattr(nn, f"InstanceNorm{spatial_dims}d")
+        Dropout = getattr(nn, f"Dropout{spatial_dims}d") if dropout > 0 else nn.Identity
+
+        self.conv1 = Conv(in_channels,  out_channels, kernel_size=3, padding=1)
+        self.conv2 = Conv(out_channels, out_channels, kernel_size=3, padding=1)
+        
+        self.norm1 = InstanceNorm(out_channels, affine=False)
+        self.norm2 = InstanceNorm(out_channels, affine=False)
+        
         self.act   = nn.SiLU()
-        self.drop  = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
- 
-        # Projections style → (gamma, beta) pour chaque normalisation
-        # gamma centré sur 0 (on ajoute 1 dans _adain) → neutre au départ
+        self.drop  = Dropout(dropout) if dropout > 0 else nn.Identity()
+
+        # Projections style → (gamma, beta)
         self.adain1 = nn.Linear(style_dim, out_channels * 2)
         self.adain2 = nn.Linear(style_dim, out_channels * 2)
- 
-        # Init : gamma=0, beta=0 → identité au départ
+
         nn.init.zeros_(self.adain1.weight)
         nn.init.zeros_(self.adain1.bias)
         nn.init.zeros_(self.adain2.weight)
         nn.init.zeros_(self.adain2.bias)
- 
-        # Skip connection si changement de canaux
+
         self.skip = (
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+            Conv(in_channels, out_channels, kernel_size=1, bias=False)
             if in_channels != out_channels else nn.Identity()
         )
- 
+
     def _adain(
         self,
-        x:         torch.Tensor,   # (B, C, H, W) déjà normalisé par InstanceNorm
-        style_emb: torch.Tensor,   # (B, style_dim)
+        x:         torch.Tensor,   # Déjà normalisé par InstanceNorm
+        style_emb: torch.Tensor,   
         proj:      nn.Linear,
     ) -> torch.Tensor:
-        params        = proj(style_emb)                             # (B, 2*C)
-        gamma, beta   = params.chunk(2, dim=1)                      # (B, C) chacun
-        gamma         = gamma.unsqueeze(-1).unsqueeze(-1)           # (B, C, 1, 1)
-        beta          = beta.unsqueeze(-1).unsqueeze(-1)
-        return (1.0 + gamma) * x + beta                             # modulation affine
- 
+        params        = proj(style_emb)
+        gamma, beta   = params.chunk(2, dim=1)
+        
+        # 🎯 Broadcast adaptatif (ajoute 2 dimensions en 2D, 3 en 3D)
+        for _ in range(self.spatial_dims):
+            gamma = gamma.unsqueeze(-1)
+            beta  = beta.unsqueeze(-1)
+            
+        return (1.0 + gamma) * x + beta
+
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         h = self.conv1(x)
         h = self._adain(self.norm1(h), emb, self.adain1)
         h = self.act(h)
         h = self.drop(h)
- 
+
         h = self.conv2(h)
         h = self._adain(self.norm2(h), emb, self.adain2)
         h = self.act(h)
- 
+
         return h + self.skip(x)
+
 
 class StyleConditionedDecoder(nn.Module):
     """
@@ -690,6 +767,7 @@ class StyleConditionedDecoder(nn.Module):
             out_channels=hidden_channels[-1],
             style_dim=style_embedding_dim,
             dropout=dropout,
+            spatial_dims=spatial_dims
         )
         
         # ConvBlock = UnetResBlock if use_residual_block else UnetBasicBlock
@@ -717,6 +795,7 @@ class StyleConditionedDecoder(nn.Module):
                     out_channels=out_ch_k,
                     style_dim=style_embedding_dim,
                     dropout=dropout,
+                    spatial_dims=spatial_dims
                 ))
  
                 # Attention (inchangée)
@@ -1043,9 +1122,10 @@ class StyleDomainClassifier(nn.Module):
 
 
 class ContentDomainClassifier(nn.Module):
-    def __init__(self, latent_channels: int, num_domains: int, hidden_dim: int = 256):
+    def __init__(self, latent_channels: int, num_domains: int, hidden_dim: int = 256, spatial_dims: int = 2):
         super().__init__()
-        self.pool = nn.AdaptiveMaxPool2d(1)
+        AdaptiveMaxPool = getattr(nn, f"AdaptiveMaxPool{spatial_dims}d")
+        self.pool = AdaptiveMaxPool(1)
         self.net = nn.Sequential(
             nn.Flatten(),
             nn.Linear(latent_channels, hidden_dim),
@@ -1095,6 +1175,7 @@ class UnlearningVAE(LightningModule):
     def __init__(
         self,
         vae: DisentangledHarmonizationVAE,
+        spatial_dims: int = 2,
         num_domains: int = 3,
         classifier_hidden_dim: int = 256,
         warmup_epochs: int = 10,
@@ -1134,12 +1215,13 @@ class UnlearningVAE(LightningModule):
         self.style_classifier = StyleDomainClassifier(
             style_channels=style_channels,
             num_domains=num_domains,
-            hidden_dim=classifier_hidden_dim,
+            hidden_dim=classifier_hidden_dim
         )
         self.content_classifier = ContentDomainClassifier(
             latent_channels=latent_channels,
             num_domains=num_domains,
             hidden_dim=classifier_hidden_dim,
+            spatial_dims=spatial_dims
         )
 
         # ── Métriques ────────────────────────────────────────────────────────
