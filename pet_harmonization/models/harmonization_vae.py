@@ -1519,8 +1519,8 @@ class UnlearningVAE(LightningModule):
         suv_source    = batch["source"][tio.DATA].float()
         domain_labels = batch["domain_id"]
 
-        if suv_source.ndim == 5:
-            suv_source = suv_source.squeeze(1)
+        # if suv_source.ndim == 5:
+        #     suv_source = suv_source.squeeze(1)
 
         x  = self._normalize(suv_source)
         bs = x.shape[0]
