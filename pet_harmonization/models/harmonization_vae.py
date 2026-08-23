@@ -1175,7 +1175,6 @@ class UnlearningVAE(LightningModule):
     def __init__(
         self,
         vae: DisentangledHarmonizationVAE,
-        spatial_dims: int = 2,
         num_domains: int = 3,
         classifier_hidden_dim: int = 256,
         warmup_epochs: int = 10,
@@ -1207,6 +1206,7 @@ class UnlearningVAE(LightningModule):
         self.k_style_steps      = k_style_steps
         self.weight_decay       = weight_decay
         self.suv_global_log_max = suv_global_log_max
+        self.spatial_dims        = vae.shared_kwargs.get("spatial_dims", 2)
 
         # ── Classifieurs de domaine ───────────────────────────────────────────
         style_channels  = vae.content_style_encoder.style_head.conv.out_channels // 2
@@ -1221,7 +1221,7 @@ class UnlearningVAE(LightningModule):
             latent_channels=latent_channels,
             num_domains=num_domains,
             hidden_dim=classifier_hidden_dim,
-            spatial_dims=spatial_dims
+            spatial_dims=self.spatial_dims
         )
 
         # ── Métriques ────────────────────────────────────────────────────────
