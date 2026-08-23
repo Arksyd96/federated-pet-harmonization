@@ -1376,9 +1376,6 @@ class UnlearningVAE(LightningModule):
         suv_source    = batch["source"][tio.DATA].float()
         domain_labels = batch["domain_id"]          # LongTensor [B] ∈ {0, …, num_domains-1}
 
-        if suv_source.ndim == 5:
-            suv_source = suv_source.squeeze(1)      # (B,1,D,H,W) → (B,D,H,W)
-
         x  = self._normalize(suv_source)
         bs = x.shape[0]
         is_stage_1 = self.current_epoch < self.warmup_epochs
