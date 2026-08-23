@@ -1516,9 +1516,6 @@ class UnlearningVAE(LightningModule):
         suv_source    = batch["source"][tio.DATA].float()
         domain_labels = batch["domain_id"]
 
-        # if suv_source.ndim == 5:
-        #     suv_source = suv_source.squeeze(1)
-
         x  = self._normalize(suv_source)
         bs = x.shape[0]
 
@@ -1588,18 +1585,29 @@ class UnlearningVAE(LightningModule):
         x_hat_norm: torch.Tensor,
         suv_source: torch.Tensor,
     ):
-        """Log WandB : slice centrale de source vs reconstruction (espace SUV)."""
+        """Log WandB : slice centrale de source vs reconstruction (espace SUV) adaptatif (2D/3D)."""
         if self.trainer.global_rank != 0:
             return
 
         suv_pred = self._denormalize(x_hat_norm)
 
-        # Slice centrale sur la dimension channel (channel-wise 2D)
-        mid        = suv_source.shape[1] // 2
-        src_slice  = suv_source[:, mid:mid+1, :, :]
-        pred_slice = suv_pred[:, mid:mid+1, :, :]
+        # Détection dynamique 2D vs 3D
+        if suv_source.ndim == 5:
+            # Cas 3D : (B, C, D, H, W) -> Coupe centrale sur la profondeur D (index 2)
+            mid = suv_source.shape[2] // 2
+            src_slice  = suv_source[:, :, mid, :, :]     # -> (B, C, H, W)
+            pred_slice = suv_pred[:, :, mid, :, :]
+        elif suv_source.ndim == 4:
+            # Cas 2D : (B, C, H, W) -> Coupe centrale sur le canal C (index 1, ancien comportement)
+            mid = suv_source.shape[1] // 2
+            src_slice  = suv_source[:, mid:mid+1, :, :]  # -> (B, 1, H, W)
+            pred_slice = suv_pred[:, mid:mid+1, :, :]
+        else:
+            raise ValueError(f"Shape inattendue pour _log_images : {suv_source.shape}")
 
         display_max = max(5.0, src_slice.max().item(), pred_slice.max().item())
+        
+        # Concaténation sur la largeur W (index 3 pour un tenseur B, C, H, W)
         imgs = torch.cat([src_slice, pred_slice], dim=3)
         imgs = (imgs / display_max).clamp(0, 1)
 
@@ -1607,7 +1615,7 @@ class UnlearningVAE(LightningModule):
         wandb.log({
             "Validation/Reconstruction": wandb.Image(
                 grid.permute(1, 2, 0).cpu().numpy(),
-                caption=f"Gauche : PET source | Droite : PET harmonisée (epoch {self.current_epoch})"
+                caption=f"Gauche : PET source | Droite : Harmonisée (epoch {self.current_epoch})"
             )
         })
         

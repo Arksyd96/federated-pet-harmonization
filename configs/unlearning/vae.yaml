@@ -16,9 +16,11 @@ datamodule:
     - [60, 15]
     batch_size:         16
     patch_size:         [64, 64, 64]
-    num_workers:        24
-    queue_max_length:   8192
-    samples_per_volume: 128
+    num_workers:        16
+    # queue_max_length:   8192 # For 2D
+    # samples_per_volume: 128
+    queue_max_length:   1024
+    samples_per_volume: 16
 
 vae:
     input_shape:          [64, 64, 64]   # (H, W, D) pour FFTHighPassFilter
