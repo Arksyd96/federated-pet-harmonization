@@ -369,11 +369,15 @@ class LearnableFFTHighPassFilter(nn.Module):
         return torch.fft.fftshift(ift, dim=self.dim).real
     
     def histogram_equalization(self, x: torch.Tensor) -> torch.Tensor:
+        original_shape = x.shape
         hist = torch.histc(x, bins=256, min=0, max=1)
         bins = torch.linspace(0, 1, 256, device=x.device)
         cdf  = hist.cumsum(0)
         cdf_normalized = (cdf - cdf.min()) / (cdf.max() - cdf.min() + 1e-9)
-        return self.interp(bins, cdf_normalized, x, out=None)
+
+        x_flat = x.view(-1)
+        equalized_flat = self.interp(bins, cdf_normalized, x_flat, out=None)
+        return equalized_flat.view(original_shape)
 
     def min_max_normalization(self, x: torch.Tensor) -> torch.Tensor:
         x_min, x_max = x.min(), x.max()
@@ -383,9 +387,7 @@ class LearnableFFTHighPassFilter(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         fft_x = self.calculate_ndft(x)         
-
         mask = self.W.unsqueeze(0) # (1, C, D, H, W) ou (1, C, H, W)
-
         filtered = torch.abs(self.calculate_ndift(fft_x * mask))
 
         out = torch.zeros_like(filtered)
