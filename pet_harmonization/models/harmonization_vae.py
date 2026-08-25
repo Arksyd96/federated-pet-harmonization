@@ -1104,10 +1104,10 @@ Mécanisme de désapprentissage (Dinsdale) :
 # =============================================================================
 
 class DomainClassifier(nn.Module):
-    def __init__(self, style_channels: int, num_domains: int, hidden_dim: int = 256):
+    def __init__(self, channels: int, num_domains: int, hidden_dim: int = 256):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(style_channels, hidden_dim),
+            nn.Linear(channels, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
@@ -1192,12 +1192,12 @@ class UnlearningVAE(LightningModule):
         latent_channels = vae.content_style_encoder.content_head[0].conv.out_channels // 2
 
         self.style_classifier = DomainClassifier(
-            style_channels=style_channels,
+            channels=style_channels,
             num_domains=num_domains,
             hidden_dim=classifier_hidden_dim
         )
         self.content_classifier = DomainClassifier(
-            latent_channels=latent_channels,
+            channels=latent_channels,
             num_domains=num_domains,
             hidden_dim=classifier_hidden_dim
         )
