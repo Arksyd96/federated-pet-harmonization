@@ -2,7 +2,7 @@ SEED: 101
 WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 project_name: federated-pet
-dir_name: runs/unlearning-harmonization-vae # runs/unlearning-harmonization-vae
+dir_name: runs/unlearning-harmonization-vae-3d # runs/unlearning-harmonization-vae-3d
 name: Unlearning Harmonization with StyleVAE+AdaIN Conf 5cls 3D (64^3)
 
 datamodule:
@@ -16,11 +16,11 @@ datamodule:
     - [60, 15]
     batch_size:         16
     patch_size:         [64, 64, 64]
-    num_workers:        16
+    num_workers:        24
     # queue_max_length:   8192 # For 2D
     # samples_per_volume: 128
-    queue_max_length:   1024
-    samples_per_volume: 16
+    queue_max_length:   4096
+    samples_per_volume: 32
 
 vae:
     input_shape:          [64, 64, 64]   # (H, W, D) pour FFTHighPassFilter
@@ -51,7 +51,7 @@ vae:
 pipeline:
     num_domains:           5
     classifier_hidden_dim: 256
-    warmup_epochs:         10       # stage 1 : apprendre la tâche + classifieurs
+    warmup_epochs:         25       # stage 1 : apprendre la tâche + classifieurs
 
     beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
     kl_content_weight:     5.0e-7   # régularisation KL sur z_content spatial
@@ -59,8 +59,8 @@ pipeline:
     max_epochs:            100
 
     lr_vae:                1.0e-4   # LR reconstruction
-    lr_classifiers:        1.0e-4   # LR classifieurs
-    lr_classifiers_final:  1.0e-5   # LR classifieurs (plus faible : désapprentissage doux)
+    lr_classifiers:        1.0e-5   # LR classifieurs
+    lr_classifiers_final:  1.0e-6   # LR classifieurs (plus faible : désapprentissage doux)
     lr_unlearn:            1.0e-7   # LR confusion (plus faible : désapprentissage doux)
     lr_unlearn_final:      5.0e-6
     k_style_steps:         2        # nombre d'itérations de mise à jour du style par étape d'entraînement

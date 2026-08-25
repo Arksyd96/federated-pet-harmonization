@@ -5,6 +5,7 @@ resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
 import argparse
 import logging
 import os
+import json
 from datetime import datetime
 
 import torch
@@ -62,6 +63,25 @@ def main(args):
 
     # ── Modèle VAE ────────────────────────────────────────────────────────────
     vae = DisentangledHarmonizationVAE(**config.get("vae", {}))
+    
+    # ── Création du Manifeste JSON ────────────────────────────────────────────
+    # Forcer le setup() pour populer les listes de sujets et générer le manifest
+    datamodule.setup()
+    
+    if not config.get('DEBUG'):
+        manifest_data = {
+            "execution_metadata": {
+                "date": current_time,
+                "seed": config.get('SEED', 42)
+            },
+            # 💡 Utilisation de 'subject_name' spécifique au MultiDomainUnlearningDataModule
+            "training_cohort": [subj['subject_name'] for subj in datamodule.train_subjects],
+            "validation_cohort": [subj['subject_name'] for subj in datamodule.val_subjects]
+        }
+        manifest_path = os.path.join(save_dir, "manifest.json")
+        with open(manifest_path, "w") as f:
+            json.dump(manifest_data, f, indent=4)
+        logger.info(f"Manifeste généré et sauvegardé dans {manifest_path}")
 
     # ── Pipeline Lightning ────────────────────────────────────────────────────
     if args.resume_checkpoint:
@@ -104,7 +124,7 @@ def main(args):
     logger.info(f"  Stage 2 (unlearn): {config['trainer'].get('max_epochs') - config['pipeline'].get('warmup_epochs')} époques")
 
     if args.resume_checkpoint:
-        trainer.fit(pipeline, datamodule=datamodule, ckpt_path=args.resume_checkpoint)
+        trainer.fit(pipeline, datamodule=datamodule)#, ckpt_path=args.resume_checkpoint)
     else:
         trainer.fit(pipeline, datamodule=datamodule)
 

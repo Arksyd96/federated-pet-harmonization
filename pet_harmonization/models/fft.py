@@ -327,7 +327,7 @@ class LearnableFFTHighPassFilter(nn.Module):
         in_channels: int,
         learnable: bool = True,
         sigma: float = 7.5,
-        spatial_dims: int = 2, # 🎯 Paramètre magique
+        spatial_dims: int = 2
     ):
         super().__init__()
         self.spatial_dims = spatial_dims
