@@ -19,6 +19,7 @@ datamodule:
 
 
 unet:
+    input_shape: [64, 64]
     in_ch: 5
     out_ch: 5
     spatial_dims: 2

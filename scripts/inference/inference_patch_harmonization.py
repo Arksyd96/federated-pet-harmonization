@@ -75,6 +75,7 @@ def process_subject(
     device: torch.device,
     curr_idx: int,
     length_loader: int,
+    spatial_dims: int = 2,
     z_style_fixed: torch.Tensor = None,
     patch_size: tuple = (64, 64, 64),
     patch_overlap: tuple = (32, 32, 32),
@@ -109,8 +110,13 @@ def process_subject(
         for patch_batch in tqdm(patch_loader, desc=f"Inférence ({model_type})"):
             locations = patch_batch[tio.LOCATION]
             
+            # shape issue de TorchIO : (B, 1, D, H, W)
             patch_tio = patch_batch['source'][tio.DATA].to(device)
-            patch_src = patch_tio.squeeze(1)
+            
+            if spatial_dims == 2:
+                patch_src = patch_tio.squeeze(1) # devient (B, D, H, W)
+            else:
+                patch_src = patch_tio            # reste (B, 1, D, H, W)
 
             if patch_src.mean() < 1e-3: 
                 patch_pred_tio = torch.zeros_like(patch_tio)
@@ -118,7 +124,11 @@ def process_subject(
                 continue
             
             patch_pred = infer_patch(model_type, model, patch_src, z_style_fixed)
-            patch_pred_tio = patch_pred.unsqueeze(1)
+            
+            if spatial_dims == 2:
+                patch_pred_tio = patch_pred.unsqueeze(1) # revient à (B, 1, D, H, W)
+            else:
+                patch_pred_tio = patch_pred              # reste (B, 1, D, H, W)
             
             aggregator.add_batch(patch_pred_tio, locations)
 
@@ -136,6 +146,7 @@ if __name__ == "__main__":
     parser.add_argument('--model-type', type=str, required=True, choices=['stargan', 'vae', 'unet-skip', 'unet-iffn', 'standard-vae'])
     parser.add_argument('--style-ref', '-s', type=str, required=False, default=None)
     parser.add_argument('--filename', '-f', type=str, required=False, default=None)
+    parser.add_argument('--spatial-dims', type=int, required=False, default=2, choices=[2, 3])
     parser.add_argument('--patch-overlap', '-o', type=int, nargs=3, required=False, default=(32, 32, 32))
     parser.add_argument('--override', action='store_true')
     args = parser.parse_args()
@@ -147,6 +158,7 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"🚀 Initialisation de l'inférence | Modèle : {args.model_type.upper()} | Device : {device}")
 
+    # ── Chargement du modèle selon le type ─────────────────────────────────────
     if args.model_type == 'stargan':
         pipeline_cfg = config.get("pipeline", {})
         style_encoder = StyleEncoder(**config.get("style_encoder", {}))
@@ -206,6 +218,7 @@ if __name__ == "__main__":
             device=device,
             curr_idx=idx + 1,
             length_loader=len(loader),
+            spatial_dims=args.spatial_dims,
             z_style_fixed=z_style_fixed,
             patch_size=config.get('datamodule', {}).get('patch_size', (5, 64, 64)),
             patch_overlap=args.patch_overlap,
