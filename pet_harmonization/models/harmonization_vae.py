@@ -1,3 +1,4 @@
+import os
 from typing import Dict, List, Optional, Tuple, Union
 import math
 import contextlib
@@ -1353,6 +1354,9 @@ class UnlearningVAE(LightningModule):
         suv_source    = batch["source"][tio.DATA].float()
         domain_labels = batch["domain_id"]          # LongTensor [B] ∈ {0, …, num_domains-1}
 
+        if self.spatial_dims == 2:
+            suv_source = suv_source.squeeze(1)
+
         x  = self._normalize(suv_source)
         bs = x.shape[0]
         is_stage_1 = self.current_epoch < self.warmup_epochs
@@ -1503,8 +1507,13 @@ class UnlearningVAE(LightningModule):
         suv_source    = batch["source"][tio.DATA].float()
         domain_labels = batch["domain_id"]
 
+        if self.spatial_dims == 2:
+            suv_source = suv_source.squeeze(1)
+
         x  = self._normalize(suv_source)
         bs = x.shape[0]
+
+
 
         # ── Forward VAE ───────────────────────────────────────────────────────
         x_hat, mu_content, logvar_content, mu_style, logvar_style = self.vae.forward(
@@ -1568,6 +1577,29 @@ class UnlearningVAE(LightningModule):
     # ──────────────────────────────────────────────────────────────────────────
     # Logging images
     # ──────────────────────────────────────────────────────────────────────────
+
+    def on_validation_epoch_end(self):
+        """Sauvegarde un checkpoint unique à la fin exacte du Stage 1 avec les métriques."""
+        if self.current_epoch == self.warmup_epochs - 1:
+            # Récupération des métriques agrégées à la fin de l'époque
+            metrics = self.trainer.callback_metrics
+            
+            # Extraction sécurisée (float() gère à la fois les nombres normaux et les tenseurs PyTorch 0D)
+            rec = float(metrics.get("val/rec_loss", 0.0))
+            style = float(metrics.get("val/style_acc", 0.0))
+            content = float(metrics.get("val/content_acc", 0.0))
+            
+            # Formatage identique au ModelCheckpoint classique
+            filename = f"stage1_final_epoch={self.current_epoch:03d}-rec={rec:.4f}-style={style:.3f}-content={content:.3f}.ckpt"
+            
+            save_dir = self.trainer.default_root_dir
+            ckpt_path = os.path.join(save_dir, "checkpoints", filename)
+            
+            os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+            
+            # Sauvegarde
+            self.trainer.save_checkpoint(ckpt_path)
+            self.print(f"\n💾 [UnlearningVAE] Checkpoint pré-confusion sauvegardé : {filename}")
 
     def _log_images(
         self,
