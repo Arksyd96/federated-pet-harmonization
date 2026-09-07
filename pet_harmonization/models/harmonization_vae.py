@@ -50,9 +50,21 @@ class SobelFilter(nn.Module):
         self.register_buffer("ky", ky)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        is_3d = x.dim() == 5
+        if is_3d:
+            b, c, z, h, w = x.shape
+            # (B, C, Z, H, W) -> (B, Z, C, H, W) -> (B*Z, C, H, W)
+            x = x.transpose(1, 2).reshape(b * z, c, h, w)
+            
         gx = F.conv2d(x, self.kx, padding=1, groups=self.in_channels)
         gy = F.conv2d(x, self.ky, padding=1, groups=self.in_channels)
-        return torch.sqrt(gx ** 2 + gy ** 2 + 1e-8)
+        mag = torch.sqrt(gx ** 2 + gy ** 2 + 1e-8)
+        
+        if is_3d:
+            # (B*Z, C, H, W) -> (B, Z, C, H, W) -> (B, C, Z, H, W)
+            mag = mag.reshape(b, z, c, h, w).transpose(1, 2)
+            
+        return mag
 
 
 def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -156,17 +168,30 @@ class BifurcatedContentStyleEncoder(nn.Module):
                     ]
                     encoder_block_list.append(SequentialEmb(*seq))
 
-                if i < self.depth - 1:
-                    encoder_block_list.append(
-                        BasicDown(
-                            spatial_dims=spatial_dims,
-                            in_channels=hidden_channels[i],
-                            out_channels=hidden_channels[i],
-                            kernel_size=kernel_sizes[i],
-                            stride=strides[i],
-                            learnable_interpolation=learnable_interpolation,
-                        )
+                # --- OLD CODE (Pour compatibilité avec les anciens checkpoints) ---
+                # if i < self.depth - 1:
+                #     encoder_block_list.append(
+                #         BasicDown(
+                #             spatial_dims=spatial_dims,
+                #             in_channels=hidden_channels[i],
+                #             out_channels=hidden_channels[i],
+                #             kernel_size=kernel_sizes[i], # OLD
+                #             stride=strides[i],
+                #             learnable_interpolation=learnable_interpolation,
+                #         )
+                #     )
+                
+                # --- NEW CODE (Correction 3 downsamples) ---
+                encoder_block_list.append(
+                    BasicDown(
+                        spatial_dims=spatial_dims,
+                        in_channels=hidden_channels[i],
+                        out_channels=hidden_channels[i],
+                        kernel_size=kernel_sizes[i], # REMIS A 3 + PADDING ASYMETRIQUE
+                        stride=strides[i],
+                        learnable_interpolation=learnable_interpolation,
                     )
+                )
 
             middle_block = SequentialEmb(
                 ConvBlock(
@@ -198,12 +223,8 @@ class BifurcatedContentStyleEncoder(nn.Module):
         self.style_encoder_blocks,   self.style_middle_block   = _build_branch()
 
         # ── Content and Style heads : spatial posterior ─────────────────────────────────
-        self.content_head = nn.Sequential(
-            BasicBlock(spatial_dims, hidden_channels[-1], 2 * latent_channels, 3),
-            BasicBlock(spatial_dims, 2 * latent_channels, 2 * latent_channels, 1),
-        )
-        self.style_head    = BasicBlock(spatial_dims, hidden_channels[-1], 2 * style_channels, kernel_size=1)
-        
+        self.content_head = BasicBlock(spatial_dims, hidden_channels[-1], style_channels, kernel_size=1)
+        self.style_head   = BasicBlock(spatial_dims, hidden_channels[-1], style_channels, kernel_size=1)
 
     def forward(
         self, x: torch.Tensor
@@ -233,14 +254,12 @@ class BifurcatedContentStyleEncoder(nn.Module):
         h_s = self.style_middle_block(h_s, None)
 
         # ── Content head ─────────────────────────────────────────────────────
-        moments_c = self.content_head(h_c)
-        mu_content, logvar_content = moments_c.chunk(2, dim=1)
-
+        content_out = self.content_head(h_c)
+        
         # ── Style head ───────────────────────────────────────────────────────
-        s = self.style_head(h_s)       # (B, 2*style_channels, H', W')
-        mu_style, logvar_style = s.chunk(2, dim=1)
+        style_out = self.style_head(h_s)
 
-        return mu_content, logvar_content, mu_style, logvar_style
+        return content_out, style_out
 
 
 # class ContentStyleEncoder(nn.Module):
@@ -493,17 +512,30 @@ class ContourSkipEncoder(nn.Module):
                 ]
                 encoder_block_list.append(SequentialEmb(*seq))
 
-            if i < self.depth - 1:
-                encoder_block_list.append(
-                    BasicDown(
-                        spatial_dims=spatial_dims,
-                        in_channels=hidden_channels[i],
-                        out_channels=hidden_channels[i],
-                        kernel_size=kernel_sizes[i],
-                        stride=strides[i],
-                        learnable_interpolation=learnable_interpolation,
-                    )
+            # --- OLD CODE (Pour compatibilité avec les anciens checkpoints) ---
+            # if i < self.depth - 1:
+            #     encoder_block_list.append(
+            #         BasicDown(
+            #             spatial_dims=spatial_dims,
+            #             in_channels=hidden_channels[i],
+            #             out_channels=hidden_channels[i],
+            #             kernel_size=kernel_sizes[i], # OLD
+            #             stride=strides[i],
+            #             learnable_interpolation=learnable_interpolation,
+            #         )
+            #     )
+
+            # --- NEW CODE (Correction 3 downsamples) ---
+            encoder_block_list.append(
+                BasicDown(
+                    spatial_dims=spatial_dims,
+                    in_channels=hidden_channels[i],
+                    out_channels=hidden_channels[i],
+                    kernel_size=kernel_sizes[i], # REMIS A 3 + PADDING ASYMETRIQUE
+                    stride=strides[i],
+                    learnable_interpolation=learnable_interpolation,
                 )
+            )
         self.encoder_blocks = nn.ModuleList(encoder_block_list)
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
@@ -655,8 +687,8 @@ class AdaINResBlock(nn.Module):
         InstanceNorm = getattr(nn, f"InstanceNorm{spatial_dims}d")
         Dropout = getattr(nn, f"Dropout{spatial_dims}d") if dropout > 0 else nn.Identity
 
-        self.conv1 = Conv(in_channels,  out_channels, kernel_size=3, padding=1)
-        self.conv2 = Conv(out_channels, out_channels, kernel_size=3, padding=1)
+        self.conv1 = Conv(in_channels,  out_channels, kernel_size=3, padding=1, padding_mode='replicate')
+        self.conv2 = Conv(out_channels, out_channels, kernel_size=3, padding=1, padding_mode='replicate')
         
         self.norm1 = InstanceNorm(out_channels, affine=False)
         self.norm2 = InstanceNorm(out_channels, affine=False)
@@ -802,8 +834,21 @@ class StyleConditionedDecoder(nn.Module):
                     attention_type=attention_type[i],
                 ))
  
-                # BasicUp sur le premier bloc de chaque niveau (sauf le plus profond)
-                if (i > 1) and (k == 0):
+                # --- OLD CODE (Pour compatibilité avec les anciens checkpoints) ---
+                # if (i > 1) and (k == 0):
+                #     up_blocks.append(BasicUp(
+                #         spatial_dims=spatial_dims,
+                #         in_channels=out_ch_k,
+                #         out_channels=out_ch_k,
+                #         kernel_size=strides[i], # Dans ton code original, tu avais strides[i]
+                #         stride=strides[i],
+                #         learnable_interpolation=learnable_interpolation,
+                #     ))
+                # else:
+                #     up_blocks.append(None)
+
+                # --- NEW CODE (Correction upsample à toutes les couches i >= 1) ---
+                if k == 0:
                     up_blocks.append(BasicUp(
                         spatial_dims=spatial_dims,
                         in_channels=out_ch_k,
@@ -877,29 +922,6 @@ class StyleConditionedDecoder(nn.Module):
 
 class DisentangledHarmonizationVAE(nn.Module):
     """
-    VAE disentanglé pour l'harmonisation d'images PET multi-sites.
-
-    Flux forward (entraînement) :
-        x
-        ├─ ContentStyleEncoder → skips_c, mu_content, logvar_content, mu_style, logvar_style
-        │    z_content = reparameterize(mu_content, logvar_content)
-        │    z_style   = reparameterize(mu_style, logvar_style)
-        ├─ StyleEmbedder(z_style) → style_emb
-        ├─ ContourSkipEncoder(x) → skips_k
-        └─ StyleConditionedDecoder(z_content, style_emb, skips_c, skips_k) → x_hat
-
-    Losses :
-        L_rec       = loss_fn(x_hat, x)
-        L_kl_c      = kl_loss_spatial(mu_content, logvar_content).mean()
-        L_kl_s      = kl_loss_1d(mu_style, logvar_style).mean()
-        L_domain_s  = cross_entropy(classifier(z_style), domain_label)  [à l'ext.]
-        L_conf_c    = KL(classifier(z_content_pool) || uniforme)         [à l'ext.]
-
-    Flux harmonisation (inférence) :
-        x_source → z_content_source  (mode = mu)
-        x_ref    → z_style_ref       (mode = mu_style)
-        → Decoder(z_content_source, StyleEmbedder(z_style_ref), skips_c, skips_k)
-
     Parameters
     ----------
     in_channels, out_channels : int
@@ -965,6 +987,10 @@ class DisentangledHarmonizationVAE(nn.Module):
         InstanceNorm = getattr(nn, f"InstanceNorm{spatial_dims}d")
         self.content_norm = InstanceNorm(latent_channels, affine=False)
 
+        # Projections du bottleneck pour la kullback-leibler
+        self.proj_mu_content = BasicBlock(spatial_dims, style_channels, latent_channels, kernel_size=1)
+        self.proj_logvar_content = BasicBlock(spatial_dims, style_channels, latent_channels, kernel_size=1)
+
         self.contour_encoder = ContourSkipEncoder(
             in_channels=in_channels,
             **self.shared_kwargs,
@@ -987,10 +1013,14 @@ class DisentangledHarmonizationVAE(nn.Module):
         self.pool    = AdaptiveAvgPool(1)
         self.flatten = nn.Flatten()
 
+    def to_style(self, x: torch.Tensor) -> torch.Tensor:
+        """Réduit un tenseur spatial en vecteur 1D via Pool + Flatten."""
+        return self.flatten(self.pool(x))
+
     def encode(
         self, x: torch.Tensor
-    ) -> Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Retourne (mu_contentontent, logvar_contentontent, mu_styletyle, logvar_styletyle)."""
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Retourne (content_raw, style_raw) issus de l'encodeur bifurqué."""
         return self.content_style_encoder(x)
 
     def decode(self, z_content: torch.Tensor, z_style: torch.Tensor, x_for_contour: torch.Tensor) -> torch.Tensor:
@@ -1007,26 +1037,33 @@ class DisentangledHarmonizationVAE(nn.Module):
         Returns
         -------
         x_hat      : (B, out_channels, H, W)
-        mu_content : (B, latent_channels, H', W')
-        logvar_content : (B, latent_channels, H', W')
-        mu_style   : (B, style_channels)
-        logvar_style : (B, style_channels)
+        kl_vars    : (mu_c, logvar_c) - pour la KL loss (basse capacité, spatial)
+        classif_vars : (s_content, style) - pour les classifieurs (haute capacité, 1D)
         """
-        mu_content, logvar_content, mu_style, logvar_style = self.encode(x)
+        content_raw, style_raw = self.encode(x)
         
-        mu_style, logvar_style = self.pool(mu_style), self.pool(logvar_style)
-        mu_style, logvar_style = self.flatten(mu_style), self.flatten(logvar_style)
-        z_style   = reparameterize(mu_style, logvar_style) if sample_posterior else mu_style
+        # 1. Variables 1D haute capacité pour les classifieurs
+        s_content = self.to_style(content_raw)  # (B, style_channels)
+        style     = self.to_style(style_raw)    # (B, style_channels)
+        
+        # 2. Projection pour le goulot d'étranglement (Kullback-Leibler)
+        mu_c = self.proj_mu_content(content_raw)         # (B, latent_channels, H', W')
+        logvar_c = self.proj_logvar_content(content_raw) # (B, latent_channels, H', W')
 
+        # 3. Échantillonnage
+        z_content = reparameterize(mu_c, logvar_c) if sample_posterior else mu_c
+        z_content_norm = self.content_norm(z_content)  # supprime les stats de style
+        
+        # Dropout sur le style (vecteur déterministe)
+        z_style = style
         if self.training and style_dropout_p > 0.0:
             mask    = (torch.rand(z_style.shape[0], 1, device=z_style.device) > style_dropout_p).float()
             z_style = z_style * mask
 
-        z_content = reparameterize(mu_content, logvar_content) if sample_posterior else mu_content
-        z_content_norm = self.content_norm(z_content)  # supprime les stats de style
+        # 4. Décodage
         x_hat = self.decode(z_content_norm, z_style, x)
 
-        return x_hat, mu_content, logvar_content, mu_style, logvar_style
+        return x_hat, (mu_c, logvar_c), (s_content, style)
 
     @torch.no_grad()
     def harmonize(
@@ -1044,22 +1081,27 @@ class DisentangledHarmonizationVAE(nn.Module):
         z_style_fixed : (1, style_channels) ou (B, style_channels)
                         z_style précalculé et fixe — broadcasté sur le batch si nécessaire
         """
-        mu_content, logvar_content, mu_style, logvar_style = self.encode(x_source)
-        z_content = reparameterize(mu_content, logvar_content)
+        content_raw, style_raw = self.encode(x_source)
         
-        mu_style, logvar_style = self.pool(mu_style), self.pool(logvar_style)
-        mu_style, logvar_style = self.flatten(mu_style), self.flatten(logvar_style)
-        z_style   = reparameterize(mu_style, logvar_style)
+        # Projections pour content
+        mu_c = self.proj_mu_content(content_raw)
+        logvar_c = self.proj_logvar_content(content_raw)
+        z_content = reparameterize(mu_c, logvar_c)
+        z_content = self.content_norm(z_content)
+        
+        # Style
+        style = self.to_style(style_raw)
+        z_style = style
 
         if z_style_fixed is not None:
             # Broadcast sur le batch si z_style_fixed est (1, D)
             z_style = z_style_fixed.expand(x_source.shape[0], -1)
         elif x_style_ref is not None:
-            _, _, mu_style, _ = self.content_style_encoder(x_style_ref)
-            z_style = mu_style
+            _, ref_style_raw = self.content_style_encoder(x_style_ref)
+            z_style = self.to_style(ref_style_raw)
         elif style_dropout_p is not None and style_dropout_p > 0.0:
             # Style dropout : on remplace z_style par un vecteur nul avec probabilité p_drop_style
-            mask    = (torch.rand(mu_style.shape[0], 1, device=z_style.device) > style_dropout_p).float()
+            mask    = (torch.rand(z_style.shape[0], 1, device=z_style.device) > style_dropout_p).float()
             z_style = z_style * mask
         else:
             z_style = torch.zeros(
@@ -1161,7 +1203,7 @@ class UnlearningVAE(LightningModule):
         beta_confusion: float = 1.0,
         max_epochs: int = 300,
         kl_content_weight: float = 1e-4,
-        kl_style_weight: float = 1e-4,
+        ssim_weight: float = 0.5,
         lr_vae: float = 1e-4,
         lr_classifiers: float = 1e-4,
         lr_unlearn: float = 1e-5,
@@ -1179,7 +1221,7 @@ class UnlearningVAE(LightningModule):
         self.beta_confusion     = beta_confusion
         self.max_epochs         = max_epochs
         self.kl_content_weight  = kl_content_weight
-        self.kl_style_weight    = kl_style_weight
+        self.ssim_weight        = ssim_weight
         self.lrs                = {"vae": lr_vae, "classifiers": lr_classifiers, "unlearn": lr_unlearn}
         self.lr_classifiers_final = lr_classifiers_final
         self.lr_unlearn_final   = lr_unlearn_final
@@ -1189,8 +1231,7 @@ class UnlearningVAE(LightningModule):
         self.spatial_dims        = vae.shared_kwargs.get("spatial_dims", 2)
 
         # ── Classifieurs de domaine ───────────────────────────────────────────
-        style_channels  = vae.content_style_encoder.style_head.conv.out_channels // 2
-        latent_channels = vae.content_style_encoder.content_head[0].conv.out_channels // 2
+        style_channels  = vae.content_style_encoder.style_head.conv.out_channels
 
         self.style_classifier = DomainClassifier(
             channels=style_channels,
@@ -1198,7 +1239,7 @@ class UnlearningVAE(LightningModule):
             hidden_dim=classifier_hidden_dim
         )
         self.content_classifier = DomainClassifier(
-            channels=latent_channels,
+            channels=style_channels,
             num_domains=num_domains,
             hidden_dim=classifier_hidden_dim
         )
@@ -1365,31 +1406,32 @@ class UnlearningVAE(LightningModule):
         # STAGE 1 — Warmup
         # ══════════════════════════════════════════════════════════════════════
         if is_stage_1:
-            x_hat, mu_content, logvar_content, mu_style, logvar_style = self.vae.forward(
+            x_hat, kl_vars, classif_vars = self.vae.forward(
                 x, sample_posterior=True, style_dropout_p=0.05
             )
+            mu_c, logvar_c = kl_vars
+            s_content, style = classif_vars
 
             # Losses de reconstruction et KL
-            loss_rec        = F.l1_loss(x_hat, x)
-            loss_kl_content = kl_loss_spatial(mu_content, logvar_content).mean()
-            loss_kl_style   = kl_loss_1d(mu_style, logvar_style).mean()
+            # SSIM attend des valeurs dans [0, 1]
+            x_01     = (x.clamp(-1, 1) + 1.0) / 2.0
+            x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
+            
+            loss_l1         = F.l1_loss(x_hat, x)
+            loss_ssim       = 1.0 - self.ssim(x_hat_01, x_01)
+            loss_rec        = loss_l1 + self.ssim_weight * loss_ssim
+            
+            loss_kl_content = kl_loss_spatial(mu_c, logvar_c).mean()
 
             loss_vae = (
                 loss_rec +
-                self.kl_content_weight * loss_kl_content +
-                self.kl_style_weight   * loss_kl_style
+                self.kl_content_weight * loss_kl_content
             )
 
             # Classifieurs — graphe complet (pas de detach), les deux apprennent
-            z_style   = reparameterize(mu_style, logvar_style)
-            
-            # Préparation 1D pour le Content Classifier (Pool -> Flatten -> Reparam)
-            mu_c_pool = self.vae.flatten(self.vae.pool(mu_content))
-            lv_c_pool = self.vae.flatten(self.vae.pool(logvar_content))
-            z_content_classif = reparameterize(mu_c_pool, lv_c_pool)
-
-            logits_style   = self.style_classifier(z_style)
-            logits_content = self.content_classifier(z_content_classif)
+            # style et s_content sont déterministes (taille style_channels)
+            logits_style   = self.style_classifier(style)
+            logits_content = self.content_classifier(s_content)
 
             loss_dm_style   = F.cross_entropy(logits_style, domain_labels)
             loss_dm_content = F.cross_entropy(logits_content, domain_labels)
@@ -1408,7 +1450,6 @@ class UnlearningVAE(LightningModule):
             self._log_dict({
                 "train/rec_loss":         loss_rec,
                 "train/kl_content":       loss_kl_content,
-                "train/kl_style":         loss_kl_style,
                 "train/dm_style":         loss_dm_style,
                 "train/dm_content":       loss_dm_content,
                 "train/total":            total_loss,
@@ -1418,18 +1459,24 @@ class UnlearningVAE(LightningModule):
         # STAGE 2 — Unlearning (3 étapes dissociées)
         # ══════════════════════════════════════════════════════════════════════
         else:
-            # feature_map = self.iffn.forward(x)
-            x_hat, mu_content, logvar_content, mu_style, logvar_style = self.vae.forward(
+            x_hat, kl_vars, classif_vars = self.vae.forward(
                 x, sample_posterior=True, style_dropout_p=0.05
             )
-            loss_rec        = F.l1_loss(x_hat, x)
-            loss_kl_content = kl_loss_spatial(mu_content, logvar_content).mean()
-            loss_kl_style   = kl_loss_1d(mu_style, logvar_style).mean()
+            mu_c, logvar_c = kl_vars
+            s_content, style = classif_vars
+
+            # SSIM attend des valeurs dans [0, 1]
+            x_01     = (x.clamp(-1, 1) + 1.0) / 2.0
+            x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
+            
+            loss_l1         = F.l1_loss(x_hat, x)
+            loss_ssim       = 1.0 - self.ssim(x_hat_01, x_01)
+            loss_rec        = loss_l1 + self.ssim_weight * loss_ssim
+            
+            loss_kl_content = kl_loss_spatial(mu_c, logvar_c).mean()
 
             loss_vae = (
-                loss_rec
-                + self.kl_content_weight * loss_kl_content
-                + self.kl_style_weight   * loss_kl_style
+                loss_rec + self.kl_content_weight * loss_kl_content
             )
 
             opt_vae.zero_grad()
@@ -1442,20 +1489,11 @@ class UnlearningVAE(LightningModule):
             for p in self.vae.content_style_encoder.parameters():
                 p.requires_grad = False
                 
-            # with torch.no_grad():
-            #     mu_c_det, lv_c_det, mu_s_det, lv_s_det = self.vae.content_style_encoder(x)
-            #     z_content_det = reparameterize(mu_c_det, lv_c_det)
-            #     z_style_det   = reparameterize(mu_s_det, lv_s_det)
-            
-            z_style_det = reparameterize(mu_style.detach(), logvar_style.detach())
-            
-            # Pool et Flatten sur les variables détachées avant d'échantillonner
-            mu_c_det = self.vae.flatten(self.vae.pool(mu_content.detach()))
-            lv_c_det = self.vae.flatten(self.vae.pool(logvar_content.detach()))
-            z_content_det = reparameterize(mu_c_det, lv_c_det)
+            style_det = style.detach()
+            s_content_det = s_content.detach()
 
             for _ in range(self.k_style_steps):
-                logits_style_det   = self.style_classifier(z_style_det)
+                logits_style_det   = self.style_classifier(style_det)
                 loss_dm_style      = F.cross_entropy(logits_style_det, domain_labels)
                 opt_style_clf.zero_grad()
                 self.manual_backward(loss_dm_style)
@@ -1463,7 +1501,7 @@ class UnlearningVAE(LightningModule):
                 opt_style_clf.step()
             
             
-            logits_content_det = self.content_classifier(z_content_det)
+            logits_content_det = self.content_classifier(s_content_det)
             loss_dm_content = F.cross_entropy(logits_content_det, domain_labels)
             opt_content_clf.zero_grad()
             self.manual_backward(loss_dm_content)
@@ -1475,13 +1513,10 @@ class UnlearningVAE(LightningModule):
             for p in self.vae.content_style_encoder.parameters():
                 p.requires_grad = True
 
-            mu_content_conf, logvar_content_conf, _, _ = self.vae.encode(x)
+            content_raw_conf, _ = self.vae.encode(x)
+            s_content_conf = self.vae.to_style(content_raw_conf)
             
-            mu_c_conf_pool = self.vae.flatten(self.vae.pool(mu_content_conf))
-            lv_c_conf_pool = self.vae.flatten(self.vae.pool(logvar_content_conf))
-            z_content_conf = reparameterize(mu_c_conf_pool, lv_c_conf_pool)
-
-            logits_content_conf = self.content_classifier(z_content_conf)
+            logits_content_conf = self.content_classifier(s_content_conf)
             loss_confusion = self.beta_confusion * self._confusion_loss(logits_content_conf)
 
             opt_unlearn.zero_grad()
@@ -1493,7 +1528,6 @@ class UnlearningVAE(LightningModule):
             self._log_dict({
                 "train/rec_loss":     loss_rec,
                 "train/kl_content":   loss_kl_content,
-                "train/kl_style":     loss_kl_style,
                 "train/dm_style":     loss_dm_style,
                 "train/dm_content":   loss_dm_content,
                 "train/confusion":    loss_confusion,
@@ -1516,21 +1550,26 @@ class UnlearningVAE(LightningModule):
 
 
         # ── Forward VAE ───────────────────────────────────────────────────────
-        x_hat, mu_content, logvar_content, mu_style, logvar_style = self.vae.forward(
+        x_hat, kl_vars, classif_vars = self.vae.forward(
             x, sample_posterior=False, style_dropout_p=0.95
         )
+        mu_c, logvar_c = kl_vars
+        s_content, style = classif_vars
 
-        # ── Losses de reconstruction ──────────────────────────────────────────
-        loss_rec        = F.l1_loss(x_hat, x)
-        loss_kl_content = kl_loss_spatial(mu_content, logvar_content).mean()
-        loss_kl_style   = kl_loss_1d(mu_style, logvar_style).mean()
+        # ── SSIM & Reconstruction ─────────────────────────────────────────────
+        x_01     = (x.clamp(-1, 1) + 1.0) / 2.0
+        x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
+        
+        ssim_score      = self.ssim(x_hat_01, x_01)
+        loss_l1         = F.l1_loss(x_hat, x)
+        loss_ssim       = 1.0 - ssim_score
+        loss_rec        = loss_l1 + self.ssim_weight * loss_ssim
+        
+        loss_kl_content = kl_loss_spatial(mu_c, logvar_c).mean()
 
         # ── Classifieurs (sur les modes, pas d'échantillonnage) ───────────────
-        logits_style   = self.style_classifier(mu_style)
-        
-        # Réduction de l'espace spatial du content vers 1D pour l'évaluation
-        mu_c_pool      = self.vae.flatten(self.vae.pool(mu_content))
-        logits_content = self.content_classifier(mu_c_pool)
+        logits_style   = self.style_classifier(style)
+        logits_content = self.content_classifier(s_content)
 
         loss_dm_style   = F.cross_entropy(logits_style,   domain_labels)
         loss_dm_content = F.cross_entropy(logits_content, domain_labels)
@@ -1544,10 +1583,7 @@ class UnlearningVAE(LightningModule):
         style_acc   = (logits_style.argmax(dim=1)   == domain_labels).float().mean()
         content_acc = (logits_content.argmax(dim=1) == domain_labels).float().mean()
 
-        # ── SSIM ──────────────────────────────────────────────────────────────
-        x_01     = (x.clamp(-1, 1) + 1.0) / 2.0
-        x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
-        ssim_score = self.ssim(x_hat_01, x_01)
+        # ── Score composite ───────────────────────────────────────────────────
         
         # Score composite : bonne reconstruction + classifieur confus sur z_content
         # domain_acc_excess = combien content_acc dépasse le niveau du hasard
@@ -1559,7 +1595,6 @@ class UnlearningVAE(LightningModule):
         self._log_dict({
             "val/rec_loss":        loss_rec,
             "val/kl_content":      loss_kl_content,
-            "val/kl_style":        loss_kl_style,
             "val/dm_style":        loss_dm_style,
             "val/dm_content":      loss_dm_content,
             "val/confusion":       loss_confusion,

@@ -648,6 +648,28 @@ class BasicDown(nn.Module):
     ) -> None:
         super().__init__()
 
+        self.spatial_dims = spatial_dims
+        self.kernel_size = kernel_size
+        self.stride = stride
+
+        # --- Padding Asymétrique (Inspiré de HuggingFace Diffusers) ---
+        k = [kernel_size] * spatial_dims if isinstance(kernel_size, int) else kernel_size
+        s = [stride] * spatial_dims if isinstance(stride, int) else stride
+        
+        pad_list = []
+        # F.pad attend les paddings en commençant par la dernière dimension
+        for d in reversed(range(spatial_dims)):
+            if s[d] == 2 and k[d] % 2 != 0:
+                # Padding asymétrique pour éviter le phase shift (ex: (0, 1))
+                pad_left = (k[d] - 1) // 2 - 1
+                pad_right = pad_left + 1
+                pad_list.extend([max(0, pad_left), pad_right])
+            else:
+                # Padding symétrique classique
+                pad_list.extend([k[d] // 2, k[d] // 2])
+        
+        self.manual_padding = tuple(pad_list)
+
         if learnable_interpolation:
             Convolution = Conv[Conv.CONV, spatial_dims]
             self.down_op = Convolution(
@@ -655,7 +677,7 @@ class BasicDown(nn.Module):
                 out_channels,
                 kernel_size=kernel_size,
                 stride=stride,
-                padding=get_padding(kernel_size, stride),
+                padding=0,  # On force à 0 car on pad manuellement dans le forward
                 dilation=1,
                 groups=1,
                 bias=True,
@@ -675,7 +697,8 @@ class BasicDown(nn.Module):
             )
 
     def forward(self, x, emb=None):
-        y = self.down_op(x)
+        pad_x = F.pad(x, self.manual_padding, mode="replicate") if hasattr(self, "manual_padding") else x
+        y = self.down_op(pad_x)
         if hasattr(self, "down_skip"):
             y = y + self.down_skip(x)
         return y
@@ -710,6 +733,7 @@ class BasicUp(nn.Module):
                 dilation=1,
                 groups=1,
                 bias=True,
+                padding_mode='replicate',
             )
 
             if use_res:
@@ -724,16 +748,19 @@ class BasicUp(nn.Module):
             )
 
     def forward(self, x, emb=None):
+        mode = "trilinear" if x.dim() == 5 else "bilinear"
         if self.learnable_interpolation:
             new_size = self.calc_shape(x.shape[2:])
-            x_res = F.interpolate(x, size=new_size, mode="nearest-exact")
+            # OLD: x_res = F.interpolate(x, size=new_size, mode="nearest-exact")
+            x_res = F.interpolate(x, size=new_size, mode=mode, align_corners=False)
             y = self.up_op(x_res)
             if hasattr(self, "up_skip"):
                 y = y + self.up_skip(x)
             return y
         else:
             new_size = self.calc_shape(x.shape[2:])
-            return F.interpolate(x, size=new_size, mode="nearest-exact")
+            # OLD: return F.interpolate(x, size=new_size, mode="nearest-exact")
+            return F.interpolate(x, size=new_size, mode=mode, align_corners=False)
 
 
 # class BasicUp(nn.Module):
@@ -838,6 +865,7 @@ class BasicBlock(nn.Module):
             dilation=1,
             groups=1,
             bias=True,
+            padding_mode='replicate',
         )
         self.conv = zero_module(conv) if zero_conv else conv
 

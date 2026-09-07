@@ -13,32 +13,7 @@ from pet_harmonization.data import SingleTargetPETDataModule
 from pet_harmonization.models.unet import TranslationUNet
 from pet_harmonization.utils import set_seed
 
-def get_start_indices(dim_size, patch_size, stride):
-    indices = []
-    i = 0
-    while i + patch_size <= dim_size:
-        indices.append(i)
-        i += stride
-    # Ajouter le dernier patch collé au bord si on n'est pas tombé pile poil
-    if indices[-1] + patch_size < dim_size:
-        indices.append(dim_size - patch_size)
-    return sorted(list(set(indices))) # set pour éviter doublons
-
-def get_uniform_starts(dim_size: int, patch_size: int, min_overlap_ratio: float = 0.5) -> list[int]:
-    if dim_size <= patch_size:
-        return [0]
-    max_stride = max(patch_size - int(patch_size * min_overlap_ratio), 1)
-    n_patches  = math.ceil((dim_size - patch_size) / max_stride) + 1
-    stride_f   = (dim_size - patch_size) / max(n_patches - 1, 1)
-    return [round(i * stride_f) for i in range(n_patches)]
-
-def make_gaussian_weight_map(patch_size: tuple[int, int, int], sigma_ratio: float = 0.6) -> torch.Tensor:
-    maps = []
-    for size in patch_size:
-        coords = torch.linspace(-1, 1, size)
-        g      = torch.exp(-0.5 * (coords / sigma_ratio) ** 2)
-        maps.append(g / g.max())
-    return maps[0][:, None, None] * maps[1][None, :, None] * maps[2][None, None, :]
+from torch.utils.data import DataLoader
 
 
 def save_prediction(recon_volume: torch.Tensor, source_path: str, pred_path: str):
@@ -64,7 +39,9 @@ def process_subject(
     include_only,
     curr_idx, 
     length_loader,
-    num_standards
+    num_standards,
+    patch_size,
+    overlap
     ):
     SUV_LOG_MAX = model.hparams.suv_global_log_max
     ALPHA = model.hparams.alpha
@@ -88,76 +65,56 @@ def process_subject(
         print(f"⚠️  Predictions already exist for {subject_name}. Skipping...")
         return
 
-    # Récupération des données brutes (batch de taille 1)
-    suv_source = batch['source'][tio.DATA].float().to(device)
-    if suv_source.ndim == 5:
-        suv_source = suv_source.squeeze(1) # (D, H, W)
-
-    _, d_dim, h_dim, w_dim = suv_source.shape
+    subject = tio.utils.get_subjects_from_batch(batch)[0]
     
-    # padding dynamique pour assurer les dimensions du patch d'entrée
-    z_patch_size, y_patch_size, x_patch_size = 5, 64, 64
-    overlap = 2
+    grid_sampler = tio.data.GridSampler(subject, patch_size, tuple(overlap))
+    patch_loader = DataLoader(grid_sampler, batch_size=4, num_workers=0) 
 
-    # Initialisation des volumes de sortie (Une liste contenant 1 ou 2 volumes)
-    output_volumes  = [torch.zeros((d_dim, h_dim, w_dim), device=device) for _ in range(num_standards)]
+    aggregators = [tio.data.GridAggregator(grid_sampler, overlap_mode='hann') for _ in range(num_standards)]
+
+    with torch.inference_mode():
+        for patch_batch in tqdm(patch_loader, desc="Patch-wise inference"):
+            locations = patch_batch[tio.LOCATION]
+            
+            patch_tio = patch_batch['source'][tio.DATA].float().to(device)
+            if patch_tio.ndim == 5:
+                patch_src = patch_tio.squeeze(1) # Passage à (B, D, H, W)
+            else:
+                patch_src = patch_tio
+
+            if patch_src.mean() < 1e-3: 
+                patch_pred_tio = torch.zeros_like(patch_tio)
+                for agg in aggregators:
+                    agg.add_batch(patch_pred_tio, locations)
+                continue
+            
+            log_source = torch.log1p(patch_src)
+            normalized_log_source = 2.0 * (log_source / SUV_LOG_MAX) - 1.0
+            
+            # Prédiction du/des résidus (peut être 5 canaux ou 10 canaux)
+            predicted_residual = model.forward(normalized_log_source)
+
+            # Duplication de la source pour l'addition si on a plusieurs standards (ex: (1, 10, 64, 64))
+            src_repeated = normalized_log_source.repeat(1, num_standards, 1, 1)
+
+            # Reconstruction inverse
+            normalized_log_prediction = src_repeated + (predicted_residual / ALPHA)
+            log_prediction = 0.5 * (normalized_log_prediction + 1.0) * SUV_LOG_MAX
+            suv_prediction = torch.expm1(log_prediction)
+
+            # Split des canaux prédits selon les standards (morceaux de taille 5)
+            chunks = torch.chunk(suv_prediction, num_standards, dim=1)
+
+            # Accumulation séparée pour chaque standard
+            for i, chunk in enumerate(chunks):
+                patch_pred_tio = chunk.unsqueeze(1) # Retour à (B, 1, D, H, W)
+                aggregators[i].add_batch(patch_pred_tio, locations)
     
-    # Un seul weight_sum suffit car les patchs sont accumulés aux mêmes endroits
-    weight_sum      = torch.zeros((d_dim, h_dim, w_dim), device=device)
-    
-    z_starts = get_start_indices(d_dim, z_patch_size, z_patch_size - 1)
-    y_starts = get_start_indices(h_dim, y_patch_size, y_patch_size - overlap)
-    x_starts = get_start_indices(w_dim, x_patch_size, x_patch_size - overlap)
-    
-    total_patches = len(z_starts) * len(y_starts) * len(x_starts)
-    gauss_w = make_gaussian_weight_map((z_patch_size, y_patch_size, x_patch_size), sigma_ratio=.5).to(device)
-
-    # --- 3. Boucle d'Inférence ---
-    pbar = tqdm(total=total_patches, desc="Patch-wise inference", unit="patches")
-
-    with torch.no_grad():
-        for z in z_starts:
-            for y in y_starts:
-                for x in x_starts:
-                    patch_src = suv_source[:, z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size]
-                    
-                    if patch_src.mean() < 1e-3:
-                        pbar.update( 1 )
-                        continue
-
-                    # Normalisation & Log Transform
-                    log_source = torch.log1p(patch_src)
-                    normalized_log_source = 2.0 * (log_source / SUV_LOG_MAX) - 1.0
-                    
-                    # Prédiction du/des résidus (peut être 5 canaux ou 10 canaux)
-                    predicted_residual = model.forward(normalized_log_source)
-
-                    # Duplication de la source pour l'addition si on a plusieurs standards (ex: (1, 10, 64, 64))
-                    src_repeated = normalized_log_source.repeat(1, num_standards, 1, 1)
-
-                    # Reconstruction inverse
-                    normalized_log_prediction = src_repeated + (predicted_residual / ALPHA)
-                    log_prediction = 0.5 * (normalized_log_prediction + 1.0) * SUV_LOG_MAX
-                    suv_prediction = torch.expm1(log_prediction)
-
-                    # Split des canaux prédits selon les standards (morceaux de taille 5)
-                    chunks = torch.chunk(suv_prediction, num_standards, dim=1)
-
-                    # Accumulation séparée pour chaque standard
-                    for i, chunk in enumerate(chunks):
-                        output_volumes[i][z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += chunk.squeeze(0) # * gauss_w
-                    
-                    weight_sum[z:z + z_patch_size, y:y + y_patch_size, x:x + x_patch_size] += 1
-                    pbar.update(1)
-
-    pbar.close()
-    
-    # Pondération et sauvegarde
     source_path = batch['source']['path'][0]
-    weight_clamped = weight_sum.clamp(min=1e-8)
     
     for i, out_filename in enumerate(out_filenames):
-        recon_volume = (output_volumes[i] / weight_clamped).cpu()
+        recon_tensor = aggregators[i].get_output_tensor()
+        recon_volume = recon_tensor.cpu()
         pred_path = os.path.join(subj_out_dir, out_filename)
         save_prediction(recon_volume, source_path, pred_path)
 
@@ -185,6 +142,12 @@ def predict_patch_wise_earl(args):
 
     loader = datamodule.test_dataloader()
     
+    if loader is None:
+        print("⚠️ No data found in test_dataloader. Check your dataset configuration.")
+        return
+        
+    patch_size = datamodule_kwargs.get('patch_size', (5, 64, 64))
+
     for idx, batch in enumerate(loader):
         process_subject(
             model=model, 
@@ -196,7 +159,9 @@ def predict_patch_wise_earl(args):
             override=args.override,
             curr_idx=idx + 1, 
             length_loader=len(loader),
-            num_standards=args.num_standards
+            num_standards=args.num_standards,
+            patch_size=patch_size,
+            overlap=args.overlap
         )
 
 if __name__ == "__main__":
@@ -208,6 +173,7 @@ if __name__ == "__main__":
     parser.add_argument('--filename', '-f', type=str, required=False, default='pseudo-earl', help='Filename to process.')
     parser.add_argument('--override', '-r', action='store_true', help='Whether to override existing predictions.')
     parser.add_argument('--num-standards', '-n', type=int, default=1, help='Number of target standards to generate (ex: 1 or 2).')
+    parser.add_argument('--overlap', type=int, nargs=3, default=[1, 2, 2], help='Overlap along z, y, x axes (default: 1 2 2) to avoid artifacts.')
     args = parser.parse_args()
     
     predict_patch_wise_earl(args)
