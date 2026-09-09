@@ -754,31 +754,34 @@ Mécanisme de désapprentissage (Dinsdale) :
 class SpatialDomainClassifier(nn.Module):
     def __init__(self, channels: int, num_domains: int, hidden_dim: int = 128, spatial_dims: int = 3):
         super().__init__()
-        Conv = getattr(nn, f"Conv{spatial_dims}d")
-        MaxPool = getattr(nn, f"AdaptiveMaxPool{spatial_dims}d")
+        self.pool_avg = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")(1)
+        self.pool_max = getattr(nn, f"AdaptiveMaxPool{spatial_dims}d")(1)
         
         self.net = nn.Sequential(
-            Conv(channels, 32, kernel_size=3, stride=2, padding=1),
+            nn.Linear(channels * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.SiLU(),
-            Conv(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.SiLU(),
-            Conv(64, hidden_dim, kernel_size=3, stride=2, padding=1),
-            nn.SiLU(),
-            MaxPool(1),
-            nn.Flatten(),
             nn.Linear(hidden_dim, num_domains)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        avg_f = self.pool_avg(x).flatten(1)
+        max_f = self.pool_max(x).flatten(1)
+        features = torch.cat([avg_f, max_f], dim=1)
+        return self.net(features)
 
 class DomainClassifier(nn.Module):
     def __init__(self, channels: int, num_domains: int, hidden_dim: int = 256):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(channels, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, num_domains),
         )
