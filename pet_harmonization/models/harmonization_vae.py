@@ -754,9 +754,6 @@ Mécanisme de désapprentissage (Dinsdale) :
 class SpatialDomainClassifier(nn.Module):
     def __init__(self, channels: int, num_domains: int, hidden_dim: int = 128, spatial_dims: int = 3):
         super().__init__()
-        self.pool_avg = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")(1)
-        self.pool_max = getattr(nn, f"AdaptiveMaxPool{spatial_dims}d")(1)
-        
         self.net = nn.Sequential(
             nn.Linear(channels * 2, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -768,9 +765,11 @@ class SpatialDomainClassifier(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        avg_f = self.pool_avg(x).flatten(1)
-        max_f = self.pool_max(x).flatten(1)
-        features = torch.cat([avg_f, max_f], dim=1)
+        # x: (B, C, H, W, D)
+        x_flat = x.view(x.size(0), x.size(1), -1)
+        avg_f = x_flat.mean(dim=-1)
+        std_f = x_flat.std(dim=-1)
+        features = torch.cat([avg_f, std_f], dim=1)
         return self.net(features)
 
 class DomainClassifier(nn.Module):
