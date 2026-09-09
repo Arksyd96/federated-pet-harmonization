@@ -850,7 +850,7 @@ class UnlearningVAE(LightningModule):
         self.spatial_dims        = vae.shared_kwargs.get("spatial_dims", 2)
 
         # ── Classifieurs de domaine ───────────────────────────────────────────
-        style_channels  = vae.content_style_encoder.style_head.conv.out_channels
+        style_channels  = vae.content_style_encoder.style_head.conv.out_channels // 2
 
         self.style_classifier = DomainClassifier(
             channels=style_channels,
