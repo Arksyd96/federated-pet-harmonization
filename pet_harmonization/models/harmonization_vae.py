@@ -69,6 +69,7 @@ class SobelFilter(nn.Module):
 
 def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """Echantillonnage reparamétrisé : z = mu + eps * std."""
+    logvar = torch.clamp(logvar, min=-30.0, max=20.0)
     std = torch.exp(0.5 * logvar)
     eps = torch.randn_like(mu)
     return mu + eps * std
@@ -76,6 +77,7 @@ def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
 
 def kl_loss_spatial(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """KL(q||N(0,I)) pour un posterior spatial (B, C, H, W). Retourne [B]."""
+    logvar = torch.clamp(logvar, min=-30.0, max=20.0)
     return 0.5 * torch.sum(
         mu.pow(2) + logvar.exp() - 1.0 - logvar,
         dim=[1, 2, 3],
@@ -84,6 +86,7 @@ def kl_loss_spatial(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
 
 def kl_loss_1d(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """KL(q||N(0,I)) pour un posterior 1D (B, D). Retourne [B]."""
+    logvar = torch.clamp(logvar, min=-30.0, max=20.0)
     return 0.5 * torch.sum(
         mu.pow(2) + logvar.exp() - 1.0 - logvar,
         dim=1,
@@ -752,12 +755,18 @@ class SpatialDomainClassifier(nn.Module):
     def __init__(self, channels: int, num_domains: int, hidden_dim: int = 128, spatial_dims: int = 3):
         super().__init__()
         Conv = getattr(nn, f"Conv{spatial_dims}d")
+        MaxPool = getattr(nn, f"AdaptiveMaxPool{spatial_dims}d")
+        
         self.net = nn.Sequential(
-            Conv(channels, hidden_dim, kernel_size=3, padding=1),
+            Conv(channels, 32, kernel_size=3, stride=2, padding=1),
             nn.SiLU(),
-            Conv(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            Conv(32, 64, kernel_size=3, stride=2, padding=1),
             nn.SiLU(),
-            Conv(hidden_dim, num_domains, kernel_size=1)
+            Conv(64, hidden_dim, kernel_size=3, stride=2, padding=1),
+            nn.SiLU(),
+            MaxPool(1),
+            nn.Flatten(),
+            nn.Linear(hidden_dim, num_domains)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -857,6 +866,7 @@ class UnlearningVAE(LightningModule):
             num_domains=num_domains,
             hidden_dim=classifier_hidden_dim
         )
+
         latent_channels = vae.content_norm.num_features
         self.content_classifier = SpatialDomainClassifier(
             channels=latent_channels,
@@ -1005,7 +1015,6 @@ class UnlearningVAE(LightningModule):
     # ──────────────────────────────────────────────────────────────────────────
     # Forward
     # ──────────────────────────────────────────────────────────────────────────
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_hat, *_ = self.vae(x, sample_posterior=False)
         return x_hat
@@ -1060,9 +1069,7 @@ class UnlearningVAE(LightningModule):
             logits_content = self.content_classifier(z_content)
 
             loss_dm_style   = F.cross_entropy(logits_style, domain_labels)
-            domain_labels_spatial = domain_labels.view(-1, 1, 1, 1).expand_as(logits_content[:, 0]) \
-                if self.spatial_dims == 3 else domain_labels.view(-1, 1, 1).expand_as(logits_content[:, 0])
-            loss_dm_content = F.cross_entropy(logits_content, domain_labels_spatial)
+            loss_dm_content = F.cross_entropy(logits_content, domain_labels)
             loss_classifiers = loss_dm_style + loss_dm_content
 
             total_loss = loss_classifiers + loss_vae
@@ -1132,9 +1139,7 @@ class UnlearningVAE(LightningModule):
             
             
             logits_content_det = self.content_classifier(z_content_det)
-            domain_labels_spatial = domain_labels.view(-1, 1, 1, 1).expand_as(logits_content_det[:, 0]) \
-                if self.spatial_dims == 3 else domain_labels.view(-1, 1, 1).expand_as(logits_content_det[:, 0])
-            loss_dm_content = F.cross_entropy(logits_content_det, domain_labels_spatial)
+            loss_dm_content = F.cross_entropy(logits_content_det, domain_labels)
             opt_content_clf.zero_grad()
             self.manual_backward(loss_dm_content)
             torch.nn.utils.clip_grad_norm_(self.content_classifier.parameters(), max_norm=1.0)
@@ -1202,9 +1207,7 @@ class UnlearningVAE(LightningModule):
         logits_content = self.content_classifier(z_content)
 
         loss_dm_style   = F.cross_entropy(logits_style,   domain_labels)
-        domain_labels_spatial = domain_labels.view(-1, 1, 1, 1).expand_as(logits_content[:, 0]) \
-            if self.spatial_dims == 3 else domain_labels.view(-1, 1, 1).expand_as(logits_content[:, 0])
-        loss_dm_content = F.cross_entropy(logits_content, domain_labels_spatial)
+        loss_dm_content = F.cross_entropy(logits_content, domain_labels)
 
         # Confusion loss de monitoring
         loss_confusion = self._confusion_loss_spatial(logits_content)
@@ -1213,9 +1216,7 @@ class UnlearningVAE(LightningModule):
         # style_acc  : doit rester élevée (z_style discrimine le site)
         # content_acc: doit tendre vers 1/num_domains (z_content devient invariant)
         style_acc   = (logits_style.argmax(dim=1)   == domain_labels).float().mean()
-        domain_labels_spatial = domain_labels.view(-1, 1, 1, 1).expand_as(logits_content[:, 0]) \
-            if self.spatial_dims == 3 else domain_labels.view(-1, 1, 1).expand_as(logits_content[:, 0])
-        content_acc = (logits_content.argmax(dim=1) == domain_labels_spatial).float().mean()
+        content_acc = (logits_content.argmax(dim=1) == domain_labels).float().mean()
 
         # ── Score composite ───────────────────────────────────────────────────
         
