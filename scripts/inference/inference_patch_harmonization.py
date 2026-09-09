@@ -9,7 +9,7 @@ import numpy as np
 
 from pet_harmonization.data import MultiDomainUnlearningDataModule
 from pet_harmonization.models.starganv2 import StarGANv2, StyleEncoder, StarGANv2Discriminator, StarGANv2Generator, StyleEmbedder
-from pet_harmonization.models.harmonization_vae import DisentangledHarmonizationVAE, UnlearningVAE, StandardHarmonizationVAE
+from pet_harmonization.models.harmonization_vae_dual_old import DisentangledHarmonizationVAE, UnlearningVAE, StandardHarmonizationVAE
 from pet_harmonization.models.unet_v2_skip import UnlearningUNet as UnlearningUNetSkip, SpectralUNetWithIntermediateFeatures
 from pet_harmonization.models.unet import UnlearningUNet as UnlearningUNetIFFN, UNet
 from pet_harmonization.models.domain_classifier import DomainClassifier

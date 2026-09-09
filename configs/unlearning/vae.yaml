@@ -3,7 +3,7 @@ WANDB_API_KEY: bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1
 
 project_name: federated-pet
 dir_name: runs/unlearning-harmonization-vae-3d # runs/unlearning-harmonization-vae-3d
-name: Unlearning Harmonization with StyleVAE+AdaIN Conf 5cls 3D (64^3)
+name: Unlearning Harmonization with StyleVAE+AdaIN Conf 5cls 3D (16x64x64)
 
 datamodule:
     root_dir: ./data/PET-EARL/
@@ -20,7 +20,7 @@ datamodule:
     # queue_max_length:   8192 # For 2D
     # samples_per_volume: 128
     queue_max_length:   4096
-    samples_per_volume: 32
+    samples_per_volume: 64
 
 vae:
     input_shape:          [16, 64, 64]   # (H, W, D) pour FFTHighPassFilter
@@ -29,9 +29,9 @@ vae:
     out_channels:         1
     hidden_channels:      [32, 64, 128, 256]
     kernel_sizes:         [3, 3, 3, 3]
-    # OLD: strides:              [1, 2, 2, 2]
+    # OLD: strides: [1, 2, 2, 2]
     strides:              [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]]
-    # OLD: latent_channels:      1
+    # OLD: latent_channels: 1
     latent_channels:      8
     style_channels:       256
     style_embedding_dim:  256      # aligné sur style_channels (pas d'upscaling)
@@ -47,7 +47,6 @@ vae:
     use_residual_block:   true
     learnable_interpolation: true
     attention_type:       none   
-    use_contour_skip:     false
 
 
 pipeline:
@@ -72,13 +71,13 @@ pipeline:
 
 
 model_checkpoint:
-    monitor: val/composite
+    monitor: val/composite_score
     every_n_epochs: 1
     save_last: true
-    save_top_k: 3
+    save_top_k: 5
     mode: min
     verbose: true
-    filename: "epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/acc_style:.3f}-content={val/acc_content:.3f}"
+    filename: "epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/style_acc:.3f}-content={val/content_acc:.3f}"
     auto_insert_metric_name: false
 
 trainer:
