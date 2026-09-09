@@ -35,7 +35,7 @@ from pet_harmonization.models.fft import FFTHighPassFilter, LearnableFFTHighPass
 class SobelFilter(nn.Module):
     """
     Filtre de Sobel 2D channel-wise à poids fixes (aucun gradient).
-    Retourne la magnitude du gradient — utilisé en entrée du ContourSkipEncoder.
+    Retourne la magnitude du gradient.
     """
 
     def __init__(self, in_channels: int):
@@ -416,13 +416,11 @@ class StyleConditionedDecoder(nn.Module):
         use_residual_block: bool = True,        # conservé pour compatibilité YAML
         learnable_interpolation: bool = True,
         attention_type:     Union[str, List[str]] = 'none',
-        use_contour_skip:   bool = False
     ):
         super().__init__()
 
         self.depth = len(hidden_channels)
         self.num_residual_blocks = num_residual_blocks
-        self.use_contour_skip = use_contour_skip
 
         attention_type = (
             attention_type if isinstance(attention_type, list)
@@ -454,8 +452,7 @@ class StyleConditionedDecoder(nn.Module):
         for i in range(1, self.depth):
             for k in range(num_residual_blocks + 1):
                 out_ch_k = hidden_channels[i - 1 if k == 0 else i]
-                skip_ch  = hidden_channels[i - 1 if k == 0 else i] if use_contour_skip else 0
-                in_ch_k  = hidden_channels[i] + skip_ch
+                in_ch_k  = hidden_channels[i]
  
                 # AdaIN remplace le ConvBlock
                 adain_blocks.append(AdaINResBlock(
@@ -521,16 +518,12 @@ class StyleConditionedDecoder(nn.Module):
         self,
         z_content: torch.Tensor,
         style_emb: torch.Tensor,
-        contour_skips: List[torch.Tensor],
     ) -> torch.Tensor:
         """
         Parameters
         ----------
         z_content     : (B, latent_channels, H', W')
         style_emb     : (B, style_embedding_dim) — produit par StyleEmbedder
-        contour_skips : List[Tensor] de ContourSkipEncoder.forward()
-                        Seuls ces skips sont utilisés — ils proviennent de l'image
-                        filtrée (Sobel) et ne portent pas le biais de scanner.
 
         Returns
         -------
@@ -539,14 +532,9 @@ class StyleConditionedDecoder(nn.Module):
         # latent_to_features : z_content → h (B, hidden_channels[-1], H', W')
         h = self.latent_to_features(z_content, emb=style_emb)
         
-        skips  = list(contour_skips) if (self.use_contour_skip and contour_skips) else None
         up_idx = 0  # pointeur dans self.up_blocks
 
         for j in range(len(self.adain_blocks) - 1, -1, -1):
-            # Skip connection contour (optionnel)
-            if skips is not None:
-                h = torch.cat([h, skips.pop()], dim=1)
- 
             # AdaIN block
             h = self.adain_blocks[j](h, style_emb)
  
@@ -658,7 +646,7 @@ class DisentangledHarmonizationVAE(nn.Module):
         return self.content_style_encoder(x)
 
     def decode(self, z_content: torch.Tensor, z_style: torch.Tensor) -> torch.Tensor:
-        """Décode z_content conditionné par z_style, guidé par les contours de x_for_contour."""
+        """Décode z_content conditionné par z_style."""
         style_emb     = self.style_embedder(z_style)
         return self.decoder(z_content, style_emb)
 
@@ -1299,7 +1287,6 @@ class UnlearningVAE(LightningModule):
 
         # Inférence avec style neutre
         z_style_zero = torch.zeros(x_norm.shape[0], self.vae.style_embedder.net[0].in_features, device=x_norm.device)
-        x_hat_neutral_norm = self.vae.decode(self.vae.content_norm(z_content), z_style_zero, x_norm)
         x_hat_neutral_norm = self.vae.decode(self.vae.content_norm(z_content), z_style_zero)
         suv_neutral = self._denormalize(x_hat_neutral_norm)
 
