@@ -80,7 +80,7 @@ def kl_loss_spatial(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     logvar = torch.clamp(logvar, min=-30.0, max=20.0)
     return 0.5 * torch.sum(
         mu.pow(2) + logvar.exp() - 1.0 - logvar,
-        dim=[1, 2, 3],
+        dim=list(range(1, mu.dim())),
     )
 
 
@@ -754,8 +754,11 @@ Mécanisme de désapprentissage (Dinsdale) :
 class SpatialDomainClassifier(nn.Module):
     def __init__(self, channels: int, num_domains: int, hidden_dim: int = 128, spatial_dims: int = 3):
         super().__init__()
+        self.pool = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")(1)
+        self.flatten = nn.Flatten()
+        
         self.net = nn.Sequential(
-            nn.Linear(channels * 2, hidden_dim),
+            nn.Linear(channels, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -765,11 +768,7 @@ class SpatialDomainClassifier(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C, H, W, D)
-        x_flat = x.view(x.size(0), x.size(1), -1)
-        avg_f = x_flat.mean(dim=-1)
-        std_f = x_flat.std(dim=-1)
-        features = torch.cat([avg_f, std_f], dim=1)
+        features = self.flatten(self.pool(x))
         return self.net(features)
 
 class DomainClassifier(nn.Module):

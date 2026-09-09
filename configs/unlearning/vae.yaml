@@ -31,8 +31,7 @@ vae:
     kernel_sizes:         [3, 3, 3, 3]
     # OLD: strides: [1, 2, 2, 2]
     strides:              [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]]
-    # OLD: latent_channels: 1
-    latent_channels:      8
+    latent_channels:      256
     style_channels:       256
     style_embedding_dim:  256      # aligné sur style_channels (pas d'upscaling)
     num_residual_blocks:  1
