@@ -47,18 +47,14 @@ def main(args):
         save_dir = os.path.join(os.path.curdir, config.get("dir_name"), current_time)
         os.makedirs(save_dir, exist_ok=True)
 
-
         # Sauvegarde de la config complète dans le dossier run
         OmegaConf.save(config, os.path.join(save_dir, "config.yaml"))
 
         # --- Traçabilité : Sauvegarde du code ---
         code_dir = os.path.join(save_dir, "code_snapshot")
         os.makedirs(code_dir, exist_ok=True)
-        # 1. Le script d'entrainement lui-même
         shutil.copy(__file__, os.path.join(code_dir, os.path.basename(__file__)))
-        # 2. Le modèle VAE
         shutil.copy("pet_harmonization/models/harmonization_vae.py", os.path.join(code_dir, "harmonization_vae.py"))
-        # 3. Le datamodule
         shutil.copy("pet_harmonization/data.py", os.path.join(code_dir, "data.py"))
         logger.info(f"Code source sauvegardé dans {code_dir} pour traçabilité.")
         # ----------------------------------------

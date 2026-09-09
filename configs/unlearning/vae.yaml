@@ -56,6 +56,7 @@ pipeline:
 
     beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
     kl_content_weight:     5.0e-7   # régularisation KL sur z_content spatial
+    kl_style_weight:       5.0e-7   # régularisation KL sur z_style 1D
     ssim_weight:           0.5      # poids de la loss SSIM dans la reconstruction
     max_epochs:            100
 
