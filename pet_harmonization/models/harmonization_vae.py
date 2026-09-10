@@ -122,6 +122,10 @@ class BifurcatedContentStyleEncoder(nn.Module):
         self.depth = len(hidden_channels)
         self.num_residual_blocks = num_residual_blocks
 
+        AdaptiveAvgPool = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")
+        self.pool = AdaptiveAvgPool(1)
+        self.flatten = nn.Flatten()
+
         attention_type = (
             attention_type if isinstance(attention_type, list)
             else [attention_type] * self.depth
@@ -231,6 +235,8 @@ class BifurcatedContentStyleEncoder(nn.Module):
             BasicBlock(spatial_dims, 2 * latent_channels, 2 * latent_channels, kernel_size=1)
         )
         self.style_head   = BasicBlock(spatial_dims, hidden_channels[-1], 2 * style_channels, kernel_size=1)
+        
+
 
     def forward(
         self, x: torch.Tensor
