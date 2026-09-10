@@ -754,6 +754,17 @@ Mécanisme de désapprentissage (Dinsdale) :
 class SpatialDomainClassifier(nn.Module):
     def __init__(self, channels: int, num_domains: int, hidden_dim: int = 128, spatial_dims: int = 3):
         super().__init__()
+        
+        Conv = getattr(nn, f"Conv{spatial_dims}d")
+        self.conv_extractor = nn.Sequential(
+            Conv(channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(32, channels),
+            nn.SiLU(),
+            Conv(channels, channels, kernel_size=1, bias=False),
+            nn.GroupNorm(32, channels),
+            nn.SiLU()
+        )
+        
         self.pool = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")(1)
         self.flatten = nn.Flatten()
         
@@ -768,6 +779,7 @@ class SpatialDomainClassifier(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv_extractor(x)
         features = self.flatten(self.pool(x))
         return self.net(features)
 
