@@ -685,11 +685,12 @@ class DisentangledHarmonizationVAE(nn.Module):
         x_source: torch.Tensor,
         x_style_ref: Optional[torch.Tensor] = None,
         z_style_fixed: Optional[torch.Tensor] = None,
-        style_dropout_p: Optional[float] = None,
-        alpha_style: float = 1.0
+        alpha_style: float = 0.0
     ) -> torch.Tensor:
         """
         alpha_style permet d'introduire le style petit à petit à l'inférence.
+        alpha_style = 0.0 : Harmonisation totale (style neutre / 0)
+        alpha_style = 1.0 : Pas d'harmonisation (garde le style source ou ref)
         """
         (mu_c, logvar_c), (mu_s, logvar_s) = self.encode(x_source)
         
@@ -700,14 +701,8 @@ class DisentangledHarmonizationVAE(nn.Module):
         elif x_style_ref is not None:
             _, (mu_s_ref, _) = self.encode(x_style_ref)
             z_style = mu_s_ref
-        elif style_dropout_p is not None and style_dropout_p > 0.0:
-            mask    = (torch.rand(mu_s.shape[0], 1, device=mu_s.device) > style_dropout_p).float()
-            z_style = mu_s * mask
         else:
-            z_style = torch.zeros(
-                x_source.shape[0], self.style_embedder.net[0].in_features,
-                device=x_source.device, dtype=x_source.dtype,
-            )
+            z_style = mu_s
 
         # Mixage de style
         z_style = alpha_style * z_style

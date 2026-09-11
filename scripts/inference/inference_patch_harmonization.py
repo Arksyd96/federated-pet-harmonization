@@ -30,7 +30,7 @@ def load_style(style_path: str, device: torch.device) -> torch.Tensor:
     return style
 
 
-def infer_patch(model_type: str, model, patch_src: torch.Tensor, style: torch.Tensor = None):
+def infer_patch(model_type: str, model, patch_src: torch.Tensor, style: torch.Tensor = None, alpha: float = 0.0):
     patch_norm = model._normalize(patch_src)
     
     if style is not None:
@@ -45,7 +45,7 @@ def infer_patch(model_type: str, model, patch_src: torch.Tensor, style: torch.Te
             patch_norm, 
             x_style_ref=None, 
             z_style_fixed=style, 
-            style_dropout_p=0.95
+            alpha_style=alpha
         )
         patch_pred = model._denormalize(patch_pred_norm)
         
@@ -77,6 +77,7 @@ def process_subject(
     length_loader: int,
     spatial_dims: int = 2,
     z_style_fixed: torch.Tensor = None,
+    alpha: float = 0.0,
     patch_size: tuple = (64, 64, 64),
     patch_overlap: tuple = (32, 32, 32),
     filename: str = None,
@@ -123,7 +124,7 @@ def process_subject(
                 aggregator.add_batch(patch_pred_tio, locations)
                 continue
             
-            patch_pred = infer_patch(model_type, model, patch_src, z_style_fixed)
+            patch_pred = infer_patch(model_type, model, patch_src, z_style_fixed, alpha)
             
             if spatial_dims == 2:
                 patch_pred_tio = patch_pred.unsqueeze(1) # revient à (B, 1, D, H, W)
@@ -146,6 +147,7 @@ if __name__ == "__main__":
     parser.add_argument('--model-type', type=str, required=True, choices=['stargan', 'vae', 'unet-skip', 'unet-iffn', 'standard-vae'])
     parser.add_argument('--style-ref', '-s', type=str, required=False, default=None)
     parser.add_argument('--filename', '-f', type=str, required=False, default=None)
+    parser.add_argument('--alpha', type=float, required=False, default=0.0, help='Style interpolation factor (0.0 = full harmonization, 1.0 = original style)')
     parser.add_argument('--spatial-dims', type=int, required=False, default=2, choices=[2, 3])
     parser.add_argument('--patch-overlap', '-o', type=int, nargs=3, required=False, default=(32, 32, 32))
     parser.add_argument('--override', action='store_true')
@@ -201,7 +203,7 @@ if __name__ == "__main__":
                 print("⚠️ Aucun style fourni — utilisation d'un vecteur neutre (zéros).")
                 z_style_fixed = torch.zeros(1, style_dim, device=device)
             elif args.model_type == 'vae':
-                print("⚠️ Aucun style fourni — utilisation d'un vecteur neutre (à 0.95 du style original).")
+                print(f"⚠️ Aucun style fourni — harmonisation avec alpha={args.alpha}.")
                 z_style_fixed = None
 
     datamodule = MultiDomainUnlearningDataModule(**config.get('datamodule', {}))
@@ -220,6 +222,7 @@ if __name__ == "__main__":
             length_loader=len(loader),
             spatial_dims=args.spatial_dims,
             z_style_fixed=z_style_fixed,
+            alpha=args.alpha,
             patch_size=config.get('datamodule', {}).get('patch_size', (5, 64, 64)),
             patch_overlap=args.patch_overlap,
             filename=args.filename,
