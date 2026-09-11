@@ -1,0 +1,48 @@
+=> Nantes
+==================================================
+📋 RÉSUMÉ DES MÉTADONNÉES POUR LE TABLEAU
+==================================================
+➤ PET/CT Scanner(s) : SIEMENS Biograph64_Vision 600
+➤ Acquisition period : 2026--2026
+➤ Injection-to-acquisition time (min) : 69.8 ± 10.6
+➤ Injected activity (MBq/kg) : 3.00 ± 0.08
+
+➤ PET Reconstruction algorithms :
+   - PSF+TOF 4i5s
+
+➤ Reconstructed voxel size, PET (mm³) : 1.65x1.65x1.65
+➤ Reconstructed voxel size, CT (mm³)  : 0.98x0.98x3.00
+==================================================
+
+
+=> Rennes
+==================================================
+➤ PET/CT Scanner(s) : SIEMENS Biograph20, SIEMENS Biograph20_mCT
+➤ Acquisition period : 2021--2021
+➤ Injection-to-acquisition time (min) : 68.2 ± 9.6
+➤ Injected activity (MBq/kg) : 3.03 ± 0.20
+
+➤ PET Reconstruction algorithms :
+   - OSEM3D+TOF 2i21s
+   - PSF+TOF 2i21s
+
+➤ Reconstructed voxel size, PET (mm³) : 4.07x4.07x2.03
+➤ Reconstructed voxel size, CT (mm³)  : 0.98x0.98x3.00
+
+
+=> CHB
+==================================================
+==================================================
+📋 RÉSUMÉ DES MÉTADONNÉES POUR LE TABLEAU (CHB)
+==================================================
+➤ PET/CT Scanner(s) : GE MEDICAL SYSTEMS Discovery 710
+➤ Acquisition period : 2018--2019
+➤ Injection-to-acquisition time (min) : 76.5 ± 7.3
+➤ Injected activity (MBq/kg) : 2.99 ± 0.21
+
+➤ PET Reconstruction algorithms :
+   - VPFXS
+
+➤ Reconstructed voxel size, PET (mm³) : 2.73x2.73x3.27
+➤ Reconstructed voxel size, CT (mm³)  : 1.25x1.25x3.75, 0.98x0.98x3.75
+==================================================

@@ -48,4 +48,3 @@ Pour assurer la reproductibilité face aux nombreux changements d'architecture, 
 1. `train_unlearning_harmonization_vae.py`
 2. `harmonization_vae.py`
 3. `data.py` (DataModule)
-
