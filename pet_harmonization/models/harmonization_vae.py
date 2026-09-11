@@ -1033,7 +1033,7 @@ class UnlearningVAE(LightningModule):
         # STAGE 1 — Warmup
         # ══════════════════════════════════════════════════════════════════════
         if is_stage_1:
-            x_hat, kl_vars_c, kl_vars_s, z_content, z_style = self.vae.forward(x, sample_posterior=True)
+            x_hat, kl_vars_c, kl_vars_s, z_content, z_style = self.vae.forward(x, sample_posterior=True, style_dropout_p=0.05)
             mu_c, logvar_c = kl_vars_c
             mu_s, logvar_s = kl_vars_s
 
@@ -1087,7 +1087,7 @@ class UnlearningVAE(LightningModule):
         # STAGE 2 — Unlearning (3 étapes dissociées)
         # ══════════════════════════════════════════════════════════════════════
         else:
-            x_hat, kl_vars_c, kl_vars_s, z_content, z_style = self.vae.forward(x, sample_posterior=True)
+            x_hat, kl_vars_c, kl_vars_s, z_content, z_style = self.vae.forward(x, sample_posterior=True, style_dropout_p=0.05)
             mu_c, logvar_c = kl_vars_c
             mu_s, logvar_s = kl_vars_s
 
@@ -1382,7 +1382,7 @@ class StandardHarmonizationVAE(LightningModule):
 
         # Forward avec les mêmes probabilités de dropout que l'original
         x_hat, (mu_content, logvar_content), (mu_style, logvar_style), _, _ = self.vae(
-            x, sample_posterior=True, style_dropout_p=0.
+            x, sample_posterior=True, style_dropout_p=0.05
         )
 
         # Calcul des losses standards
