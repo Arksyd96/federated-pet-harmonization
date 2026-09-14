@@ -670,12 +670,20 @@ class DisentangledHarmonizationVAE(nn.Module):
         # 2. Normalisation du Content pour supprimer les stats de style
         z_content_norm = self.content_norm(z_content)
         
+        z_style_dec = z_style
         if self.training and style_dropout_p > 0.0:
-            mask    = (torch.rand(z_style.shape[0], 1, device=z_style.device) > style_dropout_p).float()
-            z_style = z_style * mask
+            # Option B (CFG) : Masque global pour l'image (désactive 100% du vecteur pour p% des images)
+            mask_cfg = (torch.rand(z_style.shape[0], 1, device=z_style.device) > style_dropout_p).float()
+            
+            # Option A (Ton idée) : Masque local (désactive aléatoirement 10% des valeurs du vecteur)
+            # Note : on fixe arbitrairement à 10% la probabilité locale
+            mask_local = (torch.rand_like(z_style) > 0.10).float()
+            
+            # Option C : Combinaison des deux
+            z_style_dec = z_style * mask_local * mask_cfg
 
         # 3. Décodage
-        x_hat = self.decode(z_content_norm, z_style)
+        x_hat = self.decode(z_content_norm, z_style_dec)
 
         return x_hat, (mu_c, logvar_c), (mu_s, logvar_s), z_content, z_style
 
@@ -1221,7 +1229,16 @@ class UnlearningVAE(LightningModule):
         chance_level      = 1.0 / self.num_domains
         content_acc_excess = (content_acc - chance_level).clamp(min=0.0)
         style_acc_deficit  = (1.0 - style_acc).clamp(min=0.0)   # on pénalise si style_acc chute
-        composite_score    = loss_rec + 0.1 * content_acc_excess + 0.1 * style_acc_deficit
+        is_stage_1 = self.current_epoch < self.warmup_epochs
+        
+        if is_stage_1:
+            # En stage 1, on veut bonne reconstruction ET bonnes classifications
+            content_acc_deficit = (1.0 - content_acc).clamp(min=0.0)
+            style_acc_deficit   = (1.0 - style_acc).clamp(min=0.0)
+            composite_score = loss_rec + 0.1 * content_acc_deficit + 0.1 * style_acc_deficit
+        else:
+            # En stage 2, on exige le désapprentissage (content_acc proche du hasard)
+            composite_score = loss_rec + 0.1 * content_acc_excess + 0.1 * style_acc_deficit
 
         self._log_dict({
             "val/rec_loss":        loss_rec,
