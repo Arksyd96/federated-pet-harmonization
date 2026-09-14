@@ -54,8 +54,8 @@ pipeline:
     warmup_epochs:         25       # stage 1 : apprendre la tâche + classifieurs
 
     beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
-    kl_content_weight:     5.0e-7   # régularisation KL sur z_content spatial
-    kl_style_weight:       5.0e-7   # régularisation KL sur z_style 1D
+    kl_content_weight:     1.0e-5   # régularisation KL sur z_content spatial
+    kl_style_weight:       1.0e-5   # régularisation KL sur z_style 1D
     ssim_weight:           0.5      # poids de la loss SSIM dans la reconstruction
     max_epochs:            100
 
@@ -86,7 +86,7 @@ trainer:
     devices:             1
     log_every_n_steps:   1
     min_epochs:          20
-    max_epochs:          120
+    max_epochs:          200
     check_val_every_n_epoch: 1
     num_sanity_val_steps: 0
     limit_train_batches: 250

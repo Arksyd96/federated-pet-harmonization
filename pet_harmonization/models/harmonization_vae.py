@@ -122,8 +122,8 @@ class BifurcatedContentStyleEncoder(nn.Module):
         self.depth = len(hidden_channels)
         self.num_residual_blocks = num_residual_blocks
 
-        AdaptiveAvgPool = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")
-        self.pool = AdaptiveAvgPool(1)
+        AdaptiveMaxPool = getattr(nn, f"AdaptiveMaxPool{spatial_dims}d")
+        self.pool = AdaptiveMaxPool(1)
         self.flatten = nn.Flatten()
 
         attention_type = (
@@ -685,7 +685,8 @@ class DisentangledHarmonizationVAE(nn.Module):
         # 3. Décodage
         x_hat = self.decode(z_content_norm, z_style_dec)
 
-        return x_hat, (mu_c, logvar_c), (mu_s, logvar_s), z_content, z_style
+        # On retourne z_content_norm pour que les classifieurs n'aient pas de shortcut sur la moyenne
+        return x_hat, (mu_c, logvar_c), (mu_s, logvar_s), z_content_norm, z_style
 
     @torch.no_grad()
     def harmonize(
@@ -756,7 +757,7 @@ Mécanisme de désapprentissage (Dinsdale) :
 class SpatialDomainClassifier(nn.Module):
     def __init__(self, channels: int, num_domains: int, hidden_dim: int = 128, spatial_dims: int = 3):
         super().__init__()
-        self.pool = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")(1)
+        self.pool = getattr(nn, f"AdaptiveMaxPool{spatial_dims}d")(1)
         self.flatten = nn.Flatten()
         
         self.net = nn.Sequential(
@@ -1066,7 +1067,7 @@ class UnlearningVAE(LightningModule):
             # Classifieurs — graphe complet (pas de detach), les deux apprennent
             # style et s_content sont déterministes (taille style_channels)
             logits_style   = self.style_classifier(z_style)
-            logits_content = self.content_classifier(z_content)
+            logits_content = self.content_classifier(z_content) # Déjà normalisé par le forward
 
             loss_dm_style   = F.cross_entropy(logits_style, domain_labels)
             loss_dm_content = F.cross_entropy(logits_content, domain_labels)
@@ -1074,9 +1075,9 @@ class UnlearningVAE(LightningModule):
 
             total_loss = loss_classifiers + loss_vae
 
-            opt_vae.zero_grad()
-            opt_style_clf.zero_grad()
-            opt_content_clf.zero_grad()
+            opt_vae.zero_grad(set_to_none=True)
+            opt_style_clf.zero_grad(set_to_none=True)
+            opt_content_clf.zero_grad(set_to_none=True)
             self.manual_backward(total_loss)
             opt_vae.step()
             opt_style_clf.step()
@@ -1085,6 +1086,7 @@ class UnlearningVAE(LightningModule):
             self._log_dict({
                 "train/rec_loss":         loss_rec,
                 "train/kl_content":       loss_kl_content,
+                "train/kl_style":         loss_kl_style,
                 "train/dm_style":         loss_dm_style,
                 "train/dm_content":       loss_dm_content,
                 "train/ssim":             loss_ssim,
@@ -1095,7 +1097,12 @@ class UnlearningVAE(LightningModule):
         # STAGE 2 — Unlearning (3 étapes dissociées)
         # ══════════════════════════════════════════════════════════════════════
         else:
-            x_hat, kl_vars_c, kl_vars_s, z_content, z_style = self.vae.forward(x, sample_posterior=True, style_dropout_p=0.10)
+            # Étape A : On s'assure que tout l'encodeur est entraînable pour affiner l'extraction (Option 1)
+            self.vae.content_style_encoder.train()
+            for p in self.vae.content_style_encoder.parameters():
+                p.requires_grad = True
+
+            x_hat, kl_vars_c, kl_vars_s, z_content_norm, z_style = self.vae.forward(x, sample_posterior=True, style_dropout_p=0.10)
             mu_c, logvar_c = kl_vars_c
             mu_s, logvar_s = kl_vars_s
 
@@ -1121,7 +1128,7 @@ class UnlearningVAE(LightningModule):
                 loss_dm_style_for_vae
             )
 
-            opt_vae.zero_grad()
+            opt_vae.zero_grad(set_to_none=True)
             self.manual_backward(loss_vae)
             opt_vae.step()
 
@@ -1132,35 +1139,45 @@ class UnlearningVAE(LightningModule):
                 p.requires_grad = False
                 
             z_style_det = z_style.detach()
-            z_content_det = z_content.detach()
+            z_content_norm_det = z_content_norm.detach()
 
             for _ in range(self.k_style_steps):
                 logits_style_det   = self.style_classifier(z_style_det)
                 loss_dm_style      = F.cross_entropy(logits_style_det, domain_labels)
-                opt_style_clf.zero_grad()
+                opt_style_clf.zero_grad(set_to_none=True)
                 self.manual_backward(loss_dm_style)
                 torch.nn.utils.clip_grad_norm_(self.style_classifier.parameters(), max_norm=1.0)
                 opt_style_clf.step()
             
-            logits_content_det = self.content_classifier(z_content_det)
+            logits_content_det = self.content_classifier(z_content_norm_det)
             loss_dm_content = F.cross_entropy(logits_content_det, domain_labels)
-            opt_content_clf.zero_grad()
+            opt_content_clf.zero_grad(set_to_none=True)
             self.manual_backward(loss_dm_content)
             torch.nn.utils.clip_grad_norm_(self.content_classifier.parameters(), max_norm=1.0)
             opt_content_clf.step()
 
             # ── Étape C : confusion loss (encodeur seul) ─────────────────────
             self.vae.content_style_encoder.train()
+            
+            # Réactiver les gradients pour tout l'encodeur
             for p in self.vae.content_style_encoder.parameters():
                 p.requires_grad = True
+                
+            # STOP GRADIENT directionnel sur le tronc
+            # On fige le tronc uniquement pour cette étape pour bloquer la confusion loss.
+            for p in self.vae.content_style_encoder.fft_filter.parameters():
+                p.requires_grad = False
+            for p in self.vae.content_style_encoder.input_conv.parameters():
+                p.requires_grad = False
 
             (mu_c_conf, logvar_c_conf), _ = self.vae.encode(x)
             z_content_conf = reparameterize(mu_c_conf, logvar_c_conf)
             
-            logits_content_conf = self.content_classifier(z_content_conf)
+            z_content_norm_conf = self.vae.content_norm(z_content_conf)
+            logits_content_conf = self.content_classifier(z_content_norm_conf)
             loss_confusion = self.beta_confusion * self._confusion_loss_spatial(logits_content_conf)
 
-            opt_unlearn.zero_grad()
+            opt_unlearn.zero_grad(set_to_none=True)
             self.manual_backward(loss_confusion)
             torch.nn.utils.clip_grad_norm_(self._encoder_parameters(), max_norm=1.0)
             opt_unlearn.step()
@@ -1169,6 +1186,7 @@ class UnlearningVAE(LightningModule):
             self._log_dict({
                 "train/rec_loss":     loss_rec,
                 "train/kl_content":   loss_kl_content,
+                "train/kl_style":     loss_kl_style,
                 "train/dm_style":     loss_dm_style,
                 "train/ssim":         loss_ssim,
                 "train/dm_content":   loss_dm_content,
@@ -1190,7 +1208,7 @@ class UnlearningVAE(LightningModule):
         bs = x.shape[0]
 
         # ── Forward VAE ───────────────────────────────────────────────────────
-        x_hat, kl_vars_c, kl_vars_s, z_content, z_style = self.vae.forward(x, sample_posterior=False, style_dropout_p=0.0)
+        x_hat, kl_vars_c, kl_vars_s, z_content_norm, z_style = self.vae.forward(x, sample_posterior=False, style_dropout_p=0.0)
         mu_c, logvar_c = kl_vars_c
         mu_s, logvar_s = kl_vars_s
 
@@ -1208,7 +1226,7 @@ class UnlearningVAE(LightningModule):
 
         # ── Classifieurs (sur les modes, pas d'échantillonnage) ───────────────
         logits_style   = self.style_classifier(z_style)
-        logits_content = self.content_classifier(z_content)
+        logits_content = self.content_classifier(z_content_norm)
 
         loss_dm_style   = F.cross_entropy(logits_style,   domain_labels)
         loss_dm_content = F.cross_entropy(logits_content, domain_labels)
@@ -1254,7 +1272,7 @@ class UnlearningVAE(LightningModule):
         }, bs)
 
         if batch_idx == 0:
-            self._log_images(x, x_hat, suv_source, z_content)
+            self._log_images(x, x_hat, suv_source, z_content_norm)
 
         return loss_rec
 
@@ -1291,7 +1309,7 @@ class UnlearningVAE(LightningModule):
         x_norm: torch.Tensor,
         x_hat_norm: torch.Tensor,
         suv_source: torch.Tensor,
-        z_content: torch.Tensor,
+        z_content_norm: torch.Tensor,
     ):
         """Log WandB : Source vs Recon vs Harmonized (z_style=0)."""
         if self.trainer.global_rank != 0:
@@ -1301,7 +1319,7 @@ class UnlearningVAE(LightningModule):
 
         # Inférence avec style neutre
         z_style_zero = torch.zeros(x_norm.shape[0], self.vae.style_embedder.net[0].in_features, device=x_norm.device)
-        x_hat_neutral_norm = self.vae.decode(self.vae.content_norm(z_content), z_style_zero)
+        x_hat_neutral_norm = self.vae.decode(z_content_norm, z_style_zero)
         suv_neutral = self._denormalize(x_hat_neutral_norm)
 
         if suv_source.ndim == 5:
@@ -1432,7 +1450,7 @@ class StandardHarmonizationVAE(LightningModule):
         bs = x.shape[0]
 
         # Forward d'évaluation (dropout activé comme dans l'original pour forcer l'usage du content)
-        x_hat, (mu_content, logvar_content), (mu_style, logvar_style), _, _ = self.vae(
+        x_hat, (mu_content, logvar_content), (mu_style, logvar_style), z_content_norm, z_style = self.vae(
             x, sample_posterior=False, style_dropout_p=0.95
         )
 
@@ -1455,7 +1473,7 @@ class StandardHarmonizationVAE(LightningModule):
         self.log("val/composite_score", composite_score, batch_size=bs, sync_dist=True, prog_bar=True)
 
         if batch_idx == 0:
-            self._log_images(x, x_hat, suv_source, z_content)
+            self._log_images(x, x_hat, suv_source)
 
         return loss_rec
 
