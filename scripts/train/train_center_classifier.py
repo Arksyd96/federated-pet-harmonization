@@ -180,7 +180,8 @@ class VAEEncoderClassifier(nn.Module):
             latent_channels=latent_channels,
             style_channels=256, # Inutilisé mais requis par super()
             spatial_dims=3,
-            use_fft=use_fft
+            use_fft=use_fft,
+            normalization=('batch', {}) # TEST BATCHNORM AU LIEU DE GROUPNORM
         )
         
         # EXACTEMENT le même fully connected que le PatchResNet3D
@@ -256,7 +257,7 @@ class CenterClassifier(LightningModule):
                 num_classes=num_domains,
                 use_fft=use_fft,
                 fft_sigma=fft_sigma,
-                latent_channels=8
+                latent_channels=256  # MATCHING RESNET CHANNELS
             )
         else:
             raise ValueError(f"Architecture inconnue: {architecture}")
