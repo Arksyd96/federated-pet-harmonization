@@ -116,11 +116,13 @@ class BifurcatedContentStyleEncoder(nn.Module):
         use_residual_block: bool = True,
         learnable_interpolation: bool = True,
         attention_type: Union[str, List[str]] = 'none',
+        use_fft: bool = True
     ):
         super().__init__()
 
         self.depth = len(hidden_channels)
         self.num_residual_blocks = num_residual_blocks
+        self.use_fft = use_fft
 
         AdaptiveMaxPool = getattr(nn, f"AdaptiveMaxPool{spatial_dims}d")
         self.pool = AdaptiveMaxPool(1)
@@ -133,13 +135,14 @@ class BifurcatedContentStyleEncoder(nn.Module):
         ConvBlock = UnetResBlock if use_residual_block else UnetBasicBlock
 
         # ── FFT Filter ────────────────────────────────────────────────────────
-        self.fft_filter = LearnableFFTHighPassFilter(
-            input_shape, in_channels=in_channels, sigma=fft_sigma, spatial_dims=spatial_dims
-        )
+        if self.use_fft:
+            self.fft_filter = LearnableFFTHighPassFilter(
+                input_shape, in_channels=in_channels, sigma=fft_sigma, spatial_dims=spatial_dims
+            )
 
         # ── In-Convolution (Tronc commun) ─────────────────────────────────────
         self.input_conv = BasicBlock(
-            spatial_dims, in_channels * 2, hidden_channels[0],
+            spatial_dims, in_channels * 2 if self.use_fft else in_channels, hidden_channels[0],
             kernel_size=kernel_sizes[0], stride=strides[0],
         )
 
@@ -250,8 +253,11 @@ class BifurcatedContentStyleEncoder(nn.Module):
         logvar_style    : (B, style_channels)
         """
         # ── Tronc commun ─────────────────────────────────────────────────────
-        fft_x = self.fft_filter(x)
-        h_shared = self.input_conv(torch.cat([x, fft_x], dim=1))  
+        if self.use_fft:
+            fft_x = self.fft_filter(x)
+            h_shared = self.input_conv(torch.cat([x, fft_x], dim=1))
+        else:
+            h_shared = self.input_conv(x)
         
         # ── Branche Content ──────────────────────────────────────────────────
         h_c = h_shared
@@ -597,7 +603,8 @@ class DisentangledHarmonizationVAE(nn.Module):
         dropout: float = 0.0,
         use_residual_block: bool = True,
         learnable_interpolation: bool = True,
-        attention_type: Union[str, List[str]] = 'none'
+        attention_type: Union[str, List[str]] = 'none',
+        use_fft: bool = True
     ):
         super().__init__()
 
@@ -622,6 +629,7 @@ class DisentangledHarmonizationVAE(nn.Module):
             in_channels=in_channels,
             latent_channels=latent_channels,
             style_channels=style_channels,
+            use_fft=use_fft,
             **self.shared_kwargs,
         )
         

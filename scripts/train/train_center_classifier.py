@@ -15,6 +15,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 from pet_harmonization.data import MultiDomainUnlearningDataModule
 from pet_harmonization.models.fft import LearnableFFTHighPassFilter
+from pet_harmonization.models.harmonization_vae import BifurcatedContentStyleEncoder
 from pet_harmonization.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -44,8 +45,9 @@ CONFIG = {
     },
 
     # Modèle
+    "architecture": "vae_encoder", # 'resnet' ou 'vae_encoder'
     "in_channels": 1,       # 1 = image seule, 2 = image + FFT
-    "use_fft": False,        # Concatène les features FFT en entrée
+    "use_fft": False,       # Concatène les features FFT en entrée
     "fft_sigma": 7.5,
     "fft_learnable": False, # False = filtre fixe (pas de gradient)
 
@@ -59,7 +61,7 @@ CONFIG = {
 
     # WandB / Sauvegarde
     "project_name": "federated-pet",
-    "run_name": "Center Classifier (ResNet3D) — Baseline",
+    "run_name": "Center Classifier (VAE Encoder) — Baseline",
     "save_dir": "runs/site_classifier/",
 }
 
@@ -129,6 +131,78 @@ class PatchResNet3D(nn.Module):
         return self.classifier(x)
 
 
+
+class ContentOnlyEncoder(BifurcatedContentStyleEncoder):
+    """
+    Enfant de BifurcatedContentStyleEncoder qui supprime totalement la branche style
+    pour économiser de la VRAM et se concentrer uniquement sur la branche contenu.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Suppression de la branche style
+        del self.style_encoder_blocks
+        del self.style_middle_block
+        del self.style_head
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # ── Tronc commun ─────────────────────────────────────────────────────
+        if self.use_fft:
+            fft_x = self.fft_filter(x)
+            h_shared = self.input_conv(torch.cat([x, fft_x], dim=1))
+        else:
+            h_shared = self.input_conv(x)
+        
+        # ── Branche Content ──────────────────────────────────────────────────
+        h_c = h_shared
+        for block in self.content_encoder_blocks:
+            h_c = block(h_c, None)
+        h_c = self.content_middle_block(h_c, None)
+
+        # ── Content head ─────────────────────────────────────────────────────
+        moments_c = self.content_head(h_c)
+        mu_c, _ = moments_c.chunk(2, dim=1) # On ne prend que mu (déterministe)
+        
+        return mu_c
+
+
+class VAEEncoderClassifier(nn.Module):
+    def __init__(self, in_channels: int, num_classes: int, use_fft: bool = False, fft_sigma: float = 7.5, latent_channels: int = 8):
+        super().__init__()
+        
+        # Extracteur de features (Encodeur VAE sans le style)
+        self.encoder = ContentOnlyEncoder(
+            input_shape=(16, 64, 64),
+            fft_sigma=fft_sigma,
+            in_channels=in_channels,
+            hidden_channels=[32, 64, 128, 256],
+            kernel_sizes=[3, 3, 3, 3],
+            strides=[1, 2, 2, 2],
+            latent_channels=latent_channels,
+            style_channels=256, # Inutilisé mais requis par super()
+            spatial_dims=3,
+            use_fft=use_fft
+        )
+        
+        # EXACTEMENT le même fully connected que le PatchResNet3D
+        self.pool = nn.AdaptiveAvgPool3d(1)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(latent_channels, 128),
+            nn.SiLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, num_classes),
+        )
+        
+    def forward(self, x):
+        # Extraction (mu_c uniquement)
+        mu_c = self.encoder(x)
+        
+        # Pooling et classification identiques au ResNet
+        pooled = self.pool(mu_c)
+        logits = self.classifier(pooled)
+        return logits
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Module Lightning
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -136,6 +210,7 @@ class PatchResNet3D(nn.Module):
 class CenterClassifier(LightningModule):
     def __init__(
         self,
+        architecture: str = "resnet",
         num_domains: int = 5,
         in_channels: int = 1,
         use_fft: bool = True,
@@ -152,10 +227,12 @@ class CenterClassifier(LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.use_fft = use_fft
+        self.architecture = architecture
 
-        # FFT optionnel
+        # Note: L'architecture VAE Encoder gère sa propre FFT en interne via use_fft.
+        # Pour le ResNet, on doit l'ajouter explicitement ici si demandé.
         actual_in_channels = in_channels
-        if use_fft:
+        if use_fft and architecture == "resnet":
             self.fft_filter = LearnableFFTHighPassFilter(
                 input_shape=input_shape,
                 in_channels=in_channels,
@@ -164,22 +241,32 @@ class CenterClassifier(LightningModule):
                 spatial_dims=3,
             )
             if not fft_learnable:
-                # Figer complètement les poids
                 for p in self.fft_filter.parameters():
                     p.requires_grad = False
-            actual_in_channels = in_channels * 2  # concat(X, FFT(X))
+            actual_in_channels = in_channels * 2
 
-        self.model = PatchResNet3D(
-            in_channels=actual_in_channels,
-            num_classes=num_domains,
-        )
+        if architecture == "resnet":
+            self.model = PatchResNet3D(
+                in_channels=actual_in_channels,
+                num_classes=num_domains,
+            )
+        elif architecture == "vae_encoder":
+            self.model = VAEEncoderClassifier(
+                in_channels=in_channels,
+                num_classes=num_domains,
+                use_fft=use_fft,
+                fft_sigma=fft_sigma,
+                latent_channels=8
+            )
+        else:
+            raise ValueError(f"Architecture inconnue: {architecture}")
 
     def _normalize(self, suv: torch.Tensor) -> torch.Tensor:
         log = torch.log1p(suv)
         return 2.0 * (log.clamp(0, self.suv_global_log_max) / self.suv_global_log_max) - 1.0
 
     def forward(self, x):
-        if self.use_fft:
+        if self.use_fft and self.architecture == "resnet":
             fft_x = self.fft_filter(x)
             x = torch.cat([x, fft_x], dim=1)
         return self.model(x)
@@ -229,6 +316,7 @@ def main():
 
     # ── Modèle ────────────────────────────────────────────────────────────
     model = CenterClassifier(
+        architecture=cfg["architecture"],
         num_domains=cfg["num_domains"],
         in_channels=cfg["in_channels"],
         use_fft=cfg["use_fft"],
