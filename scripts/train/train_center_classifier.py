@@ -15,7 +15,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 from pet_harmonization.data import MultiDomainUnlearningDataModule
 from pet_harmonization.models.fft import LearnableFFTHighPassFilter
-from pet_harmonization.models.harmonization_vae import BifurcatedContentStyleEncoder
+from pet_harmonization.models.harmonization_vae import BifurcatedContentStyleEncoder, DisentangledHarmonizationVAE
 from pet_harmonization.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -131,60 +131,33 @@ class PatchResNet3D(nn.Module):
         return self.classifier(x)
 
 
-
-class ContentOnlyEncoder(BifurcatedContentStyleEncoder):
-    """
-    Enfant de BifurcatedContentStyleEncoder qui supprime totalement la branche style
-    pour économiser de la VRAM et se concentrer uniquement sur la branche contenu.
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Suppression de la branche style
-        del self.style_encoder_blocks
-        del self.style_middle_block
-        del self.style_head
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # ── Tronc commun ─────────────────────────────────────────────────────
-        if self.use_fft:
-            fft_x = self.fft_filter(x)
-            h_shared = self.input_conv(torch.cat([x, fft_x], dim=1))
-        else:
-            h_shared = self.input_conv(x)
-        
-        # ── Branche Content ──────────────────────────────────────────────────
-        h_c = h_shared
-        for block in self.content_encoder_blocks:
-            h_c = block(h_c, None)
-        h_c = self.content_middle_block(h_c, None)
-
-        # ── Content head ─────────────────────────────────────────────────────
-        moments_c = self.content_head(h_c)
-        mu_c, _ = moments_c.chunk(2, dim=1) # On ne prend que mu (déterministe)
-        
-        return mu_c
-
-
-class VAEEncoderClassifier(nn.Module):
+class GlobalVAEClassifier(nn.Module):
     def __init__(self, in_channels: int, num_classes: int, use_fft: bool = False, fft_sigma: float = 7.5, latent_channels: int = 8):
         super().__init__()
         
-        # Extracteur de features (Encodeur VAE sans le style)
-        self.encoder = ContentOnlyEncoder(
+        # Hyperparamètres identiques au YAML complet
+        hidden_channels = [32, 64, 128, 256]
+        strides = [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]]
+        normalization = ('batch', {})
+        
+        # ── 1. VAE Global Complet (Encodeur bifurqué + Embedder + Décodeur AdaIN)
+        self.vae = DisentangledHarmonizationVAE(
             input_shape=(16, 64, 64),
             fft_sigma=fft_sigma,
             in_channels=in_channels,
-            hidden_channels=[32, 64, 128, 256],
+            out_channels=in_channels,
+            hidden_channels=hidden_channels,
             kernel_sizes=[3, 3, 3, 3],
-            strides=[1, 2, 2, 2],
+            strides=strides,
             latent_channels=latent_channels,
-            style_channels=256, # Inutilisé mais requis par super()
+            style_channels=256,
+            style_embedding_dim=256,
             spatial_dims=3,
             use_fft=use_fft,
-            normalization=('batch', {}) # TEST BATCHNORM AU LIEU DE GROUPNORM
+            normalization=normalization
         )
         
-        # EXACTEMENT le même fully connected que le PatchResNet3D
+        # ── 2. Classifieur de domaine sur mu_c ────────────────────────────────
         self.pool = nn.AdaptiveAvgPool3d(1)
         self.classifier = nn.Sequential(
             nn.Flatten(),
@@ -195,13 +168,15 @@ class VAEEncoderClassifier(nn.Module):
         )
         
     def forward(self, x):
-        # Extraction (mu_c uniquement)
-        mu_c = self.encoder(x)
+        # Forward du VAE global (sample_posterior=False pour obtenir mu_c et mu_s déterministes)
+        x_hat, kl_vars_c, kl_vars_s, z_content, z_style = self.vae(x, sample_posterior=False)
+        mu_c, logvar_c = kl_vars_c
         
-        # Pooling et classification identiques au ResNet
+        # Classification du domaine à partir du contenu
         pooled = self.pool(mu_c)
         logits = self.classifier(pooled)
-        return logits
+        
+        return logits, x_hat
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -221,6 +196,8 @@ class CenterClassifier(LightningModule):
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
         suv_global_log_max: float = 6.0,
+        rec_weight: float = 1.0,     # Poids de la loss de reconstruction totale
+        ssim_weight: float = 0.5,    # Poids du SSIM dans la rec_loss
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -229,6 +206,12 @@ class CenterClassifier(LightningModule):
         self.weight_decay = weight_decay
         self.use_fft = use_fft
         self.architecture = architecture
+        self.rec_weight = rec_weight
+        self.ssim_weight = ssim_weight
+
+        if architecture == "vae_encoder":
+            from torchmetrics.image import StructuralSimilarityIndexMeasure
+            self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
 
         # Note: L'architecture VAE Encoder gère sa propre FFT en interne via use_fft.
         # Pour le ResNet, on doit l'ajouter explicitement ici si demandé.
@@ -252,12 +235,12 @@ class CenterClassifier(LightningModule):
                 num_classes=num_domains,
             )
         elif architecture == "vae_encoder":
-            self.model = VAEEncoderClassifier(
+            self.model = GlobalVAEClassifier(
                 in_channels=in_channels,
                 num_classes=num_domains,
                 use_fft=use_fft,
                 fft_sigma=fft_sigma,
-                latent_channels=256  # MATCHING RESNET CHANNELS
+                latent_channels=8
             )
         else:
             raise ValueError(f"Architecture inconnue: {architecture}")
@@ -276,14 +259,37 @@ class CenterClassifier(LightningModule):
         suv = batch["source"][tio.DATA].float()
         domain_labels = batch["domain_id"]
 
+        if suv.ndim == 5 and suv.shape[1] == 1:
+            suv = suv.squeeze(1)
+
         x = self._normalize(suv)
         bs = x.shape[0]
 
-        logits = self(x)
-        loss = F.cross_entropy(logits, domain_labels)
-        acc = (logits.argmax(dim=1) == domain_labels).float().mean()
+        if self.architecture == "vae_encoder":
+            logits, x_hat = self(x)
+            loss_clf = F.cross_entropy(logits, domain_labels)
+            
+            # La cible de reconstruction est x (1 canal). 
+            # (La concaténation FFT est faite en interne du VAE mais il reconstruit 1 seul canal)
+            x_target_01 = (x.clamp(-1, 1) + 1.0) / 2.0
+            x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
+            
+            loss_l1 = F.l1_loss(x_hat, x)
+            loss_ssim = 1.0 - self.ssim(x_hat_01, x_target_01)
+            loss_rec = loss_l1 + self.ssim_weight * loss_ssim
+            
+            loss = loss_clf + self.rec_weight * loss_rec
+            
+            self.log(f"{prefix}/ce_loss", loss_clf, batch_size=bs, prog_bar=True, sync_dist=True)
+            self.log(f"{prefix}/rec_loss", loss_rec, batch_size=bs, prog_bar=True, sync_dist=True)
+            self.log(f"{prefix}/l1_loss", loss_l1, batch_size=bs)
+            self.log(f"{prefix}/ssim_loss", loss_ssim, batch_size=bs)
+        else:
+            logits = self(x)
+            loss = F.cross_entropy(logits, domain_labels)
+            self.log(f"{prefix}/ce_loss", loss, batch_size=bs, prog_bar=True, sync_dist=True)
 
-        self.log(f"{prefix}/ce_loss", loss, batch_size=bs, prog_bar=True, sync_dist=True)
+        acc = (logits.argmax(dim=1) == domain_labels).float().mean()
         self.log(f"{prefix}/accuracy", acc, batch_size=bs, prog_bar=True, sync_dist=True)
         return loss
 
