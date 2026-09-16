@@ -15,7 +15,14 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 from pet_harmonization.data import MultiDomainUnlearningDataModule
 from pet_harmonization.models.fft import LearnableFFTHighPassFilter
-from pet_harmonization.models.harmonization_vae import BifurcatedContentStyleEncoder, DisentangledHarmonizationVAE
+from pet_harmonization.models.harmonization_vae import (
+    BifurcatedContentStyleEncoder,
+    StyleEmbedder,
+    StyleConditionedDecoder,
+    kl_loss_spatial,
+    kl_loss_1d,
+    reparameterize
+)
 from pet_harmonization.utils import set_seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -53,7 +60,7 @@ CONFIG = {
 
     # Entraînement
     "lr": 1e-4,
-    "weight_decay": 1e-5,
+    "weight_decay": 1e-6,
     "max_epochs": 100,
     "precision": "bf16-mixed",
     "limit_train_batches": 250,
@@ -132,32 +139,43 @@ class PatchResNet3D(nn.Module):
 
 
 class GlobalVAEClassifier(nn.Module):
-    def __init__(self, in_channels: int, num_classes: int, use_fft: bool = False, fft_sigma: float = 7.5, latent_channels: int = 8):
+    def __init__(self, in_channels: int, num_classes: int, use_fft: bool = False, fft_sigma: float = 7.5, latent_channels: int = 16):
         super().__init__()
         
-        # Hyperparamètres identiques au YAML complet
-        hidden_channels = [32, 64, 128, 256]
-        strides = [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]]
-        normalization = ('batch', {})
-        
-        # ── 1. VAE Global Complet (Encodeur bifurqué + Embedder + Décodeur AdaIN)
-        self.vae = DisentangledHarmonizationVAE(
+        # ── 1. Encodeur complet ───────────────────────────────────────────────
+        self.encoder = BifurcatedContentStyleEncoder(
             input_shape=(16, 64, 64),
             fft_sigma=fft_sigma,
             in_channels=in_channels,
-            out_channels=in_channels,
-            hidden_channels=hidden_channels,
+            hidden_channels=[32, 64, 128, 256],
             kernel_sizes=[3, 3, 3, 3],
-            strides=strides,
+            strides=[[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]],
             latent_channels=latent_channels,
             style_channels=256,
-            style_embedding_dim=256,
             spatial_dims=3,
             use_fft=use_fft,
-            normalization=normalization
+            normalization=('batch', {})
         )
         
-        # ── 2. Classifieur de domaine sur mu_c ────────────────────────────────
+        # ── 2. Décodeur et conditionnement de style ───────────────────────────
+        self.content_norm = nn.InstanceNorm3d(latent_channels, affine=False)
+        self.style_embedder = StyleEmbedder(
+            style_channels=256,
+            style_embedding_dim=256,
+        )
+        self.decoder = StyleConditionedDecoder(
+            latent_channels=latent_channels,
+            out_channels=in_channels,
+            style_embedding_dim=256,
+            hidden_channels=[32, 64, 128, 256],
+            kernel_sizes=[3, 3, 3, 3],
+            strides=[[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]],
+            spatial_dims=3,
+            normalization=('instance', {}),
+            use_fft=use_fft
+        )
+
+        # ── 3. Classifieur de domaine sur mu_c ────────────────────────────────
         self.pool = nn.AdaptiveAvgPool3d(1)
         self.classifier = nn.Sequential(
             nn.Flatten(),
@@ -168,15 +186,27 @@ class GlobalVAEClassifier(nn.Module):
         )
         
     def forward(self, x):
-        # Forward du VAE global (sample_posterior=False pour obtenir mu_c et mu_s déterministes)
-        x_hat, kl_vars_c, kl_vars_s, z_content, z_style = self.vae(x, sample_posterior=False)
+        # 1. Encodage
+        kl_vars_c, kl_vars_s = self.encoder(x)
         mu_c, logvar_c = kl_vars_c
+        mu_s, logvar_s = kl_vars_s
         
-        # Classification du domaine à partir du contenu
+        # 2. Reparamétrisation (sampling de l'espace latent avec la variance)
+        z_c = reparameterize(mu_c, logvar_c)
+        z_s = reparameterize(mu_s, logvar_s)
+        
+        # 3. Normalisation du contenu & Embedding du style
+        z_c_norm = self.content_norm(z_c)
+        style_emb = self.style_embedder(z_s)
+        
+        # 4. Reconstruction
+        x_hat = self.decoder(z_c_norm, style_emb)
+        
+        # 5. Classification (se fait usuellement sur mu_c, l'espérance, pour être stable)
         pooled = self.pool(mu_c)
         logits = self.classifier(pooled)
         
-        return logits, x_hat
+        return logits, x_hat, mu_c, logvar_c, mu_s, logvar_s
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -196,8 +226,9 @@ class CenterClassifier(LightningModule):
         lr: float = 1e-4,
         weight_decay: float = 1e-5,
         suv_global_log_max: float = 6.0,
-        rec_weight: float = 1.0,     # Poids de la loss de reconstruction totale
-        ssim_weight: float = 0.5,    # Poids du SSIM dans la rec_loss
+        kld_weight: float = 1e-5,
+        rec_weight: float = 1.0,     # Poids de la reconstruction
+        ssim_weight: float = 0.5,    # Poids du SSIM dans la reconstruction
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -206,6 +237,7 @@ class CenterClassifier(LightningModule):
         self.weight_decay = weight_decay
         self.use_fft = use_fft
         self.architecture = architecture
+        self.kld_weight = kld_weight
         self.rec_weight = rec_weight
         self.ssim_weight = ssim_weight
 
@@ -240,10 +272,10 @@ class CenterClassifier(LightningModule):
                 num_classes=num_domains,
                 use_fft=use_fft,
                 fft_sigma=fft_sigma,
-                latent_channels=8
+                latent_channels=16
             )
         else:
-            raise ValueError(f"Architecture inconnue: {architecture}")
+            raise ValueError(f"Architecture inconnue : {architecture}")
 
     def _normalize(self, suv: torch.Tensor) -> torch.Tensor:
         log = torch.log1p(suv)
@@ -259,18 +291,24 @@ class CenterClassifier(LightningModule):
         suv = batch["source"][tio.DATA].float()
         domain_labels = batch["domain_id"]
 
-        if suv.ndim == 5 and suv.shape[1] == 1:
-            suv = suv.squeeze(1)
+        # Suppression du squeeze(1) qui transformait (B, 1, D, H, W) en (B, D, H, W).
+        # PyTorch Conv3d interprétait (B, D, H, W) comme un tenseur non-batché (C, D, H, W)
+        # ce qui faisait que C devenait égal au batch size (ex: 16) !
 
         x = self._normalize(suv)
         bs = x.shape[0]
 
         if self.architecture == "vae_encoder":
-            logits, x_hat = self(x)
+            logits, x_hat, mu_c, logvar_c, mu_s, logvar_s = self(x)
+            
             loss_clf = F.cross_entropy(logits, domain_labels)
             
-            # La cible de reconstruction est x (1 canal). 
-            # (La concaténation FFT est faite en interne du VAE mais il reconstruit 1 seul canal)
+            # KLD loss
+            loss_kl_content = kl_loss_spatial(mu_c, logvar_c).mean()
+            loss_kl_style = kl_loss_1d(mu_s, logvar_s).mean()
+            loss_kl = loss_kl_content + loss_kl_style
+            
+            # Reconstruction loss (x_target is always 1 channel)
             x_target_01 = (x.clamp(-1, 1) + 1.0) / 2.0
             x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
             
@@ -278,19 +316,27 @@ class CenterClassifier(LightningModule):
             loss_ssim = 1.0 - self.ssim(x_hat_01, x_target_01)
             loss_rec = loss_l1 + self.ssim_weight * loss_ssim
             
-            loss = loss_clf + self.rec_weight * loss_rec
+            # Total loss = CE + KLD + Rec
+            loss = loss_clf + self.kld_weight * loss_kl + self.rec_weight * loss_rec
             
             self.log(f"{prefix}/ce_loss", loss_clf, batch_size=bs, prog_bar=True, sync_dist=True)
+            self.log(f"{prefix}/kl_loss", loss_kl, batch_size=bs, prog_bar=True, sync_dist=True)
             self.log(f"{prefix}/rec_loss", loss_rec, batch_size=bs, prog_bar=True, sync_dist=True)
             self.log(f"{prefix}/l1_loss", loss_l1, batch_size=bs)
             self.log(f"{prefix}/ssim_loss", loss_ssim, batch_size=bs)
+            
         else:
+            # Mode ResNet standard
             logits = self(x)
-            loss = F.cross_entropy(logits, domain_labels)
-            self.log(f"{prefix}/ce_loss", loss, batch_size=bs, prog_bar=True, sync_dist=True)
+            loss_clf = F.cross_entropy(logits, domain_labels)
+            loss = loss_clf
+            self.log(f"{prefix}/ce_loss", loss_clf, batch_size=bs, prog_bar=True, sync_dist=True)
 
-        acc = (logits.argmax(dim=1) == domain_labels).float().mean()
+        pred = logits.argmax(dim=1)
+        acc = (pred == domain_labels).float().mean()
+        self.log(f"{prefix}/loss", loss, batch_size=bs, prog_bar=True, sync_dist=True)
         self.log(f"{prefix}/accuracy", acc, batch_size=bs, prog_bar=True, sync_dist=True)
+
         return loss
 
     def training_step(self, batch, batch_idx):
@@ -361,6 +407,7 @@ def main():
         accelerator="gpu",
         devices=1,
         max_epochs=cfg["max_epochs"],
+        gradient_clip_val=1.0,  # 🚨 FIX NaN: Empêche l'explosion des gradients de l'AdaIN
         log_every_n_steps=1,
         check_val_every_n_epoch=1,
         num_sanity_val_steps=0,
