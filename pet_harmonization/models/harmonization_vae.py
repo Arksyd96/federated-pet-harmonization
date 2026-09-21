@@ -230,7 +230,21 @@ class BifurcatedContentStyleEncoder(nn.Module):
         )
         self.style_head   = BasicBlock(spatial_dims, hidden_channels[-1], 2 * style_channels, kernel_size=1)
         
-
+    def _init_weights(self, m):
+        classname = m.__class__.__name__
+        if classname.find("Conv") != -1 and hasattr(m, 'weight') and m.weight is not None:
+            nn.init.normal_(m.weight.data, mean=0.0, std=0.02)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias.data, 0.0)
+        elif classname.find("Norm") != -1 and hasattr(m, 'weight') and m.weight is not None:
+            # Batch/Instance/Group/Layer Norm
+            nn.init.normal_(m.weight.data, mean=1.0, std=0.02)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias.data, 0.0)
+        elif classname.find("Linear") != -1 and hasattr(m, 'weight') and m.weight is not None:
+            nn.init.normal_(m.weight.data, mean=0.0, std=0.02)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias.data, 0.0)
 
     def forward(
         self, x: torch.Tensor
