@@ -352,7 +352,7 @@ class PatchResNet3D(nn.Module):
 
 
 class GlobalVAEClassifier(nn.Module):
-    def __init__(self, in_channels: int, num_classes: int, use_fft: bool = False, fft_sigma: float = 7.5, latent_channels: int = 16):
+    def __init__(self, in_channels: int, num_classes: int, use_fft: bool = False, fft_sigma: float = 7.5, latent_channels: int = 64):
         super().__init__()
         
         hidden_channels = [32, 64, 128, 256]
