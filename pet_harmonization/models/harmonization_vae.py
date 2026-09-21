@@ -610,6 +610,10 @@ class DisentangledHarmonizationVAE(nn.Module):
         """Retourne ((mu_c, logvar_c), (mu_s, logvar_s)) issus de l'encodeur bifurqué."""
         return self.content_style_encoder(x)
 
+    def decode(self, z_content: torch.Tensor, z_style: torch.Tensor):
+        """Décodage à partir de z_content et z_style."""
+        style_emb = self.style_embedder(z_style)
+        return self.decoder(z_content, style_emb)
 
     def forward(self, x: torch.Tensor, sample_posterior: bool = True, style_dropout_p: float = 0.0):
         (mu_c, logvar_c), (mu_s, logvar_s) = self.encode(x)
@@ -634,8 +638,7 @@ class DisentangledHarmonizationVAE(nn.Module):
             z_style_dec = z_style * mask_local # * mask_cfg
 
         # 3. Décodage
-        style_emb  = self.style_embedder(z_style_dec)
-        x_hat = self.decoder(z_content_norm, style_emb)
+        x_hat = self.decode(z_content_norm, z_style_dec)
 
         return x_hat, (mu_c, logvar_c), (mu_s, logvar_s), z_content, z_style
 
