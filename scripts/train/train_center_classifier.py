@@ -677,7 +677,7 @@ def main():
         accelerator="gpu",
         devices=1,
         max_epochs=cfg["max_epochs"],
-        gradient_clip_val=1.0,  # 🚨 FIX NaN: Empêche l'explosion des gradients de l'AdaIN
+        gradient_clip_val=1.0,
         log_every_n_steps=1,
         check_val_every_n_epoch=1,
         num_sanity_val_steps=0,

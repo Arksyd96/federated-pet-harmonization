@@ -21,7 +21,7 @@ from pet_harmonization.models.base import (
     UnetBasicBlock,
     UnetResBlock,
     SequentialEmb,
-    save_add,
+    save_add
 )
 
 from pet_harmonization.models.attention import Attention, zero_module
@@ -586,10 +586,6 @@ class DisentangledHarmonizationVAE(nn.Module):
         
         InstanceNorm = getattr(nn, f"InstanceNorm{spatial_dims}d")
         self.content_norm = InstanceNorm(latent_channels, affine=False)
-        
-        AdaptiveAvgPool = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")
-        self.pool    = AdaptiveAvgPool(1)
-        self.flatten = nn.Flatten()
 
         self.style_embedder = StyleEmbedder(
             style_channels=style_channels,
@@ -1010,7 +1006,7 @@ class UnlearningVAE(LightningModule):
             opt_style_clf.zero_grad(set_to_none=True)
             opt_content_clf.zero_grad(set_to_none=True)
             self.manual_backward(total_loss)
-            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5.0)
+
             opt_vae.step()
             opt_style_clf.step()
             opt_content_clf.step()
