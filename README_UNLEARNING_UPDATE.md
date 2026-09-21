@@ -191,4 +191,94 @@ Si on retire l'IN du chemin du classifieur, il faut empêcher la triche par mean
 - Appliquer du spectral normalization sur les couches de l'encodeur
 
 **5. Tester BatchNorm3d vs GroupNorm dans la branche content de l'encodeur**
-Le ResNet qui réussit utilise `BatchNorm3d`. L'encodeur VAE utilise `GroupNorm(32)`. Changer la normalisation de l'encodeur impacte tout (reconstruction, KL, style), mais c'est un différenciateur direct entre les deux architectures. À tester en dernier car c'est le changement le plus invasif.
+Le ResNet qui réussit utilise `BatchNorm3d`. L'encodeur VAE utilise `GroupNorm(32)`. Changer la normalisation de l'encodeur impacte tout (reconstruction, KL, style), mais c'est un différenciateur direct entre les deux architectures. À tester en dernier car c'est le changement le plus invasif.---
+
+## 9. Historique des tests d'ablation sur le classifieur (Sandbox) - 17 Sept. 2026
+
+Pour isoler la cause de l'échec de la classification du domaine, nous avons utilisé `train_center_classifier.py` comme script "bac à sable" (sandbox). L'idée était de déconstruire le pipeline et d'ajouter les contraintes une par une pour observer à quel moment le réseau perdait sa capacité à trouver la signature du scanner.
+
+**1. Test de l'encodeur pur (sans KLD, sans reconstruction)**
+Nous avons branché le `BifurcatedContentStyleEncoder` directement sur un classifieur simple (`AdaptiveAvgPool3d` + MLP).
+*Résultat observé* : Le réseau classifiait très bien les centres (~80% d'accuracy). L'encodeur seul est donc tout à fait capable de trouver la signature.
+
+**2. Test avec ajout de la KLD seule (sans décodeur)**
+L'hypothèse était que la KLD écrasait peut-être le signal. Nous avons retiré la reconstruction et gardé uniquement la KLD avec `latent_channels = 8`.
+*Résultat observé* : La Cross-Entropy de classification restait bloquée autour de 1.0 (aléatoire = 1.6). Le réseau n'arrivait plus à optimiser. La KLD agissait comme un goulot d'étranglement beaucoup trop strict qui détruisait la variance du scanner.
+
+**3. Ajustement de la KLD et de la taille de l'espace latent**
+Pour donner plus d'"air" au réseau, nous avons testé :
+- Une KLD beaucoup plus faible (`1e-5`).
+- Un espace latent plus grand (`latent_channels = 16`).
+*Résultat observé* : La classification s'est remise à converger correctement.
+
+**4. Réintroduction de la Reconstruction (L1 + SSIM)**
+Avec un encodeur capable de classifier sous faible KLD, nous avons rebranché le décodeur et ajouté la loss de reconstruction à la loss totale.
+*Résultat observé* : L'optimisation a de nouveau stagné. L'accuracy s'est effondrée. 
+*Analyse* : L'ajout de la reconstruction a créé un goulot d'étranglement compétitif ("gradient starvation"). Le gradient de reconstruction (calculé sur l'image entière) a totalement écrasé le gradient du classifieur.
+
+**5. Tentatives d'équilibrage des poids (Classifieur vs Reconstruction)**
+Face à cet écrasement, nous avons envisagé de multiplier le poids de la loss de classification par 10 (`clf_weight = 10.0`), et de baisser encore la KLD (`1e-6`).
+
+**6. Élargissement final de l'espace latent (Test en cours)**
+L'utilisateur a eu l'idée de relâcher encore plus le goulot d'étranglement en passant `latent_channels` à 24 (ce qui donne un ratio de compression de 5.33x pour des patchs de 65536 voxels vers 12288 features). 
+*Résultat observé* : Cette simple augmentation d'espace a suffi à améliorer drastiquement la classification, même avec la reconstruction activée. 
+*Action* : Puisque le goulot est désormais assez large pour laisser passer les deux signaux, l'utilisateur a proposé de remettre le multiplicateur de classification (`clf_weight`) à 1.0 pour ne pas détériorer inutilement la reconstruction.
+
+**7. Discussion sur la position du classifieur**
+Une question ouverte a été soulevée : *Ne serait-il pas plus simple de classifier la couche précédente (`h_c` à 256 canaux), juste avant la projection vers l'espace latent ?*
+*Réflexion* : Bien que cela donne énormément de bande passante au classifieur, cela comporte un risque de "Representation Smuggling". Si on classifie seulement `h_c`, la dernière couche de projection n'est entraînée que par le décodeur. Ce dernier pourrait agir comme une boucle (loop) qui cherche l'infime résidu de signature de scanner resté dans `h_c` et l'amplifie pour le glisser dans le latent. Le fait de classifier exactement le goulot (`z_c` ou `mu_c`), combiné au bruit de la KLD, agit comme une barrière mathématique qui détruit ces résidus (théorème de l'Information). Il reste à déterminer expérimentalement si la classification de l'espace latent (élargi à 24) suffira.
+
+**8. Test de la classification sur `h_c` (256 canaux, avant la projection `content_head`)**
+Nous avons modifié la classe locale `BifurcatedContentStyleEncoder` pour qu'elle retourne aussi `h_c` (le feature map à 256 canaux, juste avant la projection `content_head` vers `latent_channels`). Le classifieur a été branché sur `h_c` au lieu de `mu_c`. La config utilisée : `latent_channels = 24`, `clf_weight = 1.0`, `kld_weight = 1e-6`, `rec_weight = 1.0`.
+*Résultat observé* : L'optimisation fonctionne bien, la classification détecte la signature et l'accuracy monte, bien que le démarrage soit assez lent. Ce n'est peut-être pas la configuration "idéale" car elle ne reproduit pas fidèlement la véritable architecture finale (où la confusion se fait sur `mu_c`).
+*Note sur l'espace latent* : L'utilisation de `h_c` avec `latent_channels=24` a bien fonctionné, mais dans cette configuration la taille de l'espace latent ne contraint pas le classifieur. Si nous devons revenir sur `h_c` à l'avenir, il sera plus propre de remettre `latent_channels=16` (ratio de compression de 8x) pour comparer.
+*Décision* : Nous mettons l'approche `h_c` de côté pour l'instant. Nous retournons sur la classification de `mu_c` (la cible idéale) pour tenter de trouver la bonne formule d'équilibrage avec le décodeur et la classification du style. Si tout échoue, `h_c` restera notre solution de repli (fallback).
+
+**9. Plan de tests itératifs sur `mu_c` (En cours)**
+L'objectif est de faire cohabiter la classification de domaine sur `mu_c` (avec une haute accuracy) et la reconstruction (L1+SSIM) sans que cette dernière n'écrase les gradients du classifieur. Nous avons restauré le script dans un état de base (`latent_channels=16`, `clf_weight=1.0`, `kld_weight=1e-6`, avec classification simultanée du style sur `mu_s`). 
+
+Voici la feuille de route des tests, en isolant une seule variable à la fois :
+
+- **Test A — Warmup progressif de la reconstruction (L'approche "Douceur")** :
+  - *L'idée* : Plutôt que de désactiver totalement la reconstruction, nous appliquons un curriculum learning. Le poids de la reconstruction (`rec_weight`) démarre à `0.1` à l'epoch 0, et augmente linéairement jusqu'à `1.0` sur `warmup_epochs` epochs.
+  - *Objectif* : Laisser le classifieur s'installer dans l'espace latent pendant les premières epochs, tout en permettant au décodeur d'apprendre la topologie spatiale doucement.
+  - *Note sur la KLD* : L'idée de baisser la KLD à `1e-7` a été discutée pour relâcher encore la pression, mais nous avons décidé de la maintenir à `1e-6` pour préserver un espace latent suffisamment structuré, quitte à adapter si le warmup seul ne suffit pas.
+
+- **Test B — L'approche "Force" (Boost du classifieur)** :
+  - Si le Test A échoue (l'accuracy s'effondre quand la reconstruction approche 1.0), nous testerons un poids de classification très élevé (`clf_weight = 10.0` ou `50.0`) avec `latent_channels=16` pour que le gradient de classification résiste par la force brute.
+
+- **Test C — L'élargissement de l'espace latent** :
+  - Tester `latent_channels = 32` ou `48` si l'espace à 16 canaux s'avère physiquement trop petit pour contenir à la fois l'anatomie (reconstruction) et la signature du scanner.
+
+- **Test D (Fallback) — Retour sur `h_c`** :
+  - Si aucune configuration sur `mu_c` ne permet de maintenir l'accuracy face à la reconstruction, nous reprendrons la classification sur `h_c` (qui a fait ses preuves au point 8), en utilisant `latent_channels=16`.
+
+**10. Constat d'échec sur la généralisation et reprise à zéro (17 Sept. 18h30)**
+*Observation critique* : En surveillant l'accuracy de validation, nous avons constaté que l'encodeur VAE (même avec latent_channels=32 et clf_weight=10.0) souffre d'un grave problème de mémorisation/overfitting. Il apprend parfaitement à classifier le *train set*, mais s'effondre sur le *val set*.
+*Analyse* : L'architecture PatchResNet3D d'origine généralisait bien, ce paramètre de validation a été sous-estimé lors de nos tests précédents. Le problème n'est donc pas seulement la capacité (le goulot), mais aussi ce qui cause cet overfitting massif dans le chemin de l'encodeur VAE.
+*Action* : Annulation des tests en cours. Nous redémarrons le cycle d'ablation depuis le point de départ absolu.
+
+### Nouvelle Roadmap d'Ablation Stricte (Train + Val)
+1. **Étape 1 (En cours)** : Lancer le PatchResNet3D pur. Vérifier les courbes d'accuracy Train vs Val pour établir la ligne de base (baseline) de généralisation.
+2. **Étape 2** : Remplacer l'architecture ResNet par le BifurcatedContentStyleEncoder pur (sans KLD, sans décodeur). Observer si l'overfitting apparaît à cause des couches convolutives ou de l'architecture de l'encodeur.
+3. **Étape 3** : Ajouter la KLD (1e-6). Observer l'impact du bruit sur la généralisation.
+4. **Étape 4** : Ajouter le décodeur et la reconstruction (avec warmup progressif si nécessaire).
+
+**11. Validation de l'encodeur pur et reprise de l'ablation (17 Sept. 18h45)**
+*Observation* : Un run précédent utilisant uniquement l'encodeur VAE (BifurcatedContentStyleEncoder) sans le décodeur a montré une très bonne généralisation sur l'ensemble de validation ! Cela prouve que le problème d'overfitting n'est pas inhérent aux couches de l'encodeur ni à l'espace latent lui-même.
+*Action* : Nous passons à l'étape 2. Le script de test a été purgé de la reconstruction. Nous testons actuellement l'encodeur pur (branches content et style) soumis à la KLD (1e-6) avec un espace latent de 16 canaux. Si la généralisation tient bon, la prochaine étape sera de réintroduire le décodeur pour voir si c'est la compétition des gradients (ou l'architecture du décodeur) qui casse la généralisation.
+
+**12. Succès de l'encodeur pur et réintroduction du décodeur (18 Sept. 10h30)**
+*Observation* : Le test de l'encodeur pur (sans décodeur, KLD=1e-6, latent=16, initialisation Gaussienne) a généralisé à merveille : **~95% d'accuracy sur le Train ET le Val**. La KLD a fait un petit pic naturel sur les 4 premières itérations (provoqué par le bruit de départ) avant de se stabiliser, ce qui est parfaitement normal.
+*Conclusion majeure* : Le BifurcatedContentStyleEncoder avec ses 16 canaux est parfaitement capable de capturer et conserver la signature du scanner sans overfitter. Le problème réside donc exclusivement dans la compétition imposée par la reconstruction.
+*Action* : Passage à l'Étape 3. Nous réintroduisons le décodeur et la loss de reconstruction (L1 + SSIM) dans le script de test. Nous utilisons le système de warmup progressif de la reconstruction (ec_weight passe de 0.1 à 1.0 sur warmup_epochs) pour voir à quel moment exact la reconstruction écrase la classification (qui se fait toujours sur mu_c).
+
+**13. Instabilité due à la reconstruction et Ajustement (18 Sept. 13h50)**
+*Observation* : Lors de l'Étape 3 (réintroduction de la reconstruction avec warmup sur 10 epochs), l'accuracy d'entraînement monte à ~90%, mais l'accuracy de validation devient très instable (elle monte à 80% puis s'effondre de manière cyclique). Cette fluctuation coïncide avec la montée en puissance du poids de reconstruction qui vient écraser les gradients de classification.
+*Analyse* : Le Stage 1 de Dinsdale (qui correspond à ce qu'on teste) nécessite que l'encodeur sache classer *parfaitement* la signature avant de passer au Stage 2 (Unlearning). Un espace latent de 16 est trop étriqué pour survivre à la pleine puissance de la reconstruction. L'idée de superposer deux warmups (Dinsdale + reconstruction) devient complexe.
+*Action* : Passage à un espace latent plus large (latent_channels=32) et une KLD plus faible (1e-7) pour donner plus d'oxygène au classifieur. Le warmup_epochs de la reconstruction est étendu à 25 epochs pour correspondre à la durée totale du Stage 1 de Dinsdale. Si cela reste instable, nous envisagerons d'implémenter GradNorm pour gérer automatiquement la compétition sans hyperparamètres manuels.
+
+**14. Fluctuation persistante en Validation et Élargissement du Goulot (18 Sept. 15h55)**
+*Observation* : Avec latent_channels=32, kld=1e-7 et un warmup de 25 epochs, l'entraînement se passe bien (Train acc et Val style acc sont bonnes), mais l'accuracy "Val content" (la plus importante) continue de fluctuer. Le classifieur n'arrive toujours pas à ancrer une règle de décision généralisable face à la montée de la reconstruction.
+*Analyse* : Le goulot de 32 canaux est encore trop contraignant. Sous la pression de la reconstruction, le VAE priorise les détails anatomiques spécifiques aux patchs d'entraînement au détriment de la signature globale, ce qui détruit la généralisation du classifieur sur le set de validation.
+*Action* : Passage à l'Étape 5. Nous isolons la variable de la taille du goulot pour une ablation propre. On élargit le goulot à latent_channels=64. On remet la KLD à sa valeur standard de 1e-6 et on conserve le warmup de 25 epochs. L'objectif est de trouver la largeur minimale requise pour que la classification et la reconstruction cohabitent pacifiquement sur le set de validation.

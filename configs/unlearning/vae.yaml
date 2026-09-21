@@ -30,16 +30,15 @@ vae:
     out_channels:         1
     hidden_channels:      [32, 64, 128, 256]
     kernel_sizes:         [3, 3, 3, 3]
-    # OLD: strides: [1, 2, 2, 2]
     strides:              [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]]
-    latent_channels:      256
+    latent_channels:      64             # Modifié : de 256 à 64
     style_channels:       256
     style_embedding_dim:  256      # aligné sur style_channels (pas d'upscaling)
     num_residual_blocks:  1
     spatial_dims:         3
     normalization:
-    - group
-    - {num_groups: 32, affine: true}
+    - batch                              # Modifié : de group à batch (pour l'encodeur)
+    - {}
     activation:
     - swish
     - {}
@@ -52,16 +51,18 @@ vae:
 pipeline:
     num_domains:           5
     classifier_hidden_dim: 256
-    warmup_epochs:         25       # stage 1 : apprendre la tâche + classifieurs
+    warmup_epochs:         40       
 
     beta_confusion:        1.0      # poids confusion loss (désapprentissage z_content)
-    kl_content_weight:     1.0e-5   # régularisation KL sur z_content spatial
-    kl_style_weight:       1.0e-5   # régularisation KL sur z_style 1D
+    kl_content_weight:     5.0e-7   # Modifié : 1.0e-5 -> 5.0e-7
+    kl_style_weight:       5.0e-7   # Modifié : 1.0e-5 -> 5.0e-7
     ssim_weight:           0.5      # poids de la loss SSIM dans la reconstruction
-    max_epochs:            100
+    rec_weight:            1.0      
+    clf_weight:            1.0      
+    max_epochs:            150      
 
     lr_vae:                1.0e-4   # LR reconstruction
-    lr_classifiers:        1.0e-5   # LR classifieurs
+    lr_classifiers:        1.0e-5   # LR classifieurs (frein par rapport au VAE)
     lr_classifiers_final:  1.0e-6   # LR classifieurs (plus faible : désapprentissage doux)
     lr_unlearn:            1.0e-7   # LR confusion (plus faible : désapprentissage doux)
     lr_unlearn_final:      5.0e-6
@@ -73,12 +74,12 @@ pipeline:
 
 model_checkpoint:
     monitor: val/composite_score
+    filename: "stage{stage:.0f}-epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/style_acc:.3f}-content={val/content_acc:.3f}"
     every_n_epochs: 1
     save_last: true
     save_top_k: 5
     mode: min
     verbose: true
-    filename: "epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/style_acc:.3f}-content={val/content_acc:.3f}"
     auto_insert_metric_name: false
 
 trainer:
