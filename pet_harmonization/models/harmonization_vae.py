@@ -69,7 +69,7 @@ class SobelFilter(nn.Module):
 
 def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """Echantillonnage reparamétrisé : z = mu + eps * std."""
-    logvar = torch.clamp(logvar, min=-30.0, max=20.0)
+    logvar = torch.clamp(logvar, min=-20.0, max=10.0)
     std = torch.exp(0.5 * logvar)
     eps = torch.randn_like(mu)
     return mu + eps * std
@@ -77,7 +77,7 @@ def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
 
 def kl_loss_spatial(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """KL(q||N(0,I)) pour un posterior spatial (B, C, H, W). Retourne [B]."""
-    logvar = torch.clamp(logvar, min=-30.0, max=20.0)
+    logvar = torch.clamp(logvar, min=-20.0, max=10.0)
     return 0.5 * torch.sum(
         mu.pow(2) + logvar.exp() - 1.0 - logvar,
         dim=list(range(1, mu.dim())),
@@ -86,7 +86,7 @@ def kl_loss_spatial(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
 
 def kl_loss_1d(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """KL(q||N(0,I)) pour un posterior 1D (B, D). Retourne [B]."""
-    logvar = torch.clamp(logvar, min=-30.0, max=20.0)
+    logvar = torch.clamp(logvar, min=-20.0, max=10.0)
     return 0.5 * torch.sum(
         mu.pow(2) + logvar.exp() - 1.0 - logvar,
         dim=1,
@@ -1094,9 +1094,11 @@ class UnlearningVAE(LightningModule):
             opt_style_clf.zero_grad(set_to_none=True)
             opt_content_clf.zero_grad(set_to_none=True)
             self.manual_backward(total_loss)
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
             opt_vae.step()
             opt_style_clf.step()
             opt_content_clf.step()
+            
             train_style_acc = (logits_style.argmax(dim=1) == domain_labels).float().mean()
             train_content_acc = (logits_content.argmax(dim=1) == domain_labels).float().mean()
 
