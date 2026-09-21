@@ -1241,7 +1241,7 @@ if __name__ == "__main__":
         # WandB / Sauvegarde
         "project_name": "federated-pet",
         "run_name": "Center Classifier (VAE Encoder) — 64 Channels + Decoupled + Vibrant z_c",
-        "save_dir": "runs/site_classifier/",
+        "save_dir": "runs/sandbox-unlearn-vae/",
     }
 
     set_seed(cfg["seed"], workers=True)
