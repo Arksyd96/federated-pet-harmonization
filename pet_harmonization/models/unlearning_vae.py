@@ -41,60 +41,6 @@ torch.set_float32_matmul_precision('high')
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 
-CONFIG = {
-    "seed": 101,
-    "num_domains": 5,
-    "suv_global_log_max": 6.0,
-
-    # Datamodule (même config que le VAE)
-    "datamodule": {
-        "root_dir": "./data/PET-EARL/",
-        "split_config": [[60, 15], [60, 15], [0, 0], [60, 15], [60, 15], [60, 15]],
-        "batch_size": 16,
-        "patch_size": [16, 64, 64],
-        "num_workers": 24,
-        "queue_max_length": 4096,
-        "samples_per_volume": 64,
-    },
-
-    # Modèle
-    "input_shape": (16, 64, 64),
-    "in_channels": 1,               # 1 = image seule, 2 = image + FFT
-    "out_channels": 1,
-    "hidden_channels": [32, 64, 128, 256],
-    "kernel_sizes": [3, 3, 3, 3],
-    "strides": [[1, 2, 2], [1, 2, 2], [1, 2, 2], [1, 2, 2]],
-    "num_residual_blocks": 1,
-    "latent_channels": 64,
-    "style_channels": 256,
-    "use_fft": False,       # Concatène les features FFT en entrée
-    "fft_sigma": 7.5,
-    "fft_learnable": False, # False = filtre fixe (pas de gradient)
-
-    # Entraînement
-    "lr_vae": 1e-4,
-    "lr_clf": 1e-5,
-    "weight_decay": 1e-6,
-    "max_epochs": 120,
-    "precision": "bf16-mixed",
-    "limit_train_batches": 250,
-    "limit_val_batches": 50,
-    
-    # Paramètres d'ablation pour le classifieur
-    "clf_weight": 1.0,         # Poids de la classification
-    "kld_weight": 5e-7,        # Retour à 5e-7
-    "rec_weight": 1.0,         # Poids final de la reconstruction
-    "ssim_weight": 0.5,        # Poids du SSIM
-    "warmup_epochs": 40,       # Epochs pour le warmup progressif de la reconstruction (0.1 -> 1.0)
-    "k_style_steps": 2,
-    
-    # WandB / Sauvegarde
-    "project_name": "federated-pet",
-    "run_name": "Center Classifier (VAE Encoder) — 64 Channels + Decoupled + Vibrant z_c",
-    "save_dir": "runs/site_classifier/",
-}
-
-
 def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     """Echantillonnage reparamétrisé : z = mu + eps * std."""
     logvar = torch.clamp(logvar, min=-20.0, max=10.0)
@@ -155,7 +101,7 @@ class ContentStyleEncoder(nn.Module):
         in_channels: int = 5,
         hidden_channels: List[int] = [64, 128, 256, 512],
         kernel_sizes: List[int] = [3, 3, 3, 3],
-        strides: List[int] = [1, 2, 2, 2],
+        strides: List[int] = [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]],
         latent_channels: int = 64,
         style_channels: int = 256,
         num_residual_blocks: int = 1,
@@ -451,7 +397,7 @@ class StyleConditionedDecoder(nn.Module):
         out_channels:       int = 5,
         hidden_channels:    List[int] = [64, 128, 256, 512],
         kernel_sizes:       List[int] = [3, 3, 3, 3],
-        strides:            List[int] = [1, 2, 2, 2],
+        strides:            List[int] = [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]],
         style_embedding_dim: int = 256,
         num_residual_blocks: int = 1,
         spatial_dims:       int = 2,
@@ -591,7 +537,7 @@ class DisentangledVAE(nn.Module):
         out_channels: int = 1,
         hidden_channels: List[int] = [32, 64, 128, 256],
         kernel_sizes: List[int] = [3, 3, 3, 3],
-        strides: List[int] = [[1, 2, 2], [1, 2, 2], [1, 2, 2], [1, 2, 2]],
+        strides: List[int] = [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]],
         num_residual_blocks: int = 1,
         use_fft: bool = False, 
         fft_sigma: float = 7.5, 
@@ -682,7 +628,7 @@ class UnlearningVAE(LightningModule):
         in_channels: int = 1,
         hidden_channels: list = [32, 64, 128, 256],
         kernel_sizes: list = [3, 3, 3, 3],
-        strides: list = [[1, 2, 2], [1, 2, 2], [1, 2, 2], [1, 2, 2]],
+        strides: list = [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]],
         num_residual_blocks: int = 1,
         latent_channels: int = 64,
         style_channels: int = 256,
@@ -862,81 +808,442 @@ class UnlearningVAE(LightningModule):
     #     self.log("debug/lr_unlearn",     new_lr_unlearn, on_step=False, on_epoch=True)   
 
 
-    def _shared_step(self, batch, prefix: str):
-        suv = batch["source"][tio.DATA].float()
+
+    def on_train_epoch_start(self):
+        if self._is_warmup():
+            return
+        _, opt_style_clf, opt_content_clf, opt_unlearn = self.optimizers()
+        
+        new_lr_clf = self._cosine_lr(self.lrs["classifiers"], self.lr_classifiers_final)
+        for opt in [opt_style_clf, opt_content_clf]:
+            for pg in opt.param_groups:
+                pg["lr"] = new_lr_clf
+
+        new_lr_unlearn = self._cosine_lr(self.lrs["unlearn"], self.lr_unlearn_final)
+        for pg in opt_unlearn.param_groups:
+            pg["lr"] = new_lr_unlearn
+
+        self.log("debug/lr_classifiers", new_lr_clf,    on_step=False, on_epoch=True)
+        self.log("debug/lr_unlearn",     new_lr_unlearn, on_step=False, on_epoch=True)
+
+
+
+    def training_step(self, batch, batch_idx):
+        opt_vae, opt_style_clf, opt_content_clf, opt_unlearn = self.optimizers()
+
+        # ── Données ──────────────────────────────────────────────────────────
+        suv_source    = batch["source"][tio.DATA].float()
+        domain_labels = batch["domain_id"]          # LongTensor [B] ∈ {0, …, num_domains-1}
+
+        if self.spatial_dims == 2:
+            suv_source = suv_source.squeeze(1)
+
+        x  = self._normalize(suv_source)
+        bs = x.shape[0]
+        is_stage_1 = self.current_epoch < self.warmup_epochs
+
+        # ══════════════════════════════════════════════════════════════════════
+        # STAGE 1 — Warmup
+        # ══════════════════════════════════════════════════════════════════════
+        if is_stage_1:
+            x_hat, mu_c, logvar_c, mu_s, logvar_s, z_content, z_style = self.vae.forward(x)
+
+            # Classifieurs — graphe complet (pas de detach), les deux apprennent
+            logits_style   = self.style_classifier(z_style)
+            logits_content = self.content_classifier(z_content) # Déjà normalisé par le forward
+
+            loss_dm_style   = F.cross_entropy(logits_style, domain_labels)
+            loss_dm_content = F.cross_entropy(logits_content, domain_labels)
+            loss_classifiers = loss_dm_style + loss_dm_content
+
+            loss_kl_content = kl_loss_spatial(mu_c, logvar_c).mean()
+            loss_kl_style = kl_loss_1d(mu_s, logvar_s).mean()
+            loss_kl = loss_kl_content + loss_kl_style
+
+            # Losses de reconstruction
+            x_01     = (x.clamp(-1, 1) + 1.0) / 2.0
+            x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
+            
+            loss_l1 = F.l1_loss(x_hat, x)
+            loss_ssim = 1.0 - self.ssim(x_hat_01, x_01)
+            loss_rec = loss_l1 + self.ssim_weight * loss_ssim
+            
+            # Warmup progressif de la reconstruction
+            current_rec_weight = self._scheduled_rec_weight()
+            loss_vae = current_rec_weight * loss_rec + self.kld_weight * loss_kl
+
+            total_loss = self.clf_weight * loss_classifiers + loss_vae
+
+            opt_vae.zero_grad(set_to_none=True)
+            opt_style_clf.zero_grad(set_to_none=True)
+            opt_content_clf.zero_grad(set_to_none=True)
+            self.manual_backward(total_loss)
+            opt_vae.step()
+            opt_style_clf.step()
+            opt_content_clf.step()
+            
+            train_style_acc = (logits_style.argmax(dim=1) == domain_labels).float().mean()
+            train_content_acc = (logits_content.argmax(dim=1) == domain_labels).float().mean()
+
+            self._log_dict({
+                "train/rec_loss":         loss_rec,
+                "train/rec_weight":       torch.tensor(current_rec_weight, device=self.device),
+                "train/kl_content":       loss_kl_content,
+                "train/kl_style":         loss_kl_style,
+                "train/dm_style":         loss_dm_style,
+                "train/dm_content":       loss_dm_content,
+                "train/ssim":             loss_ssim,
+                "train/total":            total_loss,
+                "train/style_acc":        train_style_acc,
+                "train/content_acc":      train_content_acc,
+            }, bs)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # STAGE 2 — Unlearning (3 étapes dissociées)
+        # ══════════════════════════════════════════════════════════════════════
+        else:
+            # Étape A : On s'assure que tout l'encodeur est entraînable pour affiner l'extraction (Option 1)
+            self.vae.encoder.train()
+            for p in self.vae.encoder.parameters():
+                p.requires_grad = True
+
+            x_hat, mu_c, logvar_c, mu_s, logvar_s, z_content, z_style = self.vae.forward(x)
+
+            # Classifieurs — graphe complet (pas de detach), les deux apprennent
+            logits_style   = self.style_classifier(z_style)
+            loss_dm_style   = F.cross_entropy(logits_style, domain_labels)
+
+            loss_kl_content = kl_loss_spatial(mu_c, logvar_c).mean()
+            loss_kl_style = kl_loss_1d(mu_s, logvar_s).mean()
+            loss_kl = loss_kl_content + loss_kl_style
+
+            # SSIM attend des valeurs dans [0, 1]
+            x_01     = (x.clamp(-1, 1) + 1.0) / 2.0
+            x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
+            
+            loss_l1         = F.l1_loss(x_hat, x)
+            loss_ssim       = 1.0 - self.ssim(x_hat_01, x_01)
+            loss_rec        = loss_l1 + self.ssim_weight * loss_ssim
+
+            loss_vae = (
+                self.rec_weight * loss_rec +
+                self.kld_weight * loss_kl +
+                self.clf_weight * loss_dm_style
+            )
+
+            opt_vae.zero_grad(set_to_none=True)
+            self.manual_backward(loss_vae)
+            opt_vae.step()
+
+            # ── Étape B : mise à jour classifieurs (encodeur GELÉ) ────────────
+            # Les z sont recalculés sans gradient pour ne pas polluer l'encodeur.
+            self.vae.encoder.eval()
+            for p in self.vae.encoder.parameters():
+                p.requires_grad = False
+                
+            z_style_det = z_style.detach()
+            z_content_det = z_content.detach()
+
+            for _ in range(self.k_style_steps):
+                logits_style_det   = self.style_classifier(z_style_det)
+                loss_dm_style      = F.cross_entropy(logits_style_det, domain_labels)
+                opt_style_clf.zero_grad(set_to_none=True)
+                self.manual_backward(loss_dm_style)
+                #torch.nn.utils.clip_grad_norm_(self.style_classifier.parameters(), max_norm=5.0)
+                opt_style_clf.step()
+            
+            logits_content_det = self.content_classifier(z_content_det)
+            loss_dm_content = F.cross_entropy(logits_content_det, domain_labels)
+            opt_content_clf.zero_grad(set_to_none=True)
+            self.manual_backward(loss_dm_content)
+            # torch.nn.utils.clip_grad_norm_(self.content_classifier.parameters(), max_norm=5.0)
+            opt_content_clf.step()
+
+            # ── Étape C : confusion loss (encodeur seul) ─────────────────────
+            self.vae.encoder.train()
+            for p in self.vae.encoder.parameters():
+                p.requires_grad = True
+                
+            if hasattr(self.vae.encoder, 'fft_filter'):
+                for p in self.vae.encoder.fft_filter.parameters():
+                    p.requires_grad = False
+
+            mu_c_conf, logvar_c_conf, _, _ = self.vae.encode(x)
+            z_content_conf = reparameterize(mu_c_conf, logvar_c_conf)
+            
+            # Confusion loss acts on the raw latent space, before instance norm
+            logits_content_conf = self.content_classifier(z_content_conf)
+            loss_confusion = self._confusion_loss_spatial(logits_content_conf)
+
+            opt_unlearn.zero_grad(set_to_none=True)
+            self.manual_backward(loss_confusion)
+            # torch.nn.utils.clip_grad_norm_(self._encoder_parameters(), max_norm=5.0)
+            opt_unlearn.step()
+
+            # ── Accuracies ───────────────────────────────────────────────────
+            train_style_acc = (logits_style_det.argmax(dim=1) == domain_labels).float().mean()
+            train_content_acc = (logits_content_det.argmax(dim=1) == domain_labels).float().mean()
+
+            # ── Logs stage 2 ─────────────────────────────────────────────────
+            self._log_dict({
+                "train/rec_loss":     loss_rec,
+                "train/kl_content":   loss_kl_content,
+                "train/kl_style":     loss_kl_style,
+                "train/dm_style":     loss_dm_style,
+                "train/ssim":         loss_ssim,
+                "train/dm_content":   loss_dm_content,
+                "train/confusion":    loss_confusion,
+                "train/style_acc":    train_style_acc,
+                "train/content_acc":  train_content_acc,
+            }, bs)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # validation_step
+    # ──────────────────────────────────────────────────────────────────────────
+    def validation_step(self, batch, batch_idx):
+        suv_source    = batch["source"][tio.DATA].float()
         domain_labels = batch["domain_id"]
 
-        x = self._normalize(suv)
+        if self.spatial_dims == 2:
+            suv_source = suv_source.squeeze(1)
+
+        x  = self._normalize(suv_source)
         bs = x.shape[0]
 
-        x_hat, mu_c, logvar_c, mu_s, logvar_s, z_c, z_s = self.vae.forward(x)
+        # ── Forward VAE ───────────────────────────────────────────────────────
+        x_hat, mu_c, logvar_c, mu_s, logvar_s, z_content, z_style = self.vae.forward(x)
 
-        logits_content = self.content_classifier(self.pool(z_c))
-        logits_style   = self.style_classifier(z_s)
-
-        loss_clf_content = F.cross_entropy(logits_content, domain_labels)
-        loss_clf_style = F.cross_entropy(logits_style, domain_labels)
-        loss_clf = loss_clf_content + loss_clf_style
-
-        loss_kl_content = kl_loss_spatial(mu_c, logvar_c).mean()
-        loss_kl_style = kl_loss_1d(mu_s, logvar_s).mean()
-        loss_kl = loss_kl_content + loss_kl_style
-
-        # Reconstruction loss
-        x_target_01 = (x.clamp(-1, 1) + 1.0) / 2.0
+        # ── SSIM & Reconstruction ─────────────────────────────────────────────
+        x_01     = (x.clamp(-1, 1) + 1.0) / 2.0
         x_hat_01 = (x_hat.clamp(-1, 1) + 1.0) / 2.0
         
-        loss_l1 = F.l1_loss(x_hat, x)
-        loss_ssim = 1.0 - self.ssim(x_hat_01, x_target_01)
-        loss_rec = loss_l1 + self.ssim_weight * loss_ssim
+        ssim_score      = self.ssim(x_hat_01, x_01)
+        loss_l1         = F.l1_loss(x_hat, x)
+        loss_ssim       = 1.0 - ssim_score
+        loss_rec        = loss_l1 + self.ssim_weight * loss_ssim
+        
+        loss_kl_content = kl_loss_spatial(mu_c, logvar_c).mean()
+        loss_kl_style   = kl_loss_1d(mu_s, logvar_s).mean()
 
+        # ── Classifieurs (sur les modes, pas d'échantillonnage) ───────────────
+        logits_style   = self.style_classifier(z_style)
+        logits_content = self.content_classifier(z_content)
 
-        # Warmup progressif : de 0.1 à rec_weight sur warmup_epochs
-        if self.warmup_epochs > 0 and self.current_epoch < self.warmup_epochs:
-            progress = self.current_epoch / self.warmup_epochs
-            current_rec_weight = 0.1 + progress * (self.rec_weight - 0.1)
+        loss_dm_style   = F.cross_entropy(logits_style,   domain_labels)
+        loss_dm_content = F.cross_entropy(logits_content, domain_labels)
+
+        # Confusion loss de monitoring
+        loss_confusion = self._confusion_loss_spatial(logits_content)
+
+        # ── Accuracy (indicateurs clés) ───────────────────────────────────────
+        # style_acc  : doit rester élevée (z_style discrimine le site)
+        # content_acc: doit tendre vers 1/num_domains (z_content devient invariant)
+        style_acc   = (logits_style.argmax(dim=1)   == domain_labels).float().mean()
+        content_acc = (logits_content.argmax(dim=1) == domain_labels).float().mean()
+
+        # ── Score composite ───────────────────────────────────────────────────
+        
+        # Score composite : bonne reconstruction + classifieur confus sur z_content
+        # domain_acc_excess = combien content_acc dépasse le niveau du hasard
+        chance_level      = 1.0 / self.num_domains
+        content_acc_excess = (content_acc - chance_level).clamp(min=0.0)
+        style_acc_deficit  = (1.0 - style_acc).clamp(min=0.0)   # on pénalise si style_acc chute
+        is_stage_1 = self.current_epoch < self.warmup_epochs
+        
+        if is_stage_1:
+            # En stage 1, on veut bonne reconstruction ET bonnes classifications
+            content_acc_deficit = (1.0 - content_acc).clamp(min=0.0)
+            style_acc_deficit   = (1.0 - style_acc).clamp(min=0.0)
+            composite_score = loss_rec + 0.1 * content_acc_deficit + 0.1 * style_acc_deficit
         else:
-            current_rec_weight = self.rec_weight
-        
-        # Total loss
-        loss = self.clf_weight * loss_clf + self.kld_weight * loss_kl + current_rec_weight * loss_rec
+            # En stage 2, on exige le désapprentissage (content_acc proche du hasard)
+            composite_score = loss_rec + 0.1 * content_acc_excess + 0.1 * style_acc_deficit
 
-        # Accuracy content et style
-        acc_content = (logits_content.argmax(1) == domain_labels).float().mean()
-        acc_style = (logits_style.argmax(1) == domain_labels).float().mean()
-        
-        self.log(f"{prefix}/ce_content", loss_clf_content, batch_size=bs, prog_bar=True, sync_dist=True)
-        self.log(f"{prefix}/ce_style", loss_clf_style, batch_size=bs, sync_dist=True)
-        self.log(f"{prefix}/kl_loss", loss_kl, batch_size=bs, sync_dist=True)
-        self.log(f"{prefix}/rec_loss", loss_rec, batch_size=bs, prog_bar=True, sync_dist=True)
-        self.log(f"{prefix}/rec_weight", current_rec_weight, batch_size=bs)
-        self.log(f"{prefix}/acc_content", acc_content, batch_size=bs, prog_bar=True, sync_dist=True)
-        self.log(f"{prefix}/acc_style", acc_style, batch_size=bs, prog_bar=True, sync_dist=True)
+        self._log_dict({
+            "val/rec_loss":        loss_rec,
+            "val/kl_content":      loss_kl_content,
+            "val/kl_style":        loss_kl_style,
+            "val/dm_style":        loss_dm_style,
+            "val/dm_content":      loss_dm_content,
+            "val/confusion":       loss_confusion,
+            "val/ssim":            ssim_score,
+            "val/style_acc":       style_acc,    # doit rester haute
+            "val/content_acc":     content_acc,  # doit tendre vers 1/num_domains
+            "val/composite_score": composite_score,
+        }, bs)
 
-        return loss
-    
-    def training_step(self, batch, batch_idx):
-        return self._shared_step(batch, prefix="train")
-    
-    def validation_step(self, batch, batch_idx):
-        return self._shared_step(batch, prefix="val")
-    
+        if batch_idx == 0:
+            z_content_norm = self.vae.content_norm(z_content)
+            self._log_images(x, x_hat, suv_source, z_content_norm)
+
+        return loss_rec
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Logging images
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def on_validation_epoch_end(self):
+        metrics = self.trainer.callback_metrics
+        is_stage_1 = self.current_epoch < self.warmup_epochs
+
+        # ── Stage Indicator pour le nommage des Checkpoints ──────────────────
+        self.log("stage", 1.0 if is_stage_1 else 2.0, sync_dist=True)
+
+        # ── Calcul de la moyenne des Acc (Train + Val) pour le Stage 1 ───────
+        val_style   = float(metrics.get("val/style_acc", 0.0))
+        val_content = float(metrics.get("val/content_acc", 0.0))
+        train_style = float(metrics.get("train/style_acc_epoch", val_style))
+        train_content = float(metrics.get("train/content_acc_epoch", val_content))
+        
+        stage1_mean_acc = (val_style + val_content + train_style + train_content) / 4.0
+        self.log("val/stage1_mean_acc", stage1_mean_acc, sync_dist=True)
+
+        """Sauvegarde un checkpoint unique à la fin exacte du Stage 1 avec les métriques."""
+        if self.current_epoch == self.warmup_epochs - 1:
+            rec = float(metrics.get("val/rec_loss", 0.0))
+            
+            # Formatage identique au ModelCheckpoint classique
+            filename = f"stage1_final_epoch={self.current_epoch:03d}-rec={rec:.4f}-style={val_style:.3f}-content={val_content:.3f}.ckpt"
+            
+            save_dir = self.trainer.default_root_dir
+            ckpt_path = os.path.join(save_dir, "checkpoints", filename)
+            
+            os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+            
+            # Sauvegarde
+            self.trainer.save_checkpoint(ckpt_path)
+            self.print(f"\n💾 [UnlearningVAE] Checkpoint pré-confusion sauvegardé : {filename}")
+            
+
+    def _log_images(
+        self,
+        x_norm: torch.Tensor,
+        x_hat_norm: torch.Tensor,
+        suv_source: torch.Tensor,
+        z_content_norm: torch.Tensor,
+    ):
+        """Log WandB : Source vs Recon vs Harmonized (z_style=0)."""
+        if self.trainer.global_rank != 0:
+            return
+
+        suv_pred = self._denormalize(x_hat_norm)
+
+        # Inférence avec style neutre
+        z_style_zero = torch.zeros(x_norm.shape[0], self.vae.style_embedder.net[0].in_features, device=x_norm.device)
+        x_hat_neutral_norm = self.vae.decode(z_content_norm, z_style_zero)
+        suv_neutral = self._denormalize(x_hat_neutral_norm)
+
+        if suv_source.ndim == 5:
+            mid = suv_source.shape[2] // 2
+            src_slice  = suv_source[:, :, mid, :, :]
+            pred_slice = suv_pred[:, :, mid, :, :]
+            neutral_slice = suv_neutral[:, :, mid, :, :]
+        else:
+            mid = suv_source.shape[1] // 2
+            src_slice  = suv_source[:, mid:mid+1, :, :]
+            pred_slice = suv_pred[:, mid:mid+1, :, :]
+            neutral_slice = suv_neutral[:, mid:mid+1, :, :]
+
+        display_max = max(5.0, src_slice.max().item(), pred_slice.max().item(), neutral_slice.max().item())
+        
+        imgs = torch.cat([src_slice, pred_slice, neutral_slice], dim=3)
+        imgs = (imgs / display_max).clamp(0, 1)
+
+        grid = make_grid(imgs, nrow=1, padding=2)
+        wandb.log({
+            "Validation/Reconstruction": wandb.Image(
+                grid.permute(1, 2, 0).cpu().numpy(),
+                caption=f"Source | Recon | Harmonisée (style nul) (epoch {self.current_epoch})"
+            )
+        })
+        
+
     def configure_optimizers(self):
-        clf_params = list(self.content_classifier.parameters()) + list(self.style_classifier.parameters())
-        # Tous les autres paramètres (Encodeur, Décodeur, etc.)
-        clf_param_ids = [id(p) for p in clf_params]
-        vae_params = [p for p in self.parameters() if id(p) not in clf_param_ids]
-
-        return torch.optim.AdamW([
-            {'params': vae_params, 'lr': self.lr_vae},
-            {'params': clf_params, 'lr': self.lr_clf}
-        ], weight_decay=self.weight_decay)
+        # Reconstruction + KL : VAE complet
+        opt_vae = torch.optim.AdamW(
+            self._vae_parameters(),
+            lr=self.lrs["vae"],
+            weight_decay=self.weight_decay,
+        )
+        # Discrimination de site : classifieurs seuls
+        opt_style_clf = torch.optim.AdamW(
+            self.style_classifier.parameters(),
+            lr=self.lrs["classifiers"],
+            weight_decay=self.weight_decay,
+        )
+        opt_content_clf = torch.optim.AdamW(
+            self.content_classifier.parameters(),
+            lr=self.lrs["classifiers"],
+            weight_decay=self.weight_decay,
+        )
+        # Désapprentissage : encodeur seul, LR plus faible
+        opt_unlearn = torch.optim.AdamW(
+            self._encoder_parameters(),
+            lr=self.lrs["unlearn"],
+            weight_decay=self.weight_decay,
+        )
+        return [opt_vae, opt_style_clf, opt_content_clf, opt_unlearn]
 
 
 if __name__ == "__main__":
     os.environ["WANDB_API_KEY"] = "bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1"
     
-    cfg = CONFIG
+    cfg = {
+        "seed": 101,
+        "num_domains": 5,
+        "suv_global_log_max": 6.0,
+
+        # Datamodule (même config que le VAE)
+        "datamodule": {
+            "root_dir": "./data/PET-EARL/",
+            "split_config": [[60, 15], [60, 15], [0, 0], [60, 15], [60, 15], [60, 15]],
+            "batch_size": 16,
+            "patch_size": [16, 64, 64],
+            "num_workers": 24,
+            "queue_max_length": 4096,
+            "samples_per_volume": 64,
+        },
+
+        # Modèle
+        "input_shape": (16, 64, 64),
+        "in_channels": 1,               # 1 = image seule, 2 = image + FFT
+        "out_channels": 1,
+        "hidden_channels": [32, 64, 128, 256],
+        "kernel_sizes": [3, 3, 3, 3],
+        "strides": [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]],
+        "num_residual_blocks": 1,
+        "latent_channels": 64,
+        "style_channels": 256,
+        "use_fft": False,       # Concatène les features FFT en entrée
+        "fft_sigma": 7.5,
+        "fft_learnable": False, # False = filtre fixe (pas de gradient)
+
+        # Entraînement
+        "lr_vae": 1e-4,
+        "lr_clf": 1e-5,
+        "lr_unlearn": 1.0e-7,
+        "lr_classifiers_final": 1.0e-6,
+        "lr_unlearn_final": 5.0e-6,
+        "weight_decay": 1e-6,
+        "max_epochs": 120,
+        "precision": "bf16-mixed",
+        "limit_train_batches": 250,
+        "limit_val_batches": 50,
+        
+        # Paramètres d'ablation pour le classifieur
+        "clf_weight": 1.0,         # Poids de la classification
+        "kld_weight": 5e-7,        # Retour à 5e-7
+        "rec_weight": 1.0,         # Poids final de la reconstruction
+        "ssim_weight": 0.5,        # Poids du SSIM
+        "warmup_epochs": 40,       # Epochs pour le warmup progressif de la reconstruction (0.1 -> 1.0)
+        "k_style_steps": 2,
+        
+        # WandB / Sauvegarde
+        "project_name": "federated-pet",
+        "run_name": "Center Classifier (VAE Encoder) — 64 Channels + Decoupled + Vibrant z_c",
+        "save_dir": "runs/site_classifier/",
+    }
+
     set_seed(cfg["seed"], workers=True)
 
     # ── DataModule ────────────────────────────────────────────────────────
@@ -957,9 +1264,9 @@ if __name__ == "__main__":
         fft_sigma=cfg["fft_sigma"],
         lr_vae=cfg["lr_vae"],
         lr_clf=cfg["lr_clf"],
-        # lr_unlearn=cfg["lr_unlearn"],
-        # lr_classifiers_final=cfg["lr_classifiers_final"],
-        # lr_unlearn_final=cfg["lr_unlearn_final"],
+        lr_unlearn=cfg["lr_unlearn"],
+        lr_classifiers_final=cfg["lr_classifiers_final"],
+        lr_unlearn_final=cfg["lr_unlearn_final"],
         weight_decay=cfg["weight_decay"],
         clf_weight=cfg["clf_weight"],
         kld_weight=cfg["kld_weight"],
@@ -981,7 +1288,7 @@ if __name__ == "__main__":
     # ── Callbacks ─────────────────────────────────────────────────────────
     checkpoint_callback = ModelCheckpoint(
         dirpath=cfg["save_dir"],
-        filename="best-classifier-{epoch:02d}-{val/acc_content:.3f}",
+        filename="epoch={epoch:02d}-{val/acc_content:.3f}",
         monitor="val/acc_content",
         mode="max",
         save_last=True,
