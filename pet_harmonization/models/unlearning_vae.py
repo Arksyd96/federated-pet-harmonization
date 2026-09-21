@@ -120,7 +120,7 @@ class ContentStyleEncoder(nn.Module):
         self.num_residual_blocks = num_residual_blocks
         self.use_fft = use_fft
 
-        AdaptiveMaxPool = getattr(nn, f"AdaptiveMaxPool{spatial_dims}d")
+        AdaptiveMaxPool = getattr(nn, f"AdaptiveAvgPool{spatial_dims}d")
         self.pool = AdaptiveMaxPool(1)
         self.flatten = nn.Flatten()
 
@@ -531,7 +531,6 @@ class StyleConditionedDecoder(nn.Module):
 class DisentangledVAE(nn.Module):
     def __init__(
         self, 
-        num_classes: int,
         input_shape: Tuple[int, int, int] = (16, 64, 64),
         in_channels: int = 1, 
         out_channels: int = 1,
@@ -623,7 +622,7 @@ class UnlearningVAE(LightningModule):
     def __init__(
         self,
         num_classes: int = 5,
-
+        spatial_dims: int = 3,
         input_shape: tuple = (16, 64, 64),
         in_channels: int = 1,
         hidden_channels: list = [32, 64, 128, 256],
@@ -659,6 +658,10 @@ class UnlearningVAE(LightningModule):
         self.lr_vae = lr_vae
         self.lr_clf = lr_clf
         self.lrs = {"vae": lr_vae, "classifiers": lr_clf, "unlearn": lr_unlearn}
+        self.lr_classifiers_final = lr_classifiers_final
+        self.lr_unlearn_final = lr_unlearn_final
+        self.lr_classifiers_min_factor = 0.1
+        self.max_epochs = max_epochs
         self.weight_decay = weight_decay
         self.use_fft = use_fft
         self.clf_weight = clf_weight
@@ -667,10 +670,11 @@ class UnlearningVAE(LightningModule):
         self.ssim_weight = ssim_weight
         self.warmup_epochs = warmup_epochs
         self.k_style_steps = k_style_steps
+        self.spatial_dims = spatial_dims
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
         
         self.vae = DisentangledVAE(
-            num_classes=num_classes,
+            spatial_dims=spatial_dims,
             input_shape=input_shape,
             in_channels=in_channels,
             out_channels=in_channels,
@@ -682,7 +686,6 @@ class UnlearningVAE(LightningModule):
             fft_sigma=fft_sigma,
             latent_channels=latent_channels,
             style_channels=style_channels,
-            spatial_dims=len(input_shape),
             normalization=('batch', {}),
             activation=('swish', {}),
             use_residual_block=True,
@@ -691,8 +694,8 @@ class UnlearningVAE(LightningModule):
         )
 
         # ── 3. Classifieur de domaine CONTENT sur z_c ─────────────────────────
-        self.pool = nn.AdaptiveAvgPool3d(1)
         self.content_classifier = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1), # TODO: gérer la 2D
             nn.Flatten(),
             nn.Linear(latent_channels, 256),
             nn.LayerNorm(256),
@@ -705,7 +708,7 @@ class UnlearningVAE(LightningModule):
         
         # ── 4. Classifieur de domaine STYLE sur z_s ──────────────────────────
         self.style_classifier = nn.Sequential(
-            nn.Linear(256, 256),
+            nn.Linear(style_channels, 256),
             nn.LayerNorm(256),
             nn.SiLU(),
             nn.Linear(256, 256),
@@ -714,6 +717,7 @@ class UnlearningVAE(LightningModule):
             nn.Linear(256, num_classes)
         )
 
+        self.automatic_optimization = False  # On gère manuellement les optimizers pour le training step
     
     def _vae_parameters(self):
         return list(self.vae.parameters())
@@ -787,26 +791,6 @@ class UnlearningVAE(LightningModule):
             iters_per_epoch = self.trainer.num_training_batches
             return self.global_step < int(self.warmup_epochs * iters_per_epoch)
         return self.current_epoch < self.warmup_epochs
-
-    # def on_train_epoch_start(self):
-    #     """Met à jour beta et lr_classifiers au début de chaque époque du stage 2."""
-    #     if self._is_warmup():
-    #         return
-
-    #     _, opt_style_clf, opt_content_clf, opt_unlearn = self.optimizers()
-        
-    #     new_lr_clf = self._cosine_lr(self.lrs["classifiers"], self.hparams.lr_classifiers_final)
-    #     for opt in [opt_style_clf, opt_content_clf]:
-    #         for pg in opt.param_groups:
-    #             pg["lr"] = new_lr_clf
-
-    #     new_lr_unlearn = self._cosine_lr(self.lrs["unlearn"], self.hparams.lr_unlearn_final)
-    #     for pg in opt_unlearn.param_groups:
-    #         pg["lr"] = new_lr_unlearn
-
-    #     self.log("debug/lr_classifiers", new_lr_clf,    on_step=False, on_epoch=True)
-    #     self.log("debug/lr_unlearn",     new_lr_unlearn, on_step=False, on_epoch=True)   
-
 
 
     def on_train_epoch_start(self):
@@ -1045,7 +1029,7 @@ class UnlearningVAE(LightningModule):
         
         # Score composite : bonne reconstruction + classifieur confus sur z_content
         # domain_acc_excess = combien content_acc dépasse le niveau du hasard
-        chance_level      = 1.0 / self.num_domains
+        chance_level      = 1.0 / self.num_classes
         content_acc_excess = (content_acc - chance_level).clamp(min=0.0)
         style_acc_deficit  = (1.0 - style_acc).clamp(min=0.0)   # on pénalise si style_acc chute
         is_stage_1 = self.current_epoch < self.warmup_epochs
@@ -1191,6 +1175,7 @@ if __name__ == "__main__":
     cfg = {
         "seed": 101,
         "num_domains": 5,
+        "spatial_dims": 3,
         "suv_global_log_max": 6.0,
 
         # Datamodule (même config que le VAE)
@@ -1274,6 +1259,7 @@ if __name__ == "__main__":
         ssim_weight=cfg["ssim_weight"],
         warmup_epochs=cfg["warmup_epochs"],
         k_style_steps=cfg["k_style_steps"],
+        spatial_dims=cfg["spatial_dims"],
         suv_global_log_max=cfg["suv_global_log_max"]
     )
 
@@ -1285,12 +1271,12 @@ if __name__ == "__main__":
         config=cfg,
     )
 
-    # ── Callbacks ─────────────────────────────────────────────────────────
+    # ── Callbacks ──
     checkpoint_callback = ModelCheckpoint(
         dirpath=cfg["save_dir"],
-        filename="epoch={epoch:02d}-{val/acc_content:.3f}",
-        monitor="val/acc_content",
-        mode="max",
+        filename="stage{stage:.0f}-epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/style_acc:.3f}-content={val/content_acc:.3f}",
+        monitor="val/composite_score",
+        mode="min",
         save_last=True,
         save_top_k=1,
     )
@@ -1303,7 +1289,6 @@ if __name__ == "__main__":
         accelerator="gpu",
         devices=1,
         max_epochs=cfg["max_epochs"],
-        gradient_clip_val=1.0,
         log_every_n_steps=1,
         check_val_every_n_epoch=1,
         num_sanity_val_steps=0,
