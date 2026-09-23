@@ -292,7 +292,7 @@ def main():
             'max_epochs': 100,
             'accelerator': 'gpu' if torch.cuda.is_available() else 'cpu',
             'devices': 1,
-            'log_every_n_steps': 10,
+            'log_every_n_steps': 1,
             # 'fast_dev_run': True, # Utile pour tester si le code compile
         }
     }
@@ -307,14 +307,37 @@ def main():
     model = ResidualUnlearningSystem(**cfg.get('unlearning_model', {}))
     
     callbacks = [
-        ModelCheckpoint(dirpath=os.path.join(save_dir, "checkpoints"), filename="{epoch:02d}"),
+        ModelCheckpoint(
+            dirpath=os.path.join(save_dir, "checkpoints"),
+            filename="epoch={epoch:03d}-loss_g={train_G/loss_total:.4f}",
+            monitor="train_G/loss_total",
+            mode="min",
+            save_last=True,
+            save_top_k=3,
+            auto_insert_metric_name=False
+        ),
         LearningRateMonitor(logging_interval='step')
     ]
     
+    # Intégration des paramètres recommandés similaires à l'Unlearning VAE
+    trainer_kwargs = {
+        'max_epochs': cfg['trainer'].get('max_epochs', 100),
+        'accelerator': cfg['trainer'].get('accelerator', 'gpu' if torch.cuda.is_available() else 'cpu'),
+        'devices': cfg['trainer'].get('devices', 1),
+        'log_every_n_steps': 1,
+        'check_val_every_n_epoch': 1,
+        'num_sanity_val_steps': 0,
+    }
+    
+    # On ajoute d'éventuels paramètres optionnels (limit_train_batches, precision...) s'ils existent dans config
+    for k, v in cfg['trainer'].items():
+        if k not in trainer_kwargs:
+            trainer_kwargs[k] = v
+            
     trainer = Trainer(
         default_root_dir=save_dir,
         callbacks=callbacks,
-        **cfg.get('trainer', {})
+        **trainer_kwargs
     )
     
     logger.info("Lancement de l'entraînement Bac à Sable Residual Unlearning 🚀")

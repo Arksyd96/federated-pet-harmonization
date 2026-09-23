@@ -24,7 +24,7 @@ def process_subject(
     subject_name = subject['subject_name']
     subj_out_dir = batch['subject_path'][0]
     
-    filename = "3d-vae-sandbox"
+    filename = "vae-3d-sandbox"
     pred_path = os.path.join(subj_out_dir, f"harmonized-pet-{filename}.nii.gz")
     
     print(f"\nTreating subject: {subject_name} ({curr_idx}/{length_loader})")
