@@ -269,8 +269,8 @@ class UNet(nn.Module):
                             spatial_dims=spatial_dims,
                             in_channels=out_channels,
                             out_channels=out_channels,
-                            kernel_size=strides[i],
-                            stride=strides[i],
+                            kernel_size=strides[i - 1],
+                            stride=strides[i - 1],
                             learnable_interpolation=learnable_interpolation,
                         )
                     )

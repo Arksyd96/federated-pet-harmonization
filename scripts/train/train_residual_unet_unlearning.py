@@ -15,7 +15,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 from omegaconf import OmegaConf
 
-from pet_harmonization.data import SingleTargetPETDataModule
+from pet_harmonization.data import MultiDomainUnlearningDataModule
 from pet_harmonization.models.unet import UNet
 from pet_harmonization.models.fft import LearnableFFTHighPassFilter
 from pet_harmonization.utils import set_seed
@@ -250,28 +250,38 @@ class ResidualUnlearningSystem(LightningModule):
         
 
 def main():
+    import json
+    from datetime import datetime
+    import shutil
+    
     # --- Configuration Bac à Sable (Modifiez ici pour vos tests) ---
     cfg = {
-        'SEED': 42,
+        'SEED': 101,
+        'DEBUG': False,
         
-        # Datamodule params (à ajuster selon votre setup local)
+        'project_name': 'federated-pet',
+        'run_name': 'Residual Unlearning UNet - Sandbox',
+        'dir_name': 'runs/residual_unlearning',
+        
+        # Datamodule (même config que le VAE Unlearning)
         'datamodule': {
-            'data_dir': 'data/processed/',
-            'batch_size': 4,
-            'num_workers': 4,
-            'patch_size': (64, 64),
-            'spatial_dims': 2,
-            # 'target_name': 'earl', # si SingleTargetPETDataModule le requiert
+            "root_dir": "./data/PET-EARL/",
+            "split_config": [[60, 15], [60, 15], [0, 0], [60, 15], [60, 15], [60, 15]],
+            "batch_size": 16,
+            "patch_size": [16, 64, 64],
+            "num_workers": 24,
+            "queue_max_length": 4096,
+            "samples_per_volume": 64,
         },
         
         # Modèle params
         'unlearning_model': {
             'num_classes': 5,          # Nombre de centres/scanners
-            'spatial_dims': 2,         
-            'input_shape': (64, 64),
+            'spatial_dims': 3,         
+            'input_shape': (16, 64, 64),
             'unet_hid_chs': [32, 64, 128, 256],
             'unet_kernel_sizes': [3, 3, 3, 3],
-            'unet_strides': [1, 2, 2, 2],
+            'unet_strides': [[1, 1, 1], [1, 2, 2], [1, 2, 2], [2, 2, 2]],
             'fft_sigma': 7.5,
             
             'lr_unet': 1e-4,
@@ -289,23 +299,63 @@ def main():
         
         # Trainer params
         'trainer': {
-            'max_epochs': 100,
+            'max_epochs': 150,
             'accelerator': 'gpu' if torch.cuda.is_available() else 'cpu',
             'devices': 1,
             'log_every_n_steps': 1,
-            # 'fast_dev_run': True, # Utile pour tester si le code compile
+            'limit_train_batches': 250,
+            'limit_val_batches': 50,
+            'precision': 'bf16-mixed',
+            'check_val_every_n_epoch': 1,
+            'num_sanity_val_steps': 0,
         }
     }
     # --------------------------------------------------------------
     
     set_seed(cfg.get('SEED', 42), workers=True)
     
-    save_dir = "./runs/residual_unlearning/"
-    os.makedirs(save_dir, exist_ok=True)
-    
-    datamodule = SingleTargetPETDataModule(**cfg.get('datamodule', {}))
+    # ── Dossiers et logger WandB ──────────────────────────────────────────────
+    if not cfg.get("DEBUG"):
+        current_time = datetime.now().strftime("%Y_%m_%d_%H%M%S")
+        save_dir = os.path.join(os.path.curdir, cfg.get("dir_name"), current_time)
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Sauvegarde de la config
+        with open(os.path.join(save_dir, "config.json"), "w") as f:
+            json.dump(cfg, f, indent=4)
+            
+        wb_logger = WandbLogger(
+            project=cfg.get("project_name"),
+            name=cfg.get("run_name"),
+            save_dir=save_dir,
+            config=cfg,
+        )
+    else:
+        save_dir = "./runs/temporary/"
+        os.makedirs(save_dir, exist_ok=True)
+        wb_logger = False
+        logger.info("Mode DEBUG activé : pas de sauvegarde ni de logging WandB.")
+
+    datamodule = MultiDomainUnlearningDataModule(**cfg.get('datamodule', {}))
     model = ResidualUnlearningSystem(**cfg.get('unlearning_model', {}))
     
+    # Génération du manifeste
+    datamodule.setup()
+    if not cfg.get('DEBUG'):
+        manifest_data = {
+            "execution_metadata": {
+                "date": current_time,
+                "seed": cfg.get('SEED', 42)
+            },
+            "training_cohort": [subj['subject_name'] for subj in datamodule.train_subjects],
+            "validation_cohort": [subj['subject_name'] for subj in datamodule.val_subjects]
+        }
+        manifest_path = os.path.join(save_dir, "manifest.json")
+        with open(manifest_path, "w") as f:
+            json.dump(manifest_data, f, indent=4)
+        logger.info(f"Manifeste généré et sauvegardé dans {manifest_path}")
+
+    # Callbacks
     callbacks = [
         ModelCheckpoint(
             dirpath=os.path.join(save_dir, "checkpoints"),
@@ -313,36 +363,26 @@ def main():
             monitor="train_G/loss_total",
             mode="min",
             save_last=True,
-            save_top_k=3,
+            save_top_k=10,
             auto_insert_metric_name=False
-        ),
-        LearningRateMonitor(logging_interval='step')
+        )
     ]
+    if not cfg.get("DEBUG"):
+        callbacks.append(LearningRateMonitor(logging_interval="step"))
     
-    # Intégration des paramètres recommandés similaires à l'Unlearning VAE
-    trainer_kwargs = {
-        'max_epochs': cfg['trainer'].get('max_epochs', 100),
-        'accelerator': cfg['trainer'].get('accelerator', 'gpu' if torch.cuda.is_available() else 'cpu'),
-        'devices': cfg['trainer'].get('devices', 1),
-        'log_every_n_steps': 1,
-        'check_val_every_n_epoch': 1,
-        'num_sanity_val_steps': 0,
-    }
-    
-    # On ajoute d'éventuels paramètres optionnels (limit_train_batches, precision...) s'ils existent dans config
-    for k, v in cfg['trainer'].items():
-        if k not in trainer_kwargs:
-            trainer_kwargs[k] = v
-            
     trainer = Trainer(
+        logger=wb_logger,
         default_root_dir=save_dir,
         callbacks=callbacks,
-        **trainer_kwargs
+        **cfg.get('trainer', {})
     )
     
     logger.info("Lancement de l'entraînement Bac à Sable Residual Unlearning 🚀")
     trainer.fit(model, datamodule=datamodule)
 
+
 if __name__ == "__main__":
+    # Clé WandB (à garder si présente)
+    os.environ["WANDB_API_KEY"] = "bdc8857f9d6f7010cff35bcdc0ae9413e05c75e1"
     main()
 
