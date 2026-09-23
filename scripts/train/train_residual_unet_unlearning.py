@@ -295,7 +295,6 @@ class ResidualUnlearningSystem(LightningModule):
 def main():
     import json
     from datetime import datetime
-    import shutil
     
     # --- Configuration Bac à Sable (Modifiez ici pour vos tests) ---
     cfg = {
@@ -333,9 +332,9 @@ def main():
             
             'alpha_residual': 1.0,     # Facteur multiplicatif du résidu
             
-            'lambda_l1': 0.1,          # (BAISSÉ) Autorise le UNet à modifier l'image sans trop de pénalité directe
-            'lambda_ssim': 1.0,        # (MAINTENU) Préserve l'anatomie locale / structure globale
-            'lambda_adv': 10.0,        # (AUGMENTÉ) Force le UNet à tromper le classifieur à tout prix
+            'lambda_l1': 0.1,         
+            'lambda_ssim': 1.0,        
+            'lambda_adv': 10.0,       
             
             'suv_global_log_max': 6.0
         },
