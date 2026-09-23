@@ -617,6 +617,36 @@ class DisentangledVAE(nn.Module):
 
         return x_hat, mu_c, logvar_c, mu_s, logvar_s, z_c, z_s
     
+    @torch.no_grad()
+    def harmonize(
+        self,
+        x_source: torch.Tensor,
+        x_style_ref: torch.Tensor = None,
+        z_style_fixed: torch.Tensor = None,
+        alpha_style: float = 0.0
+    ) -> torch.Tensor:
+        """
+        alpha_style permet d'introduire le style petit à petit à l'inférence.
+        alpha_style = 0.0 : Harmonisation totale (style neutre / 0)
+        alpha_style = 1.0 : Pas d'harmonisation (garde le style source ou ref)
+        """
+        mu_c, logvar_c, mu_s, logvar_s = self.encode(x_source)
+        
+        z_content_norm = self.content_norm(mu_c)
+        
+        if z_style_fixed is not None:
+            z_style = z_style_fixed.expand(x_source.shape[0], -1)
+        elif x_style_ref is not None:
+            _, _, mu_s_ref, _ = self.encode(x_style_ref)
+            z_style = mu_s_ref
+        else:
+            z_style = mu_s
+
+        # Mixage de style
+        z_style = alpha_style * z_style
+
+        return self.decode(z_content_norm, z_style)
+
 
 class UnlearningVAE(LightningModule):
     def __init__(
@@ -1210,7 +1240,7 @@ if __name__ == "__main__":
         "lr_classifiers_final": 1.0e-6,
         "lr_unlearn_final": 5.0e-6,
         "weight_decay": 1e-6,
-        "max_epochs": 120,
+        "max_epochs": 150,
         "precision": "bf16-mixed",
         "limit_train_batches": 250,
         "limit_val_batches": 50,
@@ -1220,7 +1250,7 @@ if __name__ == "__main__":
         "kld_weight": 5e-7,        # Retour à 5e-7
         "rec_weight": 1.0,         # Poids final de la reconstruction
         "ssim_weight": 0.5,        # Poids du SSIM
-        "warmup_epochs": 40,       # Epochs pour le warmup progressif de la reconstruction (0.1 -> 1.0)
+        "warmup_epochs": 50,       # Epochs pour le warmup progressif de la reconstruction (0.1 -> 1.0)
         "k_style_steps": 2,
         
         # WandB / Sauvegarde
@@ -1274,16 +1304,18 @@ if __name__ == "__main__":
     # ── Callbacks ──
     checkpoint_callback = ModelCheckpoint(
         dirpath=cfg["save_dir"],
-        filename="stage{stage:.0f}-epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/style_acc:.3f}-content={val/content_acc:.3f}",
+        filename="{stage:.0f}-epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/style_acc:.3f}-content={val/content_acc:.3f}",
         monitor="val/composite_score",
         mode="min",
         save_last=True,
-        save_top_k=1,
+        save_top_k=10,
+        auto_insert_metric_name=False,
     )
 
     # ── Trainer ───────────────────────────────────────────────────────────
     trainer = Trainer(
         logger=wb_logger,
+        default_root_dir=cfg["save_dir"],
         callbacks=[checkpoint_callback],
         precision=cfg["precision"],
         accelerator="gpu",
