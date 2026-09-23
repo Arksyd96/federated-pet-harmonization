@@ -101,10 +101,10 @@ def main():
         'ckpt_path': "runs/sandbox-unlearn-vae/stagestage=2-epoch=epoch=147-rec=val/rec_loss=0.0177-style=val/style_acc=0.966-content=val/content_acc=0.219.ckpt", 
         
         # Alpha contrôle l'intensité de la signature (0.0 = harmonisation totale avec un vecteur de style nul)
-        'alpha': 0.0,           
+        'alpha': 0.5,           
         
         'patch_size': (16, 64, 64),
-        'patch_overlap': (8, 16, 16),
+        'patch_overlap': (10, 16, 16),
         'override': True,
 
         # Modèle

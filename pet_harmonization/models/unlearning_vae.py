@@ -623,7 +623,8 @@ class DisentangledVAE(nn.Module):
         x_source: torch.Tensor,
         x_style_ref: torch.Tensor = None,
         z_style_fixed: torch.Tensor = None,
-        alpha_style: float = 0.0
+        alpha_style: float = 0.0,
+        sample_posterior: bool = True
     ) -> torch.Tensor:
         """
         alpha_style permet d'introduire le style petit à petit à l'inférence.
@@ -632,15 +633,18 @@ class DisentangledVAE(nn.Module):
         """
         mu_c, logvar_c, mu_s, logvar_s = self.encode(x_source)
         
-        z_content_norm = self.content_norm(mu_c)
+        # Intégration des variances (Reparameterization Trick)
+        z_content = reparameterize(mu_c, logvar_c) if sample_posterior else mu_c
+        
+        z_content_norm = self.content_norm(z_content)
         
         if z_style_fixed is not None:
             z_style = z_style_fixed.expand(x_source.shape[0], -1)
         elif x_style_ref is not None:
-            _, _, mu_s_ref, _ = self.encode(x_style_ref)
-            z_style = mu_s_ref
+            _, _, mu_s_ref, logvar_s_ref = self.encode(x_style_ref)
+            z_style = reparameterize(mu_s_ref, logvar_s_ref) if sample_posterior else mu_s_ref
         else:
-            z_style = mu_s
+            z_style = reparameterize(mu_s, logvar_s) if sample_posterior else mu_s
 
         # Mixage de style
         z_style = alpha_style * z_style
