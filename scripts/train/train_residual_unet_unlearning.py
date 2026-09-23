@@ -248,6 +248,49 @@ class ResidualUnlearningSystem(LightningModule):
         self.log("train_G/loss_ssim", loss_ssim)
         self.log("train_G/acc_fake_post_G", acc_fake_g) # Devrait chuter vers 1/N
         
+    def validation_step(self, batch, batch_idx):
+        suv_source = batch["source"][tio.DATA].float()
+        
+        if self.hparams.spatial_dims == 2 and suv_source.ndim == 5:
+            suv_source = suv_source.squeeze(1)
+            
+        x = self._normalize(suv_source)
+        
+        delta_x = self.unet(x, t=None, condition=None)
+        x_harm = x + self.hparams.alpha_residual * delta_x
+        
+        # Log visuel seulement pour le premier batch
+        if batch_idx == 0 and self.logger is not None:
+            # On prend la coupe du milieu si 3D
+            if self.hparams.spatial_dims == 3:
+                z_mid = x.shape[2] // 2
+                x_slice = x[0, 0, z_mid, :, :].cpu()
+                harm_slice = x_harm[0, 0, z_mid, :, :].cpu()
+                delta_slice = delta_x[0, 0, z_mid, :, :].cpu()
+            else:
+                x_slice = x[0, 0, :, :].cpu()
+                harm_slice = x_harm[0, 0, :, :].cpu()
+                delta_slice = delta_x[0, 0, :, :].cpu()
+                
+            import wandb
+            from torchvision.utils import make_grid
+            
+            # Normalisation visuelle pour affichage (entre 0 et 1)
+            x_vis = (x_slice.clamp(-1, 1) + 1) / 2
+            harm_vis = (harm_slice.clamp(-1, 1) + 1) / 2
+            
+            # Le delta peut être centré sur 0.5 pour voir les ajouts/retraits
+            # Delta est souvent petit, on peut l'amplifier pour l'affichage
+            delta_vis = torch.clamp((delta_slice * 5.0) + 0.5, 0, 1) 
+            
+            grid = make_grid([x_vis.unsqueeze(0), harm_vis.unsqueeze(0), delta_vis.unsqueeze(0)], nrow=3)
+            
+            self.logger.experiment.log({
+                "Validation/Reconstruction": wandb.Image(
+                    grid.permute(1, 2, 0).numpy(),
+                    caption=f"Source | Harmonisée | Delta (amplifié) (Epoch {self.current_epoch})"
+                )
+            })
 
 def main():
     import json
@@ -285,14 +328,14 @@ def main():
             'fft_sigma': 7.5,
             
             'lr_unet': 1e-4,
-            'lr_clf': 1e-4,
+            'lr_clf': 5e-5,            # Un peu plus bas pour le classifieur pour ne pas écraser le UNet
             'weight_decay': 1e-5,
             
             'alpha_residual': 1.0,     # Facteur multiplicatif du résidu
             
-            'lambda_l1': 1.0,          # Poids pour préserver l'image (petite magnitude)
-            'lambda_ssim': 1.0,        # Poids pour préserver l'anatomie (SSIM)
-            'lambda_adv': 1.0,         # Poids de la confusion (Adversarial)
+            'lambda_l1': 0.1,          # (BAISSÉ) Autorise le UNet à modifier l'image sans trop de pénalité directe
+            'lambda_ssim': 1.0,        # (MAINTENU) Préserve l'anatomie locale / structure globale
+            'lambda_adv': 10.0,        # (AUGMENTÉ) Force le UNet à tromper le classifieur à tout prix
             
             'suv_global_log_max': 6.0
         },
