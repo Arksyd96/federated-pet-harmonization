@@ -142,9 +142,13 @@ class ResidualUnlearningSystem(LightningModule):
         return 2.0 * (log.clamp(0, self.hparams.suv_global_log_max) / self.hparams.suv_global_log_max) - 1.0
         
     def _confusion_loss(self, logits: torch.Tensor) -> torch.Tensor:
-        """Maximise l'entropie du classifieur."""
+        """
+        Maximise l'entropie du classifieur (pousse vers une distribution uniforme).
+        On minimise -H(p) = p * log(p) pour éviter l'explosion des gradients 
+        que causait le simple -log(p) lorsque p -> 0.
+        """
         p = F.softmax(logits, dim=1)
-        return -torch.log(p + 1e-8).mean()
+        return (p * torch.log(p + 1e-8)).sum(dim=1).mean()
 
     def configure_optimizers(self):
         opt_g = torch.optim.AdamW(
@@ -176,7 +180,10 @@ class ResidualUnlearningSystem(LightningModule):
         x = self._normalize(suv_source)
         
         # --- Passage Forward ---
-        delta_x = self.unet(x, t=None, condition=None)
+        # On utilise tanh pour borner strictement le delta map dans [-1, 1] et éviter l'explosion des valeurs
+        raw_delta = self.unet(x, t=None, condition=None)
+        delta_x = torch.tanh(raw_delta)
+        
         x_harm = x + self.hparams.alpha_residual * delta_x
         
         # =========================================================
@@ -256,7 +263,8 @@ class ResidualUnlearningSystem(LightningModule):
             
         x = self._normalize(suv_source)
         
-        delta_x = self.unet(x, t=None, condition=None)
+        raw_delta = self.unet(x, t=None, condition=None)
+        delta_x = torch.tanh(raw_delta)
         x_harm = x + self.hparams.alpha_residual * delta_x
         
         # Log visuel seulement pour le premier batch
