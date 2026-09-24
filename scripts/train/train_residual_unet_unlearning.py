@@ -189,49 +189,47 @@ class ResidualUnlearningSystem(LightningModule):
         # =========================================================
         # PHASE 1 : Entraînement du Classifieur (Discriminator)
         # =========================================================
-        # On détache x_harm pour ne pas propager le gradient dans le UNet
-        x_harm_detached = x_harm.detach()
-        
-        # Préparation des entrées [Spatiale + Fréquentielle]
-        real_input = self._prepare_classifier_input(x)
-        fake_input = self._prepare_classifier_input(x_harm_detached)
-        
-        # Prédictions
-        logits_real = self.classifier(real_input)
-        logits_fake = self.classifier(fake_input)
-        
-        # Losses (Cross-Entropy classique : le classifieur DOIT trouver le domaine)
-        loss_d_real = F.cross_entropy(logits_real, domain_labels)
-        loss_d_fake = F.cross_entropy(logits_fake, domain_labels)
-        loss_d = (loss_d_real + loss_d_fake) / 2.0
-        
-        opt_d.zero_grad()
-        self.manual_backward(loss_d)
-        opt_d.step()
-        
-        # Métrique
-        acc_real = (logits_real.argmax(dim=1) == domain_labels).float().mean()
-        acc_fake_d = (logits_fake.argmax(dim=1) == domain_labels).float().mean()
+        # On met à jour le discriminateur moins souvent pour donner l'avantage au UNet
+        if batch_idx % 2 == 0:
+            x_harm_detached = x_harm.detach()
+            
+            real_input = self._prepare_classifier_input(x)
+            fake_input = self._prepare_classifier_input(x_harm_detached)
+            
+            logits_real = self.classifier(real_input)
+            logits_fake = self.classifier(fake_input)
+            
+            loss_d_real = F.cross_entropy(logits_real, domain_labels)
+            loss_d_fake = F.cross_entropy(logits_fake, domain_labels)
+            loss_d = (loss_d_real + loss_d_fake) / 2.0
+            
+            opt_d.zero_grad()
+            self.manual_backward(loss_d)
+            opt_d.step()
+            
+            acc_real = (logits_real.argmax(dim=1) == domain_labels).float().mean()
+            acc_fake_d = (logits_fake.argmax(dim=1) == domain_labels).float().mean()
+            
+            self.log("train_D/loss", loss_d, prog_bar=True)
+            self.log("train_D/acc_real", acc_real, prog_bar=True)
+            self.log("train_D/acc_fake", acc_fake_d)
         
         # =========================================================
         # PHASE 2 : Entraînement du Générateur (UNet)
         # =========================================================
-        # Le UNet doit tromper le classifieur mis à jour ET préserver l'anatomie
+        # On entraîne le UNet à CHAQUE batch (donc 2x plus souvent que le Discriminateur)
         fake_input_for_g = self._prepare_classifier_input(x_harm)
         logits_fake_for_g = self.classifier(fake_input_for_g)
         
-        # 1. Confusion Loss (Adversarial)
         loss_g_adv = self._confusion_loss(logits_fake_for_g)
         
         # 2. Content Loss (L1 sur Delta + SSIM)
         loss_l1 = F.l1_loss(delta_x, torch.zeros_like(delta_x))
         
-        # SSIM demande des inputs dans [0, 1]
         x_01 = (x.clamp(-1, 1) + 1.0) / 2.0
         x_harm_01 = (x_harm.clamp(-1, 1) + 1.0) / 2.0
         loss_ssim = 1.0 - self.ssim_loss(x_harm_01, x_01)
         
-        # Loss Totale Générateur
         loss_g = (
             self.hparams.lambda_adv * loss_g_adv +
             self.hparams.lambda_l1 * loss_l1 +
@@ -341,8 +339,8 @@ def main():
             'alpha_residual': 1.0,     # Facteur multiplicatif du résidu
             
             'lambda_l1': 0.1,         
-            'lambda_ssim': 1.0,        
-            'lambda_adv': 10.0,       
+            'lambda_ssim': 10.0,       # (TRÈS FORT) Force le UNet à préserver l'anatomie locale 
+            'lambda_adv': 1.0,         # Réduit pour éviter que le UNet détruise l'image
             
             'suv_global_log_max': 6.0
         },
