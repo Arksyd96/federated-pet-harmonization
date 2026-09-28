@@ -227,6 +227,10 @@ class ResidualUnlearningSystem(LightningModule):
         # 2. Content Loss (L1 sur Delta + SSIM)
         loss_l1 = F.l1_loss(delta_x, torch.zeros_like(delta_x))
         
+        # OOB (Out-Of-Bounds) Loss : Empêche le UNet de pousser x_harm hors de [-1, 1]
+        # Sinon, le .clamp() annule le gradient du SSIM (faille trouvée par l'optimiseur !)
+        loss_oob = F.relu(torch.abs(x_harm) - 1.0).mean()
+        
         x_01 = (x.clamp(-1, 1) + 1.0) / 2.0
         x_harm_01 = (x_harm.clamp(-1, 1) + 1.0) / 2.0
         loss_ssim = 1.0 - self.ssim_loss(x_harm_01, x_01)
@@ -234,7 +238,8 @@ class ResidualUnlearningSystem(LightningModule):
         loss_g = (
             self.hparams.lambda_adv * loss_g_adv +
             self.hparams.lambda_l1 * loss_l1 +
-            self.hparams.lambda_ssim * loss_ssim
+            self.hparams.lambda_ssim * loss_ssim +
+            50.0 * loss_oob  # Pénalité stricte pour rester dans l'espace image
         )
         
         opt_g.zero_grad()
