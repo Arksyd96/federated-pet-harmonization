@@ -18,4 +18,5 @@ __pycache__/
 
 # ignore all __pycache__ directories no matter the depth of the directory
 **/__pycache__/
+**/temp/
 **/pet_harmonization.egg-info/

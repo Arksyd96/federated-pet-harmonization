@@ -243,10 +243,6 @@ class ResidualUnlearningSystem(LightningModule):
         acc_fake_g = (logits_fake_for_g.argmax(dim=1) == domain_labels).float().mean()
         
         # --- Loggings ---
-        self.log("train_D/loss", loss_d, prog_bar=True)
-        self.log("train_D/acc_real", acc_real, prog_bar=True)
-        self.log("train_D/acc_fake", acc_fake_d)
-        
         self.log("train_G/loss_total", loss_g, prog_bar=True)
         self.log("train_G/loss_adv", loss_g_adv)
         self.log("train_G/loss_l1", loss_l1)
