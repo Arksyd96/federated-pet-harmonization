@@ -180,9 +180,9 @@ class ResidualUnlearningSystem(LightningModule):
         x = self._normalize(suv_source)
         
         # --- Passage Forward ---
-        # On utilise tanh pour borner strictement le delta map dans [-1, 1] et éviter l'explosion des valeurs
-        raw_delta = self.unet(x, t=None, condition=None)
-        delta_x = torch.tanh(raw_delta)
+        # On supprime le tanh car il cause un "vanishing gradient" (zone morte)
+        # Si le UNet pousse trop fort, le gradient du tanh devient 0 et le réseau reste bloqué.
+        delta_x = self.unet(x, t=None, condition=None)
         
         x_harm = x + self.hparams.alpha_residual * delta_x
         
@@ -205,6 +205,7 @@ class ResidualUnlearningSystem(LightningModule):
             
             opt_d.zero_grad()
             self.manual_backward(loss_d)
+            self.clip_gradients(opt_d, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
             opt_d.step()
             
             acc_real = (logits_real.argmax(dim=1) == domain_labels).float().mean()
@@ -238,6 +239,7 @@ class ResidualUnlearningSystem(LightningModule):
         
         opt_g.zero_grad()
         self.manual_backward(loss_g)
+        self.clip_gradients(opt_g, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
         opt_g.step()
         
         acc_fake_g = (logits_fake_for_g.argmax(dim=1) == domain_labels).float().mean()
@@ -257,8 +259,7 @@ class ResidualUnlearningSystem(LightningModule):
             
         x = self._normalize(suv_source)
         
-        raw_delta = self.unet(x, t=None, condition=None)
-        delta_x = torch.tanh(raw_delta)
+        delta_x = self.unet(x, t=None, condition=None)
         x_harm = x + self.hparams.alpha_residual * delta_x
         
         # Log visuel seulement pour le premier batch

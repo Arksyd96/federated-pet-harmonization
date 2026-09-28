@@ -31,16 +31,6 @@ L'entraînement se déroule en deux phases dans le module `UnlearningVAE` (PyTor
 - **Étape B** : Les classifieurs s'entraînent sur des tenseurs détachés (`detach()`) pour rester des experts de la signature.
 - **Étape C** : L'encodeur seul est optimisé via une **confusion loss** (KL vers distribution uniforme) sur `z_content`. Le but est de forcer `z_content` à devenir **invariant au centre** : le classifieur ne doit plus pouvoir deviner le centre à partir du contenu. La signature doit migrer intégralement dans `z_style`.
 
-### D. Le Rôle Critique de la FFT
-La signature du scanner est un bruit très latent, souvent caché dans les **hautes fréquences spatiales** de l'image. Sans aide, le réseau peine à isoler ce signal parmi toute l'information anatomique.
-
-Pour cela, une couche `LearnableFFTHighPassFilter` est appliquée en entrée. Elle extrait une image filtrée passe-haut (les contours et textures haute fréquence) qui est **concaténée** à l'image originale avant d'entrer dans le tronc commun de l'encodeur :
-```
-input = concat(X, FFT_highpass(X))   →   input_conv   →   branches content/style
-```
-Sans cette FFT, la classification du centre échoue quasi systématiquement. Avec, on a pu atteindre ~80% d'accuracy.
-
-**Attention** : La FFT crée un risque de triche. Si la confusion loss (Étape C) est autorisée à remonter ses gradients jusqu'au filtre FFT, le réseau peut "tricher" en modifiant les poids du filtre pour masquer les fréquences discriminantes, au lieu de réellement nettoyer le tenseur de contenu. C'est pourquoi un **Stop-Gradient** sur la FFT et `input_conv` pendant l'Étape C a été envisagé (voir Section 3).
 
 ### E. Le Défi Actuel : La Classification du Centre
 Le problème fondamental n'est ni la reconstruction ni le désapprentissage en soi. **C'est la capacité des classifieurs à détecter la signature du scanner.** Si les classifieurs n'arrivent pas à identifier le centre de manière fiable pendant le Warmup, la confusion loss du Stage 2 est inutile (on ne peut pas désapprendre ce qu'on n'a jamais appris).
@@ -271,7 +261,8 @@ Voici la feuille de route des tests, en isolant une seule variable à la fois :
 **12. Succès de l'encodeur pur et réintroduction du décodeur (18 Sept. 10h30)**
 *Observation* : Le test de l'encodeur pur (sans décodeur, KLD=1e-6, latent=16, initialisation Gaussienne) a généralisé à merveille : **~95% d'accuracy sur le Train ET le Val**. La KLD a fait un petit pic naturel sur les 4 premières itérations (provoqué par le bruit de départ) avant de se stabiliser, ce qui est parfaitement normal.
 *Conclusion majeure* : Le BifurcatedContentStyleEncoder avec ses 16 canaux est parfaitement capable de capturer et conserver la signature du scanner sans overfitter. Le problème réside donc exclusivement dans la compétition imposée par la reconstruction.
-*Action* : Passage à l'Étape 3. Nous réintroduisons le décodeur et la loss de reconstruction (L1 + SSIM) dans le script de test. Nous utilisons le système de warmup progressif de la reconstruction (ec_weight passe de 0.1 à 1.0 sur warmup_epochs) pour voir à quel moment exact la reconstruction écrase la classification (qui se fait toujours sur mu_c).
+*Action* : Passage à l'Étape 3. Nous réintroduisons le décodeur et la loss de reconstruction (L1 + SSIM) dans le script de test. Nous utilisons le système de warmup progressif de la reconstruction (
+ec_weight passe de 0.1 à 1.0 sur warmup_epochs) pour voir à quel moment exact la reconstruction écrase la classification (qui se fait toujours sur mu_c).
 
 **13. Instabilité due à la reconstruction et Ajustement (18 Sept. 13h50)**
 *Observation* : Lors de l'Étape 3 (réintroduction de la reconstruction avec warmup sur 10 epochs), l'accuracy d'entraînement monte à ~90%, mais l'accuracy de validation devient très instable (elle monte à 80% puis s'effondre de manière cyclique). Cette fluctuation coïncide avec la montée en puissance du poids de reconstruction qui vient écraser les gradients de classification.
