@@ -15,6 +15,7 @@ __pycache__/
 **.pdf
 **.csv
 **.pkl
+**.mp4
 
 # ignore all __pycache__ directories no matter the depth of the directory
 **/__pycache__/
