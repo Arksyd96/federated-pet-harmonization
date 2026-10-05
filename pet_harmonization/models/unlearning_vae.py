@@ -1,8 +1,12 @@
-import resource
+try:
+    import resource
+    rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
+except ImportError:
+    resource = None
+
 import os
 from pet_harmonization.data import MultiDomainUnlearningDataModule
-rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
-resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
 
 import logging
 import torch

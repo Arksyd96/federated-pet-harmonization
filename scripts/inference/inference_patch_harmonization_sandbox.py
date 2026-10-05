@@ -15,7 +15,7 @@ def process_subject(
     curr_idx: int,
     length_loader: int,
     spatial_dims: int = 3,
-    alpha: float = 0.0,
+    alpha: float = 0.1,
     patch_size: tuple = (16, 64, 64),
     patch_overlap: tuple = (8, 16, 16),
     override: bool = False
@@ -93,7 +93,7 @@ def main():
     # --- Configuration Inférence Bac à Sable ---
     cfg = {
         'SEED': 101,
-        "num_domains": 5,
+        "num_domains": 1,
         "spatial_dims": 3,
         "suv_global_log_max": 6.0,
         
@@ -101,7 +101,7 @@ def main():
         'ckpt_path': "runs/sandbox-unlearn-vae/stagestage=2-epoch=epoch=147-rec=val/rec_loss=0.0177-style=val/style_acc=0.966-content=val/content_acc=0.219.ckpt", 
         
         # Alpha contrôle l'intensité de la signature (0.0 = harmonisation totale avec un vecteur de style nul)
-        'alpha': 0.5,           
+        'alpha': 0.1,           
         
         'patch_size': (16, 64, 64),
         'patch_overlap': (10, 16, 16),
@@ -123,11 +123,12 @@ def main():
         
         # Configuration du Datamodule pour trouver les images à traiter
         'datamodule': {
-            "root_dir": "./data/PET-EARL/",
-            "split_config": [[0, 50], [0, 50], [0, 50], [0, 50], [0, 50], [0, 50]],
+            "root_dir": "./data/fantomes/",
+            # "split_config": [[0, 50], [0, 50], [0, 50], [0, 50], [0, 50], [0, 50]],
+            "split_config": [[0, 4]],
             "batch_size": 16,
             "patch_size": [16, 64, 64],
-            "num_workers": 24,
+            "num_workers": 4,
             "queue_max_length": 4096,
             "samples_per_volume": 64,
         }
@@ -153,6 +154,8 @@ def main():
     datamodule.prepare_data()
     datamodule.setup()
     loader = datamodule.test_dataloader() # ou val_dataloader() selon ce que vous voulez inférer
+
+    print(datamodule.val_subjects)  # Affiche les sujets de validation pour vérification
     
     for idx, batch in enumerate(loader):
         process_subject(

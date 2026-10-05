@@ -857,7 +857,6 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
             files = os.listdir(subj_path)
             
             pet_file, body_file = self.get_pet_body_files(files)
-            
             if pet_file and body_file:
                 # Configuration de base du sujet
                 subject_kwargs = {
@@ -953,6 +952,8 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
             # 5. Découpage
             train_names = subjects_in_domain[:train_count]
             val_names = subjects_in_domain[train_count:train_count + test_count]
+
+            print(val_names)
 
             print(f"Domaine {domain_name:12} -> ID: {domain_id}, Train: {len(train_names):3d}, Test: {len(val_names):3d} (Total dispo: {total_subj})")
 
