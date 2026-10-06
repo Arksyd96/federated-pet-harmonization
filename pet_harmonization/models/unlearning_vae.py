@@ -1281,6 +1281,11 @@ if __name__ == "__main__":
 
     set_seed(cfg["seed"], workers=True)
 
+    from datetime import datetime
+    current_time = datetime.now().strftime("%Y_%m_%d_%H%M%S")
+    full_save_dir = os.path.join(cfg["save_dir"], current_time)
+    os.makedirs(full_save_dir, exist_ok=True)
+
     # ── DataModule ────────────────────────────────────────────────────────
     datamodule = MultiDomainUnlearningDataModule(**cfg["datamodule"])
 
@@ -1315,7 +1320,7 @@ if __name__ == "__main__":
 
     # ── Logger WandB ──────────────────────────────────────────────────────
     wb_logger = WandbLogger(
-        save_dir=cfg["save_dir"],
+        save_dir=full_save_dir,
         project=cfg["project_name"],
         name=cfg["run_name"],
         config=cfg,
@@ -1323,7 +1328,7 @@ if __name__ == "__main__":
 
     # ── Callbacks ──
     checkpoint_callback = ModelCheckpoint(
-        dirpath=cfg["save_dir"],
+        dirpath=os.path.join(full_save_dir, "checkpoints"),
         filename="{stage:.0f}-epoch={epoch:03d}-rec={val/rec_loss:.4f}-style={val/style_acc:.3f}-content={val/content_acc:.3f}",
         monitor="val/composite_score",
         mode="min",
@@ -1335,7 +1340,7 @@ if __name__ == "__main__":
     # ── Trainer ───────────────────────────────────────────────────────────
     trainer = Trainer(
         logger=wb_logger,
-        default_root_dir=cfg["save_dir"],
+        default_root_dir=full_save_dir,
         callbacks=[checkpoint_callback],
         precision=cfg["precision"],
         accelerator="gpu",
