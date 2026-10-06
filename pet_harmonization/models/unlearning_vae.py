@@ -609,17 +609,29 @@ class DisentangledVAE(nn.Module):
         style_emb = self.style_embedder(z_style)
         return self.decoder(z_content, style_emb)
     
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, cfg_drop_prob: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         mu_c, logvar_c, mu_s, logvar_s = self.encode(x)
 
         z_c = reparameterize(mu_c, logvar_c)
         z_s = reparameterize(mu_s, logvar_s)
 
+        # On garde les vrais vecteurs pour les retourner (pour la loss KL et les classifieurs)
+        z_c_out = z_c
+        z_s_out = z_s
+
+        # Latent Dropout / CFG : on force le décodeur à "halluciner" le style moyen
+        if self.training and cfg_drop_prob > 0.0:
+            if torch.rand(1).item() < cfg_drop_prob:
+                # Stop-Gradient sur le contenu pour empêcher l'encodeur de tricher
+                z_c = z_c.detach()
+                # Remplacement du style par du bruit N(0,1) pour rester sur le "Typical Set"
+                z_s = torch.randn_like(z_s)
+
         norm_z_c = self.content_norm(z_c)
 
         x_hat = self.decode(norm_z_c, z_s)
 
-        return x_hat, mu_c, logvar_c, mu_s, logvar_s, z_c, z_s
+        return x_hat, mu_c, logvar_c, mu_s, logvar_s, z_c_out, z_s_out
     
     @torch.no_grad()
     def harmonize(
@@ -929,7 +941,7 @@ class UnlearningVAE(LightningModule):
             for p in self.vae.encoder.parameters():
                 p.requires_grad = True
 
-            x_hat, mu_c, logvar_c, mu_s, logvar_s, z_content, z_style = self.vae.forward(x)
+            x_hat, mu_c, logvar_c, mu_s, logvar_s, z_content, z_style = self.vae.forward(x, cfg_drop_prob=0.05)
 
             # Classifieurs — graphe complet (pas de detach), les deux apprennent
             logits_style   = self.style_classifier(z_style)
@@ -1263,7 +1275,7 @@ if __name__ == "__main__":
         
         # WandB / Sauvegarde
         "project_name": "federated-pet",
-        "run_name": "Center Classifier (VAE Encoder) — 64 Channels + Decoupled + Vibrant z_c",
+        "run_name": "Center Classifier (VAE Encoder) — 64 Channels + Decoupled + Vibrant z_c (with few masking)",
         "save_dir": "runs/sandbox-unlearn-vae/",
     }
 
