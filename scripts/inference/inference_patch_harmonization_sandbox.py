@@ -123,9 +123,9 @@ def main():
         
         # Configuration du Datamodule pour trouver les images à traiter
         'datamodule': {
-            "root_dir": "./data/fantomes/",
-            # "split_config": [[0, 50], [0, 50], [0, 50], [0, 50], [0, 50], [0, 50]],
-            "split_config": [[0, 4]],
+            "root_dir": "./data/PET-EA/",
+            "split_config": [[0, 50], [0, 50], [0, 50], [0, 50], [0, 50], [0, 50]],
+            # "split_config": [[0, 4]],
             "batch_size": 16,
             "patch_size": [16, 64, 64],
             "num_workers": 4,
