@@ -953,8 +953,6 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
             train_names = subjects_in_domain[:train_count]
             val_names = subjects_in_domain[train_count:train_count + test_count]
 
-            print(val_names)
-
             print(f"Domaine {domain_name:12} -> ID: {domain_id}, Train: {len(train_names):3d}, Test: {len(val_names):3d} (Total dispo: {total_subj})")
 
             # 6. Création des objets TorchIO

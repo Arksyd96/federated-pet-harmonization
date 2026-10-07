@@ -24,7 +24,7 @@ def process_subject(
     subject_name = subject['subject_name']
     subj_out_dir = batch['subject_path'][0]
     
-    filename = "vae-3d-sandbox"
+    filename = "vae-3d-sandbox-random-style"
     pred_path = os.path.join(subj_out_dir, f"harmonized-pet-{filename}.nii.gz")
     
     print(f"\nTreating subject: {subject_name} ({curr_idx}/{length_loader})")
@@ -44,6 +44,10 @@ def process_subject(
     aggregator = tio.data.GridAggregator(grid_sampler, overlap_mode='hann')
 
     with torch.inference_mode():
+        # Génération d'un unique vecteur de style aléatoire Gaussien (Typical Set) pour tout le volume
+        style_channels = model.hparams.style_channels if hasattr(model.hparams, 'style_channels') else 256
+        z_style_fixed = torch.randn(1, style_channels, device=device)
+
         for patch_batch in tqdm(patch_loader, desc=f"Inférence (UnlearningVAE)"):
             locations = patch_batch[tio.LOCATION]
             
@@ -64,12 +68,12 @@ def process_subject(
             patch_norm = model._normalize(patch_src)
             
             # Appel de la nouvelle fonction harmonize que nous avons ajoutée
-            # L'absence de style injecte nativement le style source, annulé par l'alpha
+            # On injecte un vecteur gaussien aléatoire pour forcer le style "moyen", sans réduire sa variance (alpha=1.0)
             patch_pred_norm = model.vae.harmonize(
                 patch_norm, 
                 x_style_ref=None, 
-                z_style_fixed=None, 
-                alpha_style=alpha
+                z_style_fixed=z_style_fixed, 
+                alpha_style=1.0
             )
             
             # Dénormalisation
@@ -98,13 +102,14 @@ def main():
         "suv_global_log_max": 6.0,
         
         # Chemin vers le checkpoint que vous avez retrouvé
-        'ckpt_path': "runs/sandbox-unlearn-vae/stagestage=2-epoch=epoch=147-rec=val/rec_loss=0.0177-style=val/style_acc=0.966-content=val/content_acc=0.219.ckpt", 
+        #'ckpt_path': "runs/sandbox-unlearn-vae/stagestage=2-epoch=epoch=147-rec=val/rec_loss=0.0177-style=val/style_acc=0.966-content=val/content_acc=0.219.ckpt", 
+        'ckpt_path': "runs/sandbox-unlearn-vae/2026_10_06_160101/checkpoints/2-epoch=135-rec=0.0179-style=0.964-content=0.194.ckpt",
         
         # Alpha contrôle l'intensité de la signature (0.0 = harmonisation totale avec un vecteur de style nul)
-        'alpha': 0.5,           
+        'alpha': 1.0,           
         
         'patch_size': (16, 64, 64),
-        'patch_overlap': (10, 16, 16),
+        'patch_overlap': (12, 16, 16),
         'override': True,
 
         # Modèle
@@ -123,7 +128,7 @@ def main():
         
         # Configuration du Datamodule pour trouver les images à traiter
         'datamodule': {
-            "root_dir": "./data/PET-EA/",
+            "root_dir": "./data/PET-EARL/",
             "split_config": [[0, 50], [0, 50], [0, 50], [0, 50], [0, 50], [0, 50]],
             # "split_config": [[0, 4]],
             "batch_size": 16,
