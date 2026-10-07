@@ -619,13 +619,13 @@ class DisentangledVAE(nn.Module):
         z_c_out = z_c
         z_s_out = z_s
 
-        # Latent Dropout / CFG : on force le décodeur à "halluciner" le style moyen
+        # Latent Dropout / CFG : on force le décodeur à apprendre sans condition de style
         if self.training and cfg_drop_prob > 0.0:
             if torch.rand(1).item() < cfg_drop_prob:
                 # Stop-Gradient sur le contenu pour empêcher l'encodeur de tricher
                 z_c = z_c.detach()
-                # Remplacement du style par du bruit N(0,1) pour rester sur le "Typical Set"
-                z_s = torch.randn_like(z_s)
+                # Remplacement du style par un vecteur nul (0)
+                z_s = torch.zeros_like(z_s)
 
         norm_z_c = self.content_norm(z_c)
 
@@ -941,7 +941,7 @@ class UnlearningVAE(LightningModule):
             for p in self.vae.encoder.parameters():
                 p.requires_grad = True
 
-            x_hat, mu_c, logvar_c, mu_s, logvar_s, z_content, z_style = self.vae.forward(x, cfg_drop_prob=0.05)
+            x_hat, mu_c, logvar_c, mu_s, logvar_s, z_content, z_style = self.vae.forward(x, cfg_drop_prob=0.1)
 
             # Classifieurs — graphe complet (pas de detach), les deux apprennent
             logits_style   = self.style_classifier(z_style)
