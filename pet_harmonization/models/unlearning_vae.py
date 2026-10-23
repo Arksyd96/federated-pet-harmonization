@@ -609,7 +609,12 @@ class DisentangledVAE(nn.Module):
         style_emb = self.style_embedder(z_style)
         return self.decoder(z_content, style_emb)
     
-    def forward(self, x: torch.Tensor, cfg_drop_prob: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        cfg_drop_prob: float = 0.0,
+        cfg_drop_mode: str = "gaussian"
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         mu_c, logvar_c, mu_s, logvar_s = self.encode(x)
 
         z_c = reparameterize(mu_c, logvar_c)
@@ -625,7 +630,10 @@ class DisentangledVAE(nn.Module):
                 # Stop-Gradient sur le contenu pour empêcher l'encodeur de tricher
                 z_c = z_c.detach()
                 # Remplacement du style par un vecteur nul (0)
-                z_s = torch.zeros_like(z_s)
+                if cfg_drop_mode == "zero":
+                    z_s = torch.zeros_like(z_s)
+                else:  # "gaussian" (défaut)
+                    z_s = torch.randn_like(z_s)
 
         norm_z_c = self.content_norm(z_c)
 
@@ -698,11 +706,15 @@ class UnlearningVAE(LightningModule):
         warmup_epochs: int = 0,      # Base : 0. A tester : 5, 10...
         max_epochs: int = 100,
         k_style_steps: int = 2,
+        cfg_drop_prob: float = 0.1,
+        cfg_drop_mode: str = "gaussian",  # "gaussian" ou "zero"
 
         suv_global_log_max: float = 6.0
     ):
         super().__init__()
         self.save_hyperparameters()
+        self.cfg_drop_prob = cfg_drop_prob
+        self.cfg_drop_mode = cfg_drop_mode
         self.num_classes = num_classes
         self.suv_global_log_max = suv_global_log_max
         self.lr_vae = lr_vae
@@ -941,7 +953,11 @@ class UnlearningVAE(LightningModule):
             for p in self.vae.encoder.parameters():
                 p.requires_grad = True
 
-            x_hat, mu_c, logvar_c, mu_s, logvar_s, z_content, z_style = self.vae.forward(x, cfg_drop_prob=0.1)
+            x_hat, mu_c, logvar_c, mu_s, logvar_s, z_content, z_style = self.vae.forward(
+                x, 
+                cfg_drop_prob=self.cfg_drop_prob, 
+                cfg_drop_mode=self.cfg_drop_mode
+            )
 
             # Classifieurs — graphe complet (pas de detach), les deux apprennent
             logits_style   = self.style_classifier(z_style)
@@ -1256,26 +1272,30 @@ if __name__ == "__main__":
         # Entraînement
         "lr_vae": 1e-4,
         "lr_clf": 1e-5,
-        "lr_unlearn": 1.0e-7,
         "lr_classifiers_final": 1.0e-6,
-        "lr_unlearn_final": 5.0e-6,
+        "lr_unlearn": 1.0e-6,
+        "lr_unlearn_final": 1.0e-5,
         "weight_decay": 1e-6,
-        "max_epochs": 150,
+        "max_epochs": 140,
         "precision": "bf16-mixed",
         "limit_train_batches": 250,
         "limit_val_batches": 50,
         
         # Paramètres d'ablation pour le classifieur
         "clf_weight": 1.0,         # Poids de la classification
-        "kld_weight": 5e-7,        # Retour à 5e-7
+        "kld_weight": 1e-6,        
         "rec_weight": 1.0,         # Poids final de la reconstruction
-        "ssim_weight": 0.5,        # Poids du SSIM
-        "warmup_epochs": 50,       # Epochs pour le warmup progressif de la reconstruction (0.1 -> 1.0)
+        "ssim_weight": 0.1,        # Poids du SSIM
+        "warmup_epochs": 40,       # Epochs pour le warmup progressif de la reconstruction (0.1 -> 1.0)
         "k_style_steps": 2,
+        
+        # Harmonisation / Latent Dropout en Stage 2
+        "cfg_drop_prob": 0.1,         # Probabilité de masquer le style (0.1 = 10%)
+        "cfg_drop_mode": "gaussian",  # "gaussian" (bruit gaussien) ou "zero" (vecteur nul)
         
         # WandB / Sauvegarde
         "project_name": "federated-pet",
-        "run_name": "Center Classifier (VAE Encoder) — 64 Channels + Decoupled + Vibrant z_c (with few masking)",
+        "run_name": "Center Classifier (VAE Encoder) — 64 Channels + gaussian dropout",
         "save_dir": "runs/sandbox-unlearn-vae/",
     }
 
@@ -1314,6 +1334,8 @@ if __name__ == "__main__":
         ssim_weight=cfg["ssim_weight"],
         warmup_epochs=cfg["warmup_epochs"],
         k_style_steps=cfg["k_style_steps"],
+        cfg_drop_prob=cfg["cfg_drop_prob"],
+        cfg_drop_mode=cfg["cfg_drop_mode"],
         spatial_dims=cfg["spatial_dims"],
         suv_global_log_max=cfg["suv_global_log_max"]
     )
@@ -1333,7 +1355,7 @@ if __name__ == "__main__":
         monitor="val/composite_score",
         mode="min",
         save_last=True,
-        save_top_k=10,
+        save_top_k=5,
         auto_insert_metric_name=False,
     )
 

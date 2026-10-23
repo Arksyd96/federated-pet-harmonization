@@ -15,19 +15,21 @@ def process_subject(
     curr_idx: int,
     length_loader: int,
     spatial_dims: int = 3,
-    alpha: float = 0.1,
+    harmonization_mode: str = "gaussian",  # "gaussian", "zero", "original"
+    alpha: float = 0.5,
     patch_size: tuple = (16, 64, 64),
     patch_overlap: tuple = (8, 16, 16),
-    override: bool = False
+    override: bool = False,
+    z_style_fixed: torch.Tensor = None
 ):
     subject = tio.utils.get_subjects_from_batch(batch)[0]
     subject_name = subject['subject_name']
     subj_out_dir = batch['subject_path'][0]
     
-    filename = "vae-3d-sandbox-random-style"
+    filename = f"vae-3d-sandbox-{harmonization_mode}"
     pred_path = os.path.join(subj_out_dir, f"harmonized-pet-{filename}.nii.gz")
     
-    print(f"\nTreating subject: {subject_name} ({curr_idx}/{length_loader})")
+    print(f"\nTreating subject: {subject_name} ({curr_idx}/{length_loader}) [Mode: {harmonization_mode}]")
     
     if os.path.exists(pred_path):
         if not override:
@@ -43,8 +45,23 @@ def process_subject(
 
     aggregator = tio.data.GridAggregator(grid_sampler, overlap_mode='hann')
 
+    style_channels = getattr(model.hparams, 'style_channels', 256)
+
+    # Préparation du vecteur de style selon le mode choisi
+    if harmonization_mode == "gaussian":
+        current_z_style = z_style_fixed if z_style_fixed is not None else torch.randn(1, style_channels, device=device)
+        current_alpha = 1.0
+    elif harmonization_mode == "zero":
+        current_z_style = torch.zeros(1, style_channels, device=device)
+        current_alpha = 1.0
+    elif harmonization_mode == "original":
+        current_z_style = None
+        current_alpha = alpha
+    else:
+        raise ValueError(f"Mode d'harmonisation non reconnu : {harmonization_mode}")
+
     with torch.inference_mode():
-        for patch_batch in tqdm(patch_loader, desc=f"Inférence (UnlearningVAE)"):
+        for patch_batch in tqdm(patch_loader, desc=f"Inférence ({harmonization_mode})"):
             locations = patch_batch[tio.LOCATION]
             
             # shape issue de TorchIO : (B, 1, D, H, W)
@@ -63,13 +80,12 @@ def process_subject(
             # Normalisation (utilise la méthode interne du modèle)
             patch_norm = model._normalize(patch_src)
             
-            # Appel de la nouvelle fonction harmonize que nous avons ajoutée
-            # L'absence de style injecte nativement le style source, annulé par l'alpha
+            # Harmonisation selon le style préparé
             patch_pred_norm = model.vae.harmonize(
                 patch_norm, 
                 x_style_ref=None, 
-                z_style_fixed=None, 
-                alpha_style=alpha
+                z_style_fixed=current_z_style, 
+                alpha_style=current_alpha
             )
             
             # Dénormalisation
@@ -97,15 +113,29 @@ def main():
         "spatial_dims": 3,
         "suv_global_log_max": 6.0,
         
-        # Chemin vers le checkpoint que vous avez retrouvé
-        #'ckpt_path': "runs/sandbox-unlearn-vae/stagestage=2-epoch=epoch=147-rec=val/rec_loss=0.0177-style=val/style_acc=0.966-content=val/content_acc=0.219.ckpt", 
-        'ckpt_path': "runs/sandbox-unlearn-vae/2026_10_06_160101/checkpoints/2-epoch=149-rec=0.0190-style=0.966-content=0.186.ckpt",
+        # ── Mode d'harmonisation ──
+        # Options :
+        #   - "gaussian" : injecte un bruit N(0,1) fixe (harmonisation dans le Typical Set)
+        #   - "zero"     : injecte un vecteur de zéros (harmonisation centre absolu)
+        #   - "original" : conserve le style patient atténué par 'alpha'
+        "harmonization_mode": "gaussian",
+        "global_gaussian_style": True,  # Si True en mode "gaussian", un seul vecteur aléatoire est partagé pour toute la cohorte
         
-        # Alpha contrôle l'intensité de la signature (0.0 = harmonisation totale avec un vecteur de style nul)
-        'alpha': 1.0,           
+        # Checkpoints disponibles documentés :
+        # 1. Modèle sans dropout (à utiliser avec mode="original" et alpha=0.5)
+        # 'ckpt_path': "runs/sandbox-unlearn-vae/working_ckpt/stagestage=2-epoch=epoch=147-rec=val/rec_loss=0.0177-style=val/style_acc=0.966-content=val/content_acc=0.219.ckpt", 
+        
+        # 2. Modèle entraîné avec style Gaussien (à utiliser avec mode="gaussian") [ACTIF PAR DÉFAUT]
+        'ckpt_path': "runs/sandbox-unlearn-vae/2026_10_06_160101_random_style/checkpoints/2-epoch=149-rec=0.0190-style=0.966-content=0.186.ckpt",
+
+        # 3. Modèle entraîné avec style Zéro (à utiliser avec mode="zero")
+        # 'ckpt_path': "runs/sandbox-unlearn-vae/2026_10_07_182104/checkpoints/2-epoch=149-rec=0.0234-style=0.961-content=0.224.ckpt",
+        
+        # Alpha (utilisé uniquement si harmonization_mode == "original")
+        'alpha': 0.5,           
         
         'patch_size': (16, 64, 64),
-        'patch_overlap': (8, 16, 16),
+        'patch_overlap': (10, 16, 16),
         'override': True,
 
         # Modèle
@@ -148,7 +178,18 @@ def main():
     model.to(device)
     model.eval()
 
-    print(f"⚠️ Harmonisation avec un style neutre (alpha={cfg['alpha']}).")
+    print(f"⚙️ Harmonisation configurée en mode : '{cfg['harmonization_mode']}'")
+
+    # Préparation du vecteur de style global si demandé
+    style_channels = getattr(model.hparams, 'style_channels', 256)
+    if cfg['harmonization_mode'] == 'gaussian' and cfg.get('global_gaussian_style', True):
+        global_z_style = torch.randn(1, style_channels, device=device)
+        print(f"🎲 Style Gaussien global N(0,1) généré pour toute la cohorte (dim={style_channels}).")
+    elif cfg['harmonization_mode'] == 'zero':
+        global_z_style = torch.zeros(1, style_channels, device=device)
+        print(f"🛑 Style neutre Zéro activé pour toute la cohorte.")
+    else:
+        global_z_style = None
 
     # Préparation des données
     datamodule = MultiDomainUnlearningDataModule(**cfg['datamodule'])
@@ -164,10 +205,12 @@ def main():
             curr_idx=idx + 1,
             length_loader=len(loader),
             spatial_dims=cfg['spatial_dims'],
+            harmonization_mode=cfg['harmonization_mode'],
             alpha=cfg['alpha'],
             patch_size=cfg['patch_size'],
             patch_overlap=cfg['patch_overlap'],
-            override=cfg['override']
+            override=cfg['override'],
+            z_style_fixed=global_z_style
         )
 
 if __name__ == "__main__":
