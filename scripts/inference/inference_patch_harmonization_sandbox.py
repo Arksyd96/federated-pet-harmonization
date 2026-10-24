@@ -126,7 +126,8 @@ def main():
         # 'ckpt_path': "runs/sandbox-unlearn-vae/working_ckpt/stagestage=2-epoch=epoch=147-rec=val/rec_loss=0.0177-style=val/style_acc=0.966-content=val/content_acc=0.219.ckpt", 
         
         # 2. Modèle entraîné avec style Gaussien (à utiliser avec mode="gaussian") [ACTIF PAR DÉFAUT]
-        'ckpt_path': "runs/sandbox-unlearn-vae/2026_10_06_160101_random_style/checkpoints/2-epoch=149-rec=0.0190-style=0.966-content=0.186.ckpt",
+        # 'ckpt_path': "runs/sandbox-unlearn-vae/2026_10_06_160101_random_style/checkpoints/2-epoch=149-rec=0.0190-style=0.966-content=0.186.ckpt",
+        'ckpt_path': "runs/sandbox-unlearn-vae/2026_10_23_162550/checkpoints/2-epoch=127-rec=0.0201-style=0.960-content=0.172.ckpt",
 
         # 3. Modèle entraîné avec style Zéro (à utiliser avec mode="zero")
         # 'ckpt_path': "runs/sandbox-unlearn-vae/2026_10_07_182104/checkpoints/2-epoch=149-rec=0.0234-style=0.961-content=0.224.ckpt",

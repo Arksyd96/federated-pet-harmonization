@@ -1273,7 +1273,7 @@ if __name__ == "__main__":
         "lr_vae": 1e-4,
         "lr_clf": 1e-5,
         "lr_classifiers_final": 1.0e-6,
-        "lr_unlearn": 1.0e-6,
+        "lr_unlearn": 5.0e-7,
         "lr_unlearn_final": 1.0e-5,
         "weight_decay": 1e-6,
         "max_epochs": 140,
