@@ -15,7 +15,7 @@ def process_subject(
     curr_idx: int,
     length_loader: int,
     spatial_dims: int = 3,
-    harmonization_mode: str = "gaussian",  # "gaussian", "zero", "original"
+    harmonization_mode: str = "gaussian",  # "gaussian", "zero", "original", ou mode style extrait
     alpha: float = 0.5,
     patch_size: tuple = (16, 64, 64),
     patch_overlap: tuple = (8, 16, 16),
@@ -47,9 +47,13 @@ def process_subject(
 
     style_channels = getattr(model.hparams, 'style_channels', 256)
 
-    # Préparation du vecteur de style selon le mode choisi
-    if harmonization_mode == "gaussian":
-        current_z_style = z_style_fixed if z_style_fixed is not None else torch.randn(1, style_channels, device=device)
+    # Préparation du vecteur de style :
+    # Si un style fixe (ex: chargé depuis styles.pt ou global) est fourni, il a priorité absolue
+    if z_style_fixed is not None:
+        current_z_style = z_style_fixed
+        current_alpha = 1.0
+    elif harmonization_mode == "gaussian":
+        current_z_style = torch.randn(1, style_channels, device=device)
         current_alpha = 1.0
     elif harmonization_mode == "zero":
         current_z_style = torch.zeros(1, style_channels, device=device)
@@ -112,8 +116,14 @@ def main():
         "num_domains": 1,
         "spatial_dims": 3,
         "suv_global_log_max": 6.0,
+
+        # ── Style externe pré-calculé (depuis styles.pt) ──
+        # Mettre 'style_key' pour activer (ex: "global_median", "center_0", "center_1")
+        # Si None : utilise les modes classiques ci-dessous ('harmonization_mode')
+        "styles_dict_path": "./data/style_embeddings/styles.pt",
+        "style_key": None,  # Options : "global_median" | "center_0" | "center_1" ... ou None
         
-        # ── Mode d'harmonisation ──
+        # ── Mode d'harmonisation classique (actif si style_key est None) ──
         # Options :
         #   - "gaussian" : injecte un bruit N(0,1) fixe (harmonisation dans le Typical Set)
         #   - "zero"     : injecte un vecteur de zéros (harmonisation centre absolu)
@@ -133,7 +143,7 @@ def main():
         # 'ckpt_path': "runs/sandbox-unlearn-vae/2026_10_07_182104/checkpoints/2-epoch=149-rec=0.0234-style=0.961-content=0.224.ckpt",
         
         # Alpha (utilisé uniquement si harmonization_mode == "original")
-        'alpha': 0.5,           
+        'alpha': 1.0,           
         
         'patch_size': (16, 64, 64),
         'patch_overlap': (10, 16, 16),
@@ -179,18 +189,39 @@ def main():
     model.to(device)
     model.eval()
 
-    print(f"⚙️ Harmonisation configurée en mode : '{cfg['harmonization_mode']}'")
-
-    # Préparation du vecteur de style global si demandé
     style_channels = getattr(model.hparams, 'style_channels', 256)
-    if cfg['harmonization_mode'] == 'gaussian' and cfg.get('global_gaussian_style', True):
-        global_z_style = torch.randn(1, style_channels, device=device)
-        print(f"🎲 Style Gaussien global N(0,1) généré pour toute la cohorte (dim={style_channels}).")
-    elif cfg['harmonization_mode'] == 'zero':
-        global_z_style = torch.zeros(1, style_channels, device=device)
-        print(f"🛑 Style neutre Zéro activé pour toute la cohorte.")
+    active_mode = cfg['harmonization_mode']
+    global_z_style = None
+
+    # 1. Priorité au style extrait si style_key est renseigné
+    if cfg.get('style_key') is not None:
+        dict_path = cfg.get('styles_dict_path', "./data/style_embeddings/styles.pt")
+        if not os.path.exists(dict_path):
+            raise FileNotFoundError(f"Fichier de styles introuvable : {dict_path}\nLancez d'abord extract_center_styles.py !")
+
+        styles_dict = torch.load(dict_path, map_location=device)
+        key = cfg['style_key']
+        if key not in styles_dict:
+            raise KeyError(f"Clé '{key}' introuvable dans {dict_path}. Clés disponibles : {list(styles_dict.keys())}")
+
+        global_z_style = styles_dict[key].to(device)
+        if global_z_style.dim() == 1:
+            global_z_style = global_z_style.unsqueeze(0)
+
+        active_mode = f"style_{key}"
+        print(f"📦 Style extrait activé depuis {dict_path} [clé='{key}'] (Norme = {global_z_style.norm():.3f})")
+
     else:
-        global_z_style = None
+        # 2. Mode classique (gaussian, zero, original)
+        print(f"⚙️ Harmonisation configurée en mode classique : '{cfg['harmonization_mode']}'")
+        if cfg['harmonization_mode'] == 'gaussian' and cfg.get('global_gaussian_style', True):
+            global_z_style = torch.randn(1, style_channels, device=device)
+            print(f"🎲 Style Gaussien global N(0,1) généré pour toute la cohorte (dim={style_channels}).")
+        elif cfg['harmonization_mode'] == 'zero':
+            global_z_style = torch.zeros(1, style_channels, device=device)
+            print(f"🛑 Style neutre Zéro activé pour toute la cohorte.")
+        else:
+            global_z_style = None
 
     # Préparation des données
     datamodule = MultiDomainUnlearningDataModule(**cfg['datamodule'])
@@ -206,7 +237,7 @@ def main():
             curr_idx=idx + 1,
             length_loader=len(loader),
             spatial_dims=cfg['spatial_dims'],
-            harmonization_mode=cfg['harmonization_mode'],
+            harmonization_mode=active_mode,
             alpha=cfg['alpha'],
             patch_size=cfg['patch_size'],
             patch_overlap=cfg['patch_overlap'],
