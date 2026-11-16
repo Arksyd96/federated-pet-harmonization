@@ -121,7 +121,7 @@ def main():
         # Mettre 'style_key' pour activer (ex: "global_median", "center_0", "center_1")
         # Si None : utilise les modes classiques ci-dessous ('harmonization_mode')
         "styles_dict_path": "./data/style_embeddings/styles.pt",
-        "style_key": None,  # Options : "global_median" | "center_0" | "center_1" ... ou None
+        "style_key": 'global_median',  # Options : "global_median" | "center_0" | "center_1" ... ou None
         
         # ── Mode d'harmonisation classique (actif si style_key est None) ──
         # Options :
