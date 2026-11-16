@@ -169,7 +169,7 @@ def main():
         center_medians[d_id] = c_median
 
         # Clés d'accès directes
-        styles_dict[f"center_{d_id}"] = c_median
+        styles_dict[f"center-{d_id}"] = c_median
         styles_dict[d_name] = c_median
 
         print(f"  • {d_name} (ID {d_id}) : {patients_per_center_count[d_id]} patients, {all_center_mu_s.shape[0]} patchs | Norme = {c_median.norm():.3f}")
@@ -178,8 +178,8 @@ def main():
     if center_medians:
         stacked_medians = torch.cat(list(center_medians.values()), dim=0) # (num_centers, 256)
         global_median = torch.median(stacked_medians, dim=0).values.unsqueeze(0) # (1, 256)
-        styles_dict["global_median"] = global_median
-        print(f"\n🌐 Style Médian Global (clé 'global_median') : Norme = {global_median.norm():.3f}")
+        styles_dict["global-median"] = global_median
+        print(f"\n🌐 Style Médian Global (clé 'global-median') : Norme = {global_median.norm():.3f}")
 
     # ── Sauvegarde unique sous format dictionnaire ──
     os.makedirs(os.path.dirname(cfg['output_path']), exist_ok=True)

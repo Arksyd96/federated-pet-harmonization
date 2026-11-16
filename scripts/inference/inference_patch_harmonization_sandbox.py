@@ -118,10 +118,10 @@ def main():
         "suv_global_log_max": 6.0,
 
         # ── Style externe pré-calculé (depuis styles.pt) ──
-        # Mettre 'style_key' pour activer (ex: "global_median", "center_0", "center_1")
+        # Mettre 'style_key' pour activer (ex: "global-median", "center-0", "center-1")
         # Si None : utilise les modes classiques ci-dessous ('harmonization_mode')
         "styles_dict_path": "./data/style_embeddings/styles.pt",
-        "style_key": 'global_median',  # Options : "global_median" | "center_0" | "center_1" ... ou None
+        "style_key": 'nantes',  # Options : "global-median" | "center-0" | "nantes" ... ou None
         
         # ── Mode d'harmonisation classique (actif si style_key est None) ──
         # Options :
@@ -166,7 +166,7 @@ def main():
         # Configuration du Datamodule pour trouver les images à traiter
         'datamodule': {
             "root_dir": "./data/PET-EARL/",
-            "split_config": [[0, 50], [0, 50], [0, 50], [0, 50], [0, 50], [0, 50]],
+            "split_config": [[0, 50], [0, 50], [0, 50], [0, 50], [0, 0], [0, 50]],  # nantes (index 4) ignoré car centre cible
             # "split_config": [[0, 4]],
             "batch_size": 16,
             "patch_size": [16, 64, 64],
@@ -208,7 +208,7 @@ def main():
         if global_z_style.dim() == 1:
             global_z_style = global_z_style.unsqueeze(0)
 
-        active_mode = f"style_{key}"
+        active_mode = f"style-{key}"
         print(f"📦 Style extrait activé depuis {dict_path} [clé='{key}'] (Norme = {global_z_style.norm():.3f})")
 
     else:
