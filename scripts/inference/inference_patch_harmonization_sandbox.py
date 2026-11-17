@@ -118,17 +118,17 @@ def main():
         "suv_global_log_max": 6.0,
 
         # ── Style externe pré-calculé (depuis styles.pt) ──
-        # Mettre 'style_key' pour activer (ex: "global-median", "center-0", "center-1")
+        # Mettre 'style_key' pour activer (ex: "global-median", "center-0", "nantes")
         # Si None : utilise les modes classiques ci-dessous ('harmonization_mode')
         "styles_dict_path": "./data/style_embeddings/styles.pt",
-        "style_key": 'nantes',  # Options : "global-median" | "center-0" | "nantes" ... ou None
+        "style_key": None,  # Options : "global-median" | "center-0" | "nantes" ... ou None
         
         # ── Mode d'harmonisation classique (actif si style_key est None) ──
         # Options :
         #   - "gaussian" : injecte un bruit N(0,1) fixe (harmonisation dans le Typical Set)
         #   - "zero"     : injecte un vecteur de zéros (harmonisation centre absolu)
-        #   - "original" : conserve le style patient atténué par 'alpha'
-        "harmonization_mode": "gaussian",
+        #   - "original" : conserve le style propre du patient (avec alpha=1.0 -> 100% du style natif)
+        "harmonization_mode": "original",
         "global_gaussian_style": True,  # Si True en mode "gaussian", un seul vecteur aléatoire est partagé pour toute la cohorte
         
         # Checkpoints disponibles documentés :
@@ -166,7 +166,7 @@ def main():
         # Configuration du Datamodule pour trouver les images à traiter
         'datamodule': {
             "root_dir": "./data/PET-EARL/",
-            "split_config": [[0, 50], [0, 50], [0, 50], [0, 50], [0, 0], [0, 50]],  # nantes (index 4) ignoré car centre cible
+            "split_config": [[0, 50], [0, 50], [0, 50], [0, 50], [0, 50], [0, 50]],
             # "split_config": [[0, 4]],
             "batch_size": 16,
             "patch_size": [16, 64, 64],
@@ -222,6 +222,7 @@ def main():
             print(f"🛑 Style neutre Zéro activé pour toute la cohorte.")
         else:
             global_z_style = None
+            print(f"🧬 Style original propre à chaque patient conservé (alpha={cfg['alpha']}).")
 
     # Préparation des données
     datamodule = MultiDomainUnlearningDataModule(**cfg['datamodule'])
