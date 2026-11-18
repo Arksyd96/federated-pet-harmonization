@@ -36,6 +36,25 @@ def parse_file_name(filename):
     else:
         return filename.split('.')[0]
 
+def _ensure_ras(img: sitk.Image) -> sitk.Image:
+    """Reoriente sans interpolation une image SimpleITK vers l'orientation canonique RAS."""
+    orient = sitk.DICOMOrientImageFilter_GetOrientationFromDirectionCosines(img.GetDirection())
+    if orient != "RAS":
+        return sitk.DICOMOrient(img, "RAS")
+    return img
+
+
+def _same_grid(ref: sitk.Image, other: sitk.Image, origin_tol: float = 0.5) -> bool:
+    """Verifie que deux images RAS partagent la meme grille voxel (Size, Spacing, Origin)."""
+    if ref.GetSize() != other.GetSize():
+        return False
+    if any(abs(a - b) > 1e-3 for a, b in zip(ref.GetSpacing(), other.GetSpacing())):
+        return False
+    if any(abs(a - b) > origin_tol for a, b in zip(ref.GetOrigin(), other.GetOrigin())):
+        return False
+    return True
+
+
 def process_single_subject(args):
     subj_in_dir, subj_out_dir, mask_names, file_names = args
     all_files = os.listdir(subj_in_dir)
@@ -49,15 +68,15 @@ def process_single_subject(args):
     try:
         loaded_images = {}
         for img_name in found_images:
-            loaded_images[ img_name ] = sitk.ReadImage(os.path.join(subj_in_dir, img_name))
+            loaded_images[img_name] = _ensure_ras(sitk.ReadImage(os.path.join(subj_in_dir, img_name)))
 
         # --- EXTRACTION STRICTE DES VOIS ---
         for mask_name in found_masks:
             mask_path = os.path.join(subj_in_dir, mask_name)
-            mask_sitk = sitk.ReadImage(mask_path)
+            mask_sitk = _ensure_ras(sitk.ReadImage(mask_path))
             
             label_stats = sitk.LabelShapeStatisticsImageFilter()
-            label_stats.Execute(sitk.Cast(mask_sitk, sitk.sitkUInt8))
+            label_stats.Execute(sitk.Cast(mask_sitk > 0, sitk.sitkUInt8))
             
             if not label_stats.HasLabel(1):
                 continue
@@ -66,7 +85,7 @@ def process_single_subject(args):
             bbox = label_stats.GetBoundingBox(1)
             
             # Création du dossier de la région
-            voi_name = mask_name.split('.')[ 0 ]
+            voi_name = mask_name.split('.')[0]
             voi_out_dir = os.path.join(subj_out_dir, voi_name)
             os.makedirs(voi_out_dir, exist_ok=True)
             
@@ -78,6 +97,13 @@ def process_single_subject(args):
             sitk.WriteImage(mask_cropped, os.path.join(voi_out_dir, "mask.nii.gz"))
             
             for img_name, img_sitk in loaded_images.items():
+                if not _same_grid(mask_sitk, img_sitk):
+                    logging.warning(
+                        f"[{os.path.basename(subj_in_dir)}/{voi_name}] Grille incompatible entre {mask_name} "
+                        f"(size={mask_sitk.GetSize()}, orig={mask_sitk.GetOrigin()}) et {img_name} "
+                        f"(size={img_sitk.GetSize()}, orig={img_sitk.GetOrigin()}) -> ignore."
+                    )
+                    continue
                 img_cropped = roi_filter.Execute(img_sitk)
                 out_name = parse_file_name(img_name)
                 sitk.WriteImage(img_cropped, os.path.join(voi_out_dir, f'{out_name}.nii.gz'))

@@ -1,0 +1,265 @@
+import argparse
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import SimpleITK as sitk
+from tqdm import tqdm
+
+
+def _has_valid_pet_body_and_lesion(args: Tuple[str, str, str]) -> dict:
+    """Verifie la presence de pet* + body* et si lesion.nii.gz est present et non vide."""
+    domain, subj, root_dir = args
+    sitk.ProcessObject.SetGlobalWarningDisplay(False)
+
+    sdir = os.path.join(root_dir, domain, subj)
+    files = os.listdir(sdir)
+    has_pet = any(f.lower().startswith("pet") and f.endswith((".nii", ".nii.gz")) for f in files)
+    has_body = any(f.lower().startswith("body") and f.endswith((".nii", ".nii.gz")) for f in files)
+
+    has_lesion = False
+    lesion_path = os.path.join(sdir, "lesion.nii.gz")
+    if os.path.exists(lesion_path):
+        mask_img = sitk.ReadImage(lesion_path)
+        has_lesion = bool(np.any(sitk.GetArrayViewFromImage(mask_img) > 0))
+
+    return {
+        "domain": domain,
+        "subject_id": subj,
+        "valid_pet_body": has_pet and has_body,
+        "has_lesion": has_lesion,
+    }
+
+
+def scan_dataset(root_dir: str, num_workers: int = 16) -> pd.DataFrame:
+    """Scanne tous les domaines et retourne un DataFrame (domain, subject_id, valid_pet_body, has_lesion)."""
+    if not os.path.exists(root_dir):
+        raise FileNotFoundError(f"Dossier racine introuvable : {root_dir}")
+
+    domains = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
+    tasks = []
+    for d in domains:
+        dom_dir = os.path.join(root_dir, d)
+        for s in sorted(os.listdir(dom_dir)):
+            if os.path.isdir(os.path.join(dom_dir, s)):
+                tasks.append((d, s, root_dir))
+
+    rows = []
+    workers = min(num_workers, max(1, os.cpu_count() or 1))
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_has_valid_pet_body_and_lesion, t) for t in tasks]
+        for fut in tqdm(as_completed(futures), total=len(tasks), desc="Scan dataset (lesions + PET/body)", unit="patient"):
+            rows.append(fut.result())
+
+    df = pd.DataFrame(rows).sort_values(["domain", "subject_id"]).reset_index(drop=True)
+    return df
+
+
+def generate_custom_manifest(
+    scan_df: pd.DataFrame,
+    domain_rules: Dict[str, dict],
+    seed: int = 101,
+) -> pd.DataFrame:
+    """
+    Genere un manifeste (domain, subject_id, split, has_lesion) selon des regles explicites par domaine :
+      - train         : int obligatoire (peut etre 0, ex. curie ; jamais None)
+      - test          : int ou None (None = tout le reste part en test)
+      - train_lesions : int (quota de patients avec lesion mis dans train)
+    """
+    rng = np.random.RandomState(seed)
+    manifest_rows = []
+
+    for domain in sorted(domain_rules.keys()):
+        rule = domain_rules[domain]
+        n_train = rule.get("train")
+        n_test = rule.get("test")
+        n_train_lesions = rule.get("train_lesions", 0)
+
+        if n_train is None:
+            raise ValueError(f"Pour '{domain}', 'train' ne peut pas etre None (mettre 0 si exclu du train).")
+        if n_train < 0 or n_train_lesions < 0 or (n_test is not None and n_test < 0):
+            raise ValueError(f"Effectifs negatifs invalides pour '{domain}' : {rule}")
+
+        dom_df = scan_df[(scan_df["domain"] == domain) & (scan_df["valid_pet_body"])].copy()
+        if dom_df.empty:
+            print(f"⚠️ Domaine '{domain}' vide ou absent dans {domain_rules}.")
+            continue
+
+        lesion_ids = dom_df[dom_df["has_lesion"]]["subject_id"].tolist()
+        clean_ids = dom_df[~dom_df["has_lesion"]]["subject_id"].tolist()
+        rng.shuffle(lesion_ids)
+        rng.shuffle(clean_ids)
+
+        if n_train > len(dom_df):
+            raise ValueError(f"'{domain}' : train={n_train} demande mais seulement {len(dom_df)} patients disponibles.")
+
+        # 1. Remplissage du quota de lesions en train
+        take_les = min(n_train_lesions, n_train, len(lesion_ids))
+        if take_les < n_train_lesions:
+            print(f"⚠️ [{domain}] Quota train_lesions={n_train_lesions} impossible (dispo={len(lesion_ids)}), pris={take_les}.")
+
+        train_les = lesion_ids[:take_les]
+        rem_les = lesion_ids[take_les:]
+
+        # 2. Completion du train avec des patients sans lesion (puis fallback si manque de sans-lesion)
+        need_clean = n_train - take_les
+        take_clean = min(need_clean, len(clean_ids))
+        train_clean = clean_ids[:take_clean]
+        rem_clean = clean_ids[take_clean:]
+
+        extra_les_for_train = []
+        if take_clean < need_clean:
+            deficit = need_clean - take_clean
+            print(f"⚠️ [{domain}] Pas assez de patients sans lesion ({len(clean_ids)} dispo) : +{deficit} avec lesion ajoutes en train.")
+            extra_les_for_train = rem_les[:deficit]
+            rem_les = rem_les[deficit:]
+
+        train_ids = train_les + train_clean + extra_les_for_train
+        rng.shuffle(train_ids)
+
+        # 3. Tout le reste part en test (ou tronque a n_test si renseigne)
+        remaining_ids = rem_les + rem_clean
+        rng.shuffle(remaining_ids)
+        if n_test is None:
+            test_ids = remaining_ids
+        else:
+            if n_test > len(remaining_ids):
+                print(f"⚠️ [{domain}] test={n_test} demande mais seulement {len(remaining_ids)} restants.")
+            test_ids = remaining_ids[:n_test]
+
+        lesion_set = set(lesion_ids)
+        for sid in train_ids:
+            manifest_rows.append({"domain": domain, "subject_id": sid, "split": "train", "has_lesion": sid in lesion_set})
+        for sid in test_ids:
+            manifest_rows.append({"domain": domain, "subject_id": sid, "split": "test", "has_lesion": sid in lesion_set})
+
+    return pd.DataFrame(manifest_rows)
+
+
+def generate_seed42_legacy_manifest(
+    root_dir: str,
+    scan_df: pd.DataFrame,
+    legacy_split_config: List[List[int]],
+    seed: int = 42,
+) -> pd.DataFrame:
+    """
+    Reproduit exactement le split historiques seed=42 de MultiDomainUnlearningDataModule :
+      - Les domaines [0, 0] (curie) sont mis 100% en 'test'
+      - Pour les domaines actifs, rng.shuffle(sorted(subdirs)) avec seed=42 -> [:60] en 'train', [60:] en 'test'
+        (Note: les 15 premiers de 'test' correspondent exactement a l'ancien split val [60:75].)
+    """
+    all_domains = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
+    if len(legacy_split_config) != len(all_domains):
+        raise ValueError(f"legacy_split_config ({len(legacy_split_config)}) != domaines ({all_domains})")
+
+    valid_lookup = {
+        (r["domain"], r["subject_id"]): (r["valid_pet_body"], r["has_lesion"])
+        for _, r in scan_df.iterrows()
+    }
+
+    active_domains = []
+    active_configs = []
+    excluded_domains = []
+    for dom, cfg in zip(all_domains, legacy_split_config):
+        if cfg[0] == 0 and cfg[1] == 0:
+            excluded_domains.append(dom)
+        else:
+            active_domains.append(dom)
+            active_configs.append(cfg)
+
+    rng = np.random.RandomState(seed)
+    manifest_rows = []
+
+    for dom, cfg in zip(active_domains, active_configs):
+        dom_dir = os.path.join(root_dir, dom)
+        subjects = sorted([s for s in os.listdir(dom_dir) if os.path.isdir(os.path.join(dom_dir, s))])
+        rng.shuffle(subjects)
+
+        n_train = min(cfg[0], len(subjects))
+        train_names = subjects[:n_train]
+        test_names = subjects[n_train:]  # [60:75] = ancienne val, [75:] = surplus non utilise
+
+        for sid in train_names:
+            is_valid, has_les = valid_lookup.get((dom, sid), (False, False))
+            if is_valid:
+                manifest_rows.append({"domain": dom, "subject_id": sid, "split": "train", "has_lesion": has_les})
+        for sid in test_names:
+            is_valid, has_les = valid_lookup.get((dom, sid), (False, False))
+            if is_valid:
+                manifest_rows.append({"domain": dom, "subject_id": sid, "split": "test", "has_lesion": has_les})
+
+    for dom in excluded_domains:
+        dom_dir = os.path.join(root_dir, dom)
+        subjects = sorted([s for s in os.listdir(dom_dir) if os.path.isdir(os.path.join(dom_dir, s))])
+        for sid in subjects:
+            is_valid, has_les = valid_lookup.get((dom, sid), (False, False))
+            if is_valid:
+                manifest_rows.append({"domain": dom, "subject_id": sid, "split": "test", "has_lesion": has_les})
+
+    return pd.DataFrame(manifest_rows)
+
+
+def print_summary(manifest_df: pd.DataFrame, title: str) -> None:
+    print(f"\n=== {title} ===")
+    for dom, g in manifest_df.groupby("domain", sort=True):
+        tr = g[g["split"] == "train"]
+        te = g[g["split"] == "test"]
+        print(
+            f"  {dom:12s} | Total={len(g):3d} | "
+            f"Train={len(tr):3d} (lesions={int(tr['has_lesion'].sum()):2d}) | "
+            f"Test={len(te):3d} (lesions={int(te['has_lesion'].sum()):2d})"
+        )
+    print(
+        f"  {'TOTAL':12s} | Total={len(manifest_df):3d} | "
+        f"Train={int((manifest_df['split'] == 'train').sum()):3d} "
+        f"(lesions={int(manifest_df.loc[manifest_df['split'] == 'train', 'has_lesion'].sum()):3d}) | "
+        f"Test={int((manifest_df['split'] == 'test').sum()):3d} "
+        f"(lesions={int(manifest_df.loc[manifest_df['split'] == 'test', 'has_lesion'].sum()):3d})"
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Genere un manifeste CSV train/test fige pour PET-EARL.")
+    parser.add_argument("--root-dir", type=str, default="./data/PET-EARL/")
+    parser.add_argument("--output", "-o", type=str, default="./data/manifest.csv")
+    parser.add_argument("--mode", type=str, choices=["custom", "seed42"], default="custom")
+    parser.add_argument("--seed", type=int, default=101)
+    parser.add_argument("--workers", type=int, default=32)
+    args = parser.parse_args()
+
+    scan_df = scan_dataset(args.root_dir, num_workers=args.workers)
+
+    if args.mode == "seed42":
+        legacy_split_config = [[60, 15], [60, 15], [0, 0], [60, 15], [60, 15], [60, 15]]
+        out_df = generate_seed42_legacy_manifest(
+            args.root_dir,
+            scan_df=scan_df,
+            legacy_split_config=legacy_split_config,
+            seed=42,
+        )
+        title = f"Manifest Legacy (seed=42) -> {args.output}"
+    else:
+        # Regles explicites par domaine pour le manifeste standard :
+        # - train : obligatoire (jamais None ; 0 pour curie)
+        # - test  : entier ou None (None = tout le reste part en test)
+        # - train_lesions : quota de patients avec lesion inclus dans train
+        domain_rules = {
+            "a100":       {"train": 50, "test": None, "train_lesions": 10},
+            "chb":        {"train": 50, "test": None, "train_lesions": 10},
+            "curie":      {"train": 0,  "test": None, "train_lesions": 0},
+            "lacassagne": {"train": 50, "test": None, "train_lesions": 0},
+            "nantes":     {"train": 50, "test": None, "train_lesions": 25},
+            "rennes":     {"train": 50, "test": None, "train_lesions": 35},
+        }
+        out_df = generate_custom_manifest(scan_df, domain_rules=domain_rules, seed=args.seed)
+        title = f"Manifest Standard (seed={args.seed}) -> {args.output}"
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    out_df.to_csv(args.output, index=False)
+    print_summary(out_df, title)
+
+
+if __name__ == "__main__":
+    main()

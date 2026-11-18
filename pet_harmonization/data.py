@@ -2,6 +2,7 @@ from typing import *
 
 import os
 import numpy as np
+import pandas as pd
 import torch
 import multiprocessing
 
@@ -822,7 +823,10 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
         queue_max_length: int = 600,      
         samples_per_volume: int = 4,
         voi_filename: Optional[str] = None, # pour le recadrage à la VOI si besoin en inférence
-        seed: int = 42 # Ajout d'une seed pour garantir la reproductibilité du split
+        seed: int = 42, # Ajout d'une seed pour garantir la reproductibilité du split
+        manifest_csv: Optional[str] = None,
+        active_domains: Optional[List[str]] = None,
+        eval_splits: Union[str, Sequence[str]] = ("test",),
     ):
         super().__init__()
         self.root_dir = root_dir
@@ -834,6 +838,9 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
         self.samples_per_volume = samples_per_volume
         self.voi_filename = voi_filename
         self.seed = seed
+        self.manifest_csv = manifest_csv
+        self.active_domains = list(active_domains) if active_domains is not None else None
+        self.eval_splits = [eval_splits] if isinstance(eval_splits, str) else list(eval_splits)
         
         self.domain_to_id = {}
         self.train_subjects = []
@@ -880,9 +887,65 @@ class MultiDomainUnlearningDataModule(LightningDataModule):
                 tio_subjects.append(subject)
         return tio_subjects
 
+    def _setup_from_manifest(self):
+        """Charge train_subjects et val_subjects (test) depuis un fichier CSV fige."""
+        if not os.path.exists(self.manifest_csv):
+            raise FileNotFoundError(f"Manifeste CSV introuvable : {self.manifest_csv}")
+
+        df = pd.read_csv(self.manifest_csv, dtype={"domain": str, "subject_id": str, "split": str})
+        required_cols = {"domain", "subject_id", "split"}
+        missing_cols = required_cols - set(df.columns)
+        if missing_cols:
+            raise ValueError(f"Colonnes manquantes dans {self.manifest_csv} : {missing_cols}")
+
+        if self.active_domains is not None:
+            domain_names = sorted(self.active_domains)
+        else:
+            domain_names = sorted(df["domain"].unique().tolist())
+
+        for d in domain_names:
+            d_path = os.path.join(self.root_dir, d)
+            if not os.path.isdir(d_path):
+                raise FileNotFoundError(f"Domaine actif '{d}' introuvable dans {self.root_dir}")
+
+        self.domain_to_id = {name: i for i, name in enumerate(domain_names)}
+        print(f"Mapping Domaines Actifs (Manifest) : {self.domain_to_id} | eval_splits={self.eval_splits}")
+
+        self.train_subjects = []
+        self.val_subjects = []
+        rng = np.random.RandomState(self.seed)
+
+        for domain_name in domain_names:
+            domain_id = self.domain_to_id[domain_name]
+            domain_path = os.path.join(self.root_dir, domain_name)
+            sub_df = df[df["domain"] == domain_name]
+
+            train_names = sub_df[sub_df["split"] == "train"]["subject_id"].tolist()
+            eval_names = sub_df[sub_df["split"].isin(self.eval_splits)]["subject_id"].tolist()
+
+            print(
+                f"Domaine {domain_name:12} -> ID: {domain_id}, "
+                f"Train: {len(train_names):3d}, Eval({','.join(self.eval_splits)}): {len(eval_names):3d}"
+            )
+
+            self.train_subjects.extend(self._create_tio_subjects(train_names, domain_path, domain_name, domain_id))
+            self.val_subjects.extend(self._create_tio_subjects(eval_names, domain_path, domain_name, domain_id))
+
+        rng.shuffle(self.train_subjects)
+        rng.shuffle(self.val_subjects)
+
     def setup(self, stage=None):
         if not os.path.exists(self.root_dir):
             raise FileNotFoundError(f"Le dossier racine {self.root_dir} n'existe pas.")
+
+        if self.manifest_csv is not None:
+            self._setup_from_manifest()
+            print(f"\n[TorchIO] Total Global (Manifest) : {len(self.train_subjects)} Train, {len(self.val_subjects)} Val/Test.")
+            self.transform = tio.Compose([
+                Float32Lambda(),
+                tio.RandomFlip(axes=(0, 1, 2), p=0.5),
+            ])
+            return
 
         all_domain_names = sorted([d for d in os.listdir(self.root_dir) if os.path.isdir(os.path.join(self.root_dir, d))])
         
