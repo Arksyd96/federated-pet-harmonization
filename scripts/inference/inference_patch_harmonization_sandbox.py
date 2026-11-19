@@ -26,7 +26,7 @@ def process_subject(
     subject_name = subject['subject_name']
     subj_out_dir = batch['subject_path'][0]
     
-    filename = f"vae-3d-sandbox-{harmonization_mode}"
+    filename = f"{harmonization_mode}"
     pred_path = os.path.join(subj_out_dir, f"harmonized-pet-{filename}.nii.gz")
     
     print(f"\nTreating subject: {subject_name} ({curr_idx}/{length_loader}) [Mode: {harmonization_mode}]")
@@ -128,7 +128,7 @@ def main():
         #   - "gaussian" : injecte un bruit N(0,1) fixe (harmonisation dans le Typical Set)
         #   - "zero"     : injecte un vecteur de zéros (harmonisation centre absolu)
         #   - "original" : conserve le style propre du patient (avec alpha=1.0 -> 100% du style natif)
-        "harmonization_mode": "original",
+        "harmonization_mode": "gaussian",
         "global_gaussian_style": True,  # Si True en mode "gaussian", un seul vecteur aléatoire est partagé pour toute la cohorte
         
         # Checkpoints disponibles documentés :
@@ -147,7 +147,7 @@ def main():
         
         'patch_size': (16, 64, 64),
         'patch_overlap': (10, 16, 16),
-        'override': True,
+        'override': False,
 
         # Modèle
         "input_shape": (16, 64, 64),
@@ -163,11 +163,12 @@ def main():
         "fft_sigma": 7.5,
         "fft_learnable": False, # False = filtre fixe (pas de gradient)
         
-        # Configuration du Datamodule pour trouver les images à traiter
+        # Configuration du Datamodule (via manifest.csv)
         'datamodule': {
             "root_dir": "./data/PET-EARL/",
-            "split_config": [[0, 50], [0, 50], [0, 50], [0, 50], [0, 50], [0, 50]],
-            # "split_config": [[0, 4]],
+            "manifest_csv": "./data/manifest.csv",
+            "active_domains": ["curie"],  # ex: ["a100", "chb", "curie", "lacassagne", "nantes", "rennes"]
+            "eval_splits": ["test"],      # ["test"], ["train"], ou ["train", "test"]
             "batch_size": 16,
             "patch_size": [16, 64, 64],
             "num_workers": 4,
@@ -208,7 +209,7 @@ def main():
         if global_z_style.dim() == 1:
             global_z_style = global_z_style.unsqueeze(0)
 
-        active_mode = f"style-{key}"
+        active_mode = "median" if key in ("global-median", "global_median") else key
         print(f"📦 Style extrait activé depuis {dict_path} [clé='{key}'] (Norme = {global_z_style.norm():.3f})")
 
     else:
