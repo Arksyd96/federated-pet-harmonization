@@ -1,5 +1,5 @@
 # Journal de Développement — Harmonisation TEP par Unlearning VAE
-**Dernière mise à jour** : 18 Novembre 2026
+**Dernière mise à jour** : 20 Novembre 2026
 
 Ce fichier sert de **mémoire persistante** entre les sessions de travail (changements de poste, changements de modèle IA). Toute nouvelle observation, tentative ou conclusion doit être **ajoutée à la fin** sans supprimer les sections récentes ni les acquis architecturaux.
 
@@ -83,3 +83,17 @@ Plusieurs injections de `z_style` ont été testées à l'inférence (50 patient
    - Exécuter `scripts/utils/eval/evaluate_latent_unlearning.py` sur les checkpoints `epoch=039` vs `epoch=127` (*probing* groupé par patient + PCA/ARI/Kruskal-Wallis sur `z_content_raw`, `z_content_norm` et `z_style`).
 4. **Ré-entraînement propre & calibration d'échelle** :
    - Utiliser `./data/manifest.csv` pour les prochains entraînements, et évaluer comment éviter la dépendance d'échelle SUV liée à `InstanceNorm3d` + AdaIN pour permettre aussi une translation fidèle d'un domaine vers un autre.
+
+---
+
+## 5. Segmentation Lésionnelle sur `curie` via LION (20 Nov. 2026)
+
+- **Inférence `curie` achevée** : `harmonized-pet-gaussian.nii.gz` généré sur les 81 patients de `curie` (`scripts/inference/inference_patch_harmonization_sandbox.py`, `manifest_csv="./data/manifest.csv"`).
+- **Passage de `autoPET3` à `LION` (`lionz 1.1.0`)** :
+  - `MIC-DKFZ/autopet-3-submission` (`Dataset222_AutoPETIII_2024`) écarté car il impose 2 canaux (`_0000` CT + `_0001` PET), alors que les CT ne sont pas disponibles sur `curie`.
+  - Remplacé par **LION** (`ENHANCE-PET/LION`, paquet `lionz`, modèle `'fdg'` **PET-only** sans CT) via `scripts/inference/segment_curie_lion.py` : lit `harmonized-pet-gaussian.nii.gz` en `SimpleITK.Image` et sauvegarde `lesion.nii.gz` dans le même dossier (sans seuillage `< 5 SUV` en entrée pour préserver le contexte et la normalisation nnU-Net ; post-filtre optionnel `min_component_suvmax=None` par défaut).
+- **Mise à jour de l'environnement `work_p11` (`QUANTIF64`)** :
+  - Désinstallation du `nnunetv2` forké d'`autopet-3-submission` et installation de `lionz 1.1.0`.
+  - Le wheel PyPI par défaut (`torch 2.13.0+cu130`) étant incompatible avec le driver CUDA 12.2 (`12020`), réinstallation propre avec dépendances de `torch==2.13.0+cu126` et `torchvision==0.28.0` via `--index-url https://download.pytorch.org/whl/cu126` (`CUDA: True` validé).
+  - Notes sur les conflits de métadonnées `pip` restants (non bloquants pour Python) : `torchaudio 2.6.0+cu126` vs `torch 2.13.0+cu126`, et `lightning 2.5.0.post0` (`fsspec<2026.0`) vs `lionz 1.1.0` (`fsspec>=2026.6.0`, actuellement `2026.9.0`).
+- **Prochaine étape** : dès réception des masques originaux des spécialistes, vérifier la cohérence des masques `lesion.nii.gz` générés post-harmonisation avant l'extraction `SUVmax` et l'analyse de survie.
