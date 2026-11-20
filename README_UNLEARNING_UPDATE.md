@@ -97,3 +97,28 @@ Plusieurs injections de `z_style` ont été testées à l'inférence (50 patient
   - Le wheel PyPI par défaut (`torch 2.13.0+cu130`) étant incompatible avec le driver CUDA 12.2 (`12020`), réinstallation propre avec dépendances de `torch==2.13.0+cu126` et `torchvision==0.28.0` via `--index-url https://download.pytorch.org/whl/cu126` (`CUDA: True` validé).
   - Notes sur les conflits de métadonnées `pip` restants (non bloquants pour Python) : `torchaudio 2.6.0+cu126` vs `torch 2.13.0+cu126`, et `lightning 2.5.0.post0` (`fsspec<2026.0`) vs `lionz 1.1.0` (`fsspec>=2026.6.0`, actuellement `2026.9.0`).
 - **Prochaine étape** : dès réception des masques originaux des spécialistes, vérifier la cohérence des masques `lesion.nii.gz` générés post-harmonisation avant l'extraction `SUVmax` et l'analyse de survie.
+
+---
+
+## 6. Réorientation du Programme d'Évaluation Clinique & Règle `< 4 SUV` (20 Nov. 2026)
+
+### A. Nouvel Ordre de Priorité pour l'Évaluation
+Le programme d'évaluation clinique sur la cohorte `curie` et les lésions est réorganisé selon les 3 axes suivants :
+
+1. **Priorité N°1 — Préservation du signal biologique tumoral (`curie`, Colonne R)** :
+   - Dissocier la cohorte `curie` selon le sous-type histologique dans `data/FEDERATEDPET_V3.0_CURIE.xlsx` (colonne R / index 17 : `Type histologique du cancer du poumon non à petites cellules`) : **`ADENOCARCINOME` (n=51 sur disque) vs `CARCINOME EPIDERMOIDE` (CE, n=23 sur disque)**, en **excluant les patients `AUTRE` (n=7)** pour cette comparaison.
+   - Mesurer `SUVmax`, `SUVpeak` et `SUVmean` et tracer en **boxplot** l'écart entre sous-types sur `PET` standard puis sur `harmonized-pet-gaussian` : l'écart biologique présent sur `PET` doit être conservé après harmonisation.
+2. **Priorité N°2 — Distance de déplacement ComBat (avant vs après VAE)** :
+   - Appliquer ComBat sur les radiomiques des `PET` standards et mesurer l'amplitude du déplacement avant/après ComBat.
+   - Répéter ComBat sur les radiomiques extraites après harmonisation VAE (`harmonized-pet-gaussian`) : la distance induite par ComBat doit être nettement réduite puisque les images sont déjà harmonisées en amont.
+3. **Priorité N°3 — Analyse de survie (Kaplan-Meier + log-rank) sur `curie`** :
+   - Toujours d'actualité mais après les points 1 et 2. Calcul sur `data/FEDERATEDPET_V3.0_CURIE.xlsx` (`Date du premier cycle de traitement` → `Date du décès` / `Date de dernières nouvelles`, `Statut vital` : 55 `DECES`, 26 `VIVANT`, 0 date manquante) en séparant la cohorte selon la **médiane** de `SUVmax` (avec possibilité de `SUVmean` / `SUVpeak`).
+
+### B. Règle de Clip `< 4.0 SUV` Post-Segmentation (à la volée)
+- Clarification validée : le seuillage à **4.0 SUV** proposé par l'encadrante s'applique **post-segmentation** (et non pré-segmentation), selon l'**approche voxel-à-voxel (Approche 1)** : tout voxel du masque `lesion` dont la valeur SUV est `< 4.0` est passé de lésion à non-lésion (`0`), afin d'éliminer les activités non tumorales et se rapprocher des annotations expertes.
+- **Aucune modification sur disque des masques `lesion.nii.gz` existants** : le clip `< 4.0 SUV` est appliqué à la volée en mémoire lors de l'analyse.
+- **Notebook dédié créé** : `notebooks/evaluate_prognostic_harmonization.ipynb` (calcul direct depuis les NIfTI sans passer par `extract_radiomics.py`, avec Kaplan-Meier sur `SUVmax` après drop `< 4.0 SUV` et support `SUVmean`, prêt pour l'ajout ultérieur de `SUVpeak`).
+
+### C. Audit des Radiomiques Lésion & Dette Script Segmentation
+- **Audit `outputs/harmonization/*/lesion/mask_radiomics.csv` & `data/master_radiomics.csv`** : 253 patients ont des radiomiques `lesion` (`a100`: 39, `chb`: 81, `nantes`: 74, `rennes`: 58/59), mais uniquement sur `pet`, `earl1/2`, `gaussian-earl1/2` et d'anciens runs (`harmonized-pet-vae` / `harmonized-pet-standard-vae`) — **0 patient** n'a encore `harmonized-pet-gaussian` ni `curie` dans les CSV (bien que 101 patients aient déjà `harmonized-pet-gaussian.nii.gz` croppé dans `lesion/` depuis le 18 nov.). On conserve cet état tel quel pour le moment.
+- **À faire ultérieurement** : supprimer `scripts/inference/segment_curie_lion.py` et le remplacer par un script de segmentation LION générique applicable à n'importe quelle cohorte.
